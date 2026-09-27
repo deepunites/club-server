@@ -1,0 +1,581 @@
+using System.Collections.Concurrent;
+using System.Net;
+using System.Net.WebSockets;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+
+namespace Club.TrueNas.Tests;
+
+/// <summary>
+/// Поддельный middleware TrueNAS 25.10 для тестов адаптера: настоящий TLS (свой CA), JSON-RPC 2.0 по WebSocket,
+/// состояние в памяти и формы ошибок из исходников middleware (docs/research/truenas-api.md §4, §7.6, §8).
+/// </summary>
+public sealed class FakeTrueNas : IAsyncDisposable
+{
+    public const string Username = "clubsrv";
+    public const string ApiKey = "1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    private readonly WebApplication _app;
+    private readonly object _lock = new();
+    private readonly Dictionary<string, JsonObject> _datasets = new();
+    private readonly Dictionary<string, JsonObject> _snapshots = new();
+    private readonly Dictionary<int, JsonObject> _extents = new();
+    private readonly Dictionary<int, JsonObject> _targets = new();
+    private readonly Dictionary<int, JsonObject> _targetExtents = new();
+    private readonly List<(string Initiator, string Target)> _sessions = [];
+    private readonly ConcurrentDictionary<string, int> _dropAfterExecute = new();
+    private int _nextId = 1;
+
+    public string CaPath { get; }
+    public int Port { get; private set; }
+    public string[] OfferedVersions { get; set; } = ["v25.10.4", "v25.10.5", "v26.0.0"];
+    public string Release { get; set; } = "25.10.7";
+    public ConcurrentBag<string> Calls { get; } = [];
+    public int Connections;
+
+    private FakeTrueNas(WebApplication app, string caPath)
+    {
+        _app = app;
+        CaPath = caPath;
+    }
+
+    public static async Task<FakeTrueNas> StartAsync()
+    {
+        var (ca, server) = CreateCertificates();
+        var caPath = Path.Combine(Path.GetTempPath(), $"fake-truenas-ca-{Guid.NewGuid():N}.pem");
+        await File.WriteAllTextAsync(caPath, ca.ExportCertificatePem());
+
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Loopback, 0, l => l.UseHttps(server)));
+        var app = builder.Build();
+        var fake = new FakeTrueNas(app, caPath);
+        app.UseWebSockets();
+        app.MapGet("/api/versions", () => Results.Json(fake.OfferedVersions));
+        app.Map("/api/{version}", (HttpContext context) => fake.HandleSocketAsync(context));
+        await app.StartAsync();
+        fake.Port = new Uri(app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First()).Port;
+        return fake;
+    }
+
+    public TrueNasOptions Options(string? apiKey = null, string? caPath = null) => new()
+    {
+        Host = "localhost",
+        Port = Port,
+        Username = Username,
+        ApiKey = apiKey ?? ApiKey,
+        CaCertificatePath = caPath ?? CaPath,
+        PingIntervalSec = 1,
+        CallTimeoutSec = 10,
+    };
+
+    /// <summary>Следующий вызов метода выполнится, но ответ «потеряется»: соединение закроется (сбой посреди операции).</summary>
+    public void DropResponseAfterExecuting(string method) => _dropAfterExecute[method] = 1;
+
+    public void AddSession(string initiator, string targetName)
+    {
+        lock (_lock)
+        {
+            _sessions.Add((initiator, targetName));
+        }
+    }
+
+    public void ClearSessions()
+    {
+        lock (_lock)
+        {
+            _sessions.Clear();
+        }
+    }
+
+    public int Count(string kind)
+    {
+        lock (_lock)
+        {
+            return kind switch
+            {
+                "dataset" => _datasets.Count,
+                "snapshot" => _snapshots.Count,
+                "extent" => _extents.Count,
+                "target" => _targets.Count,
+                "targetextent" => _targetExtents.Count,
+                _ => throw new ArgumentException(kind),
+            };
+        }
+    }
+
+    public void AddFilesystem(string id)
+    {
+        lock (_lock)
+        {
+            _datasets[id] = Dataset(id, "FILESYSTEM", readOnly: false, origin: "", labels: []);
+        }
+    }
+
+    private async Task HandleSocketAsync(HttpContext context)
+    {
+        if (!context.WebSockets.IsWebSocketRequest)
+        {
+            context.Response.StatusCode = 400;
+            return;
+        }
+
+        Interlocked.Increment(ref Connections);
+        using var socket = await context.WebSockets.AcceptWebSocketAsync();
+        var authenticated = false;
+        var buffer = new byte[1 << 20];
+        while (socket.State == WebSocketState.Open)
+        {
+            ValueWebSocketReceiveResult result;
+            var count = 0;
+            do
+            {
+                result = await socket.ReceiveAsync(buffer.AsMemory(count), CancellationToken.None);
+                count += result.Count;
+            }
+            while (!result.EndOfMessage);
+
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
+                return;
+            }
+
+            var request = JsonNode.Parse(buffer.AsSpan(0, count))!.AsObject();
+            var id = request["id"]?.DeepClone();
+            var method = request["method"]!.GetValue<string>();
+            var args = request["params"] as JsonArray ?? [];
+            Calls.Add(method);
+
+            JsonObject response;
+            try
+            {
+                if (!authenticated && method != "auth.login_ex")
+                {
+                    throw CallError(207, "ENOTAUTHENTICATED", "Not authenticated");
+                }
+
+                var value = Dispatch(method, args, ref authenticated);
+                response = new JsonObject { ["jsonrpc"] = "2.0", ["id"] = id, ["result"] = value };
+            }
+            catch (RpcError error)
+            {
+                response = new JsonObject { ["jsonrpc"] = "2.0", ["id"] = id, ["error"] = error.Payload };
+            }
+
+            if (_dropAfterExecute.TryRemove(method, out _))
+            {
+                socket.Abort();
+                return;
+            }
+
+            await socket.SendAsync(Encoding.UTF8.GetBytes(response.ToJsonString()), WebSocketMessageType.Text, true, CancellationToken.None);
+        }
+    }
+
+    private JsonNode? Dispatch(string method, JsonArray args, ref bool authenticated)
+    {
+        lock (_lock)
+        {
+            switch (method)
+            {
+                case "auth.login_ex":
+                    var login = args[0]!.AsObject();
+                    var ok = login["mechanism"]?.GetValue<string>() == "API_KEY_PLAIN"
+                        && login["username"]?.GetValue<string>() == Username
+                        && login["api_key"]?.GetValue<string>() == ApiKey;
+                    authenticated = ok;
+                    return new JsonObject { ["response_type"] = ok ? "SUCCESS" : "AUTH_ERR" };
+                case "core.ping":
+                    return "pong";
+                case "system.version_short":
+                    return Release;
+
+                case "pool.dataset.query":
+                    return Query(_datasets.Values, args);
+                case "pool.dataset.create":
+                    return CreateZvol(args[0]!.AsObject());
+                case "pool.dataset.update":
+                    return UpdateDataset(args[0]!.GetValue<string>(), args[1]!.AsObject());
+                case "pool.dataset.attachments":
+                    return Attachments(args[0]!.GetValue<string>());
+                case "pool.dataset.delete":
+                    return DeleteDataset(args[0]!.GetValue<string>());
+
+                case "pool.snapshot.query":
+                    return Query(_snapshots.Values, args);
+                case "pool.snapshot.create":
+                    return CreateSnapshot(args[0]!.AsObject());
+                case "pool.snapshot.clone":
+                    return Clone(args[0]!.AsObject());
+                case "pool.snapshot.delete":
+                    return DeleteSnapshot(args[0]!.GetValue<string>(), args.Count > 1 ? args[1]!.AsObject() : new JsonObject());
+
+                case "iscsi.global.config":
+                    return new JsonObject { ["basename"] = "iqn.2005-10.org.freenas.ctl" };
+                case "iscsi.global.sessions":
+                    return new JsonArray(_sessions.Select(s => (JsonNode)new JsonObject
+                    {
+                        ["initiator"] = s.Initiator, ["initiator_addr"] = "10.0.1.12", ["target"] = "iqn.2005-10.org.freenas.ctl:" + s.Target,
+                    }).ToArray());
+                case "iscsi.extent.query":
+                    return Query(_extents.Values, args);
+                case "iscsi.extent.create":
+                    return CreateExtent(args[0]!.AsObject());
+                case "iscsi.extent.delete":
+                    return DeleteExtent(args[0]!.GetValue<int>());
+                case "iscsi.target.query":
+                    return Query(_targets.Values, args);
+                case "iscsi.target.create":
+                    return CreateTarget(args[0]!.AsObject());
+                case "iscsi.target.delete":
+                    return DeleteTarget(args[0]!.GetValue<int>(), args.Count > 1 && args[1]!.GetValue<bool>());
+                case "iscsi.targetextent.query":
+                    return Query(_targetExtents.Values, args);
+                case "iscsi.targetextent.create":
+                    return CreateTargetExtent(args[0]!.AsObject());
+                default:
+                    throw new RpcError(new JsonObject { ["code"] = -32601, ["message"] = "Method does not exist" });
+            }
+        }
+    }
+
+    private JsonNode CreateZvol(JsonObject data)
+    {
+        var name = data["name"]!.GetValue<string>();
+        if (data["volsize"] is null)
+        {
+            throw Validation("pool_dataset_create.volsize", "This field is required for VOLUME", 22);
+        }
+
+        if (_datasets.ContainsKey(name))
+        {
+            throw CallError(14, "EFAULT", $"Failed to create dataset: cannot create '{name}': dataset already exists");
+        }
+
+        var labels = (data["user_properties"] as JsonArray ?? []).ToDictionary(p => p!["key"]!.GetValue<string>(), p => p!["value"]!.GetValue<string>());
+        var dataset = Dataset(name, "VOLUME", readOnly: false, origin: "", labels);
+        _datasets[name] = dataset;
+        return dataset.DeepClone();
+    }
+
+    private JsonNode UpdateDataset(string id, JsonObject data)
+    {
+        var dataset = _datasets.GetValueOrDefault(id) ?? throw NotFound(id);
+        if (data["readonly"] is { } ro)
+        {
+            dataset["readonly"] = Prop(ro.GetValue<string>().ToLowerInvariant());
+            foreach (var extent in _extents.Values.Where(e => e["disk"]!.GetValue<string>() == "zvol/" + id && e["enabled"]!.GetValue<bool>()))
+            {
+                extent["ro"] = ro.GetValue<string>() == "ON";
+            }
+        }
+
+        foreach (var update in data["user_properties_update"] as JsonArray ?? [])
+        {
+            dataset["user_properties"]![update!["key"]!.GetValue<string>()] = Prop(update["value"]!.GetValue<string>());
+        }
+
+        return dataset.DeepClone();
+    }
+
+    private JsonNode Attachments(string id)
+    {
+        var extents = _extents.Values.Where(e => e["disk"]!.GetValue<string>() == "zvol/" + id).Select(e => e["id"]!.GetValue<int>()).ToArray();
+        return extents.Length == 0
+            ? new JsonArray()
+            : new JsonArray(new JsonObject { ["type"] = "iSCSI Extent", ["service"] = "iscsitarget", ["attachments"] = new JsonArray(extents.Select(x => (JsonNode)x).ToArray()) });
+    }
+
+    private JsonNode DeleteDataset(string id)
+    {
+        if (!_datasets.ContainsKey(id))
+        {
+            throw NotFound(id);
+        }
+
+        if (_snapshots.Values.Any(s => s["dataset"]!.GetValue<string>() == id))
+        {
+            throw CallError(14, "EFAULT", $"Failed to delete dataset: cannot destroy '{id}': volume has children\nuse '-r' to destroy the following datasets");
+        }
+
+        // Как в middleware: каскад по attachment delegates удаляет включённые экстенты и связки без проверки сессий.
+        foreach (var extent in _extents.Values.Where(e => e["disk"]!.GetValue<string>() == "zvol/" + id).ToList())
+        {
+            var extentId = extent["id"]!.GetValue<int>();
+            foreach (var te in _targetExtents.Where(te => te.Value["extent"]!.GetValue<int>() == extentId).ToList())
+            {
+                _targetExtents.Remove(te.Key);
+            }
+
+            _extents.Remove(extentId);
+        }
+
+        _datasets.Remove(id);
+        foreach (var deferred in _snapshots.Values.Where(s => s["defer_destroy"]?.GetValue<bool>() == true).ToList())
+        {
+            if (!ClonesOf(deferred["id"]!.GetValue<string>()).Any())
+            {
+                _snapshots.Remove(deferred["id"]!.GetValue<string>());
+            }
+        }
+
+        return true;
+    }
+
+    private JsonNode CreateSnapshot(JsonObject data)
+    {
+        var dataset = data["dataset"]!.GetValue<string>();
+        var name = data["name"]!.GetValue<string>();
+        var id = $"{dataset}@{name}";
+        if (!_datasets.ContainsKey(dataset))
+        {
+            throw Validation("snapshot_create.dataset", "Dataset not found", 2);
+        }
+
+        if (_snapshots.ContainsKey(id))
+        {
+            throw CallError(17, "EEXIST", $"Failed to snapshot {id}: dataset already exists");
+        }
+
+        var properties = new JsonObject();
+        foreach (var (key, value) in data["properties"] as JsonObject ?? [])
+        {
+            properties[key] = Prop(value!.GetValue<string>());
+        }
+
+        var snapshot = new JsonObject { ["id"] = id, ["name"] = id, ["dataset"] = dataset, ["snapshot_name"] = name, ["properties"] = properties };
+        _snapshots[id] = snapshot;
+        return snapshot.DeepClone();
+    }
+
+    private JsonNode Clone(JsonObject data)
+    {
+        var snapshot = data["snapshot"]!.GetValue<string>();
+        var target = data["dataset_dst"]!.GetValue<string>();
+        if (!_snapshots.ContainsKey(snapshot))
+        {
+            throw CallError(14, "EFAULT", $"Failed to clone snapshot: Snapshot {snapshot} not found");
+        }
+
+        if (_datasets.ContainsKey(target))
+        {
+            throw CallError(14, "EFAULT", $"Failed to clone snapshot: cannot create '{target}': dataset already exists");
+        }
+
+        var parent = target[..target.LastIndexOf('/')];
+        if (!_datasets.ContainsKey(parent))
+        {
+            throw CallError(14, "EFAULT", $"Failed to clone snapshot: parent '{parent}' does not exist");
+        }
+
+        var properties = (data["dataset_properties"] as JsonObject ?? []).ToDictionary(p => p.Key, p => p.Value!.GetValue<string>());
+        var readOnly = properties.Remove("readonly", out var ro) && ro == "on";
+        _datasets[target] = Dataset(target, "VOLUME", readOnly, origin: snapshot, properties);
+        return true;
+    }
+
+    private JsonNode DeleteSnapshot(string id, JsonObject options)
+    {
+        if (!_snapshots.TryGetValue(id, out var snapshot))
+        {
+            throw NotFound(id);
+        }
+
+        var clones = ClonesOf(id).ToList();
+        if (clones.Count > 0)
+        {
+            if (options["defer"]?.GetValue<bool>() != true)
+            {
+                throw Validation("options.defer", $"Please set this attribute as '{id}' snapshot has dependent clones: {string.Join(", ", clones)}", 22);
+            }
+
+            snapshot["defer_destroy"] = true;
+            return true;
+        }
+
+        _snapshots.Remove(id);
+        return true;
+    }
+
+    private JsonNode CreateExtent(JsonObject data)
+    {
+        var name = data["name"]!.GetValue<string>();
+        var disk = data["disk"]!.GetValue<string>();
+        if (_extents.Values.Any(e => e["name"]!.GetValue<string>() == name))
+        {
+            throw Validation("iscsi_extent_create.name", "Extent name must be unique", 22);
+        }
+
+        if (!_datasets.ContainsKey(disk["zvol/".Length..]))
+        {
+            throw Validation("iscsi_extent_create.disk", $"Device /dev/{disk} for volume does not exist", 2);
+        }
+
+        var id = _nextId++;
+        var extent = new JsonObject
+        {
+            ["id"] = id, ["name"] = name, ["type"] = "DISK", ["disk"] = disk, ["ro"] = data["ro"]?.GetValue<bool>() ?? false,
+            ["enabled"] = true, ["comment"] = data["comment"]?.GetValue<string>() ?? "",
+        };
+        _extents[id] = extent;
+        return extent.DeepClone();
+    }
+
+    private JsonNode DeleteExtent(int id)
+    {
+        var extent = _extents.GetValueOrDefault(id) ?? throw NotFound(id.ToString());
+        var targets = _targetExtents.Values.Where(te => te["extent"]!.GetValue<int>() == id).Select(te => te["target"]!.GetValue<int>()).ToList();
+        if (targets.Any(t => _sessions.Any(s => s.Target == _targets[t]["name"]!.GetValue<string>())))
+        {
+            throw CallError(14, "EFAULT", $"Associated target(s) {string.Join(",", targets)} are in use.");
+        }
+
+        foreach (var te in _targetExtents.Where(te => te.Value["extent"]!.GetValue<int>() == id).ToList())
+        {
+            _targetExtents.Remove(te.Key);
+        }
+
+        _extents.Remove(id);
+        return extent["id"]!.DeepClone();
+    }
+
+    private JsonNode CreateTarget(JsonObject data)
+    {
+        var name = data["name"]!.GetValue<string>();
+        if (_targets.Values.Any(t => t["name"]!.GetValue<string>() == name))
+        {
+            throw Validation("iscsi_target_create.name", "Target name already exists", 22);
+        }
+
+        var id = _nextId++;
+        var target = new JsonObject { ["id"] = id, ["name"] = name, ["alias"] = data["alias"]?.DeepClone(), ["mode"] = "ISCSI", ["groups"] = data["groups"]?.DeepClone() };
+        _targets[id] = target;
+        return target.DeepClone();
+    }
+
+    private JsonNode DeleteTarget(int id, bool force)
+    {
+        var target = _targets.GetValueOrDefault(id) ?? throw NotFound(id.ToString());
+        if (!force && _sessions.Any(s => s.Target == target["name"]!.GetValue<string>()))
+        {
+            throw CallError(14, "EFAULT", $"Target {target["name"]} is in use.");
+        }
+
+        foreach (var te in _targetExtents.Where(te => te.Value["target"]!.GetValue<int>() == id).ToList())
+        {
+            _targetExtents.Remove(te.Key);
+        }
+
+        _targets.Remove(id);
+        return true;
+    }
+
+    private JsonNode CreateTargetExtent(JsonObject data)
+    {
+        var target = data["target"]!.GetValue<int>();
+        var extent = data["extent"]!.GetValue<int>();
+        if (_targetExtents.Values.Any(te => te["extent"]!.GetValue<int>() == extent))
+        {
+            throw Validation("iscsi_targetextent_create.extent", "Extent is already in use", 22);
+        }
+
+        var id = _nextId++;
+        var row = new JsonObject { ["id"] = id, ["target"] = target, ["extent"] = extent, ["lunid"] = data["lunid"]?.GetValue<int>() ?? 0 };
+        _targetExtents[id] = row;
+        return row.DeepClone();
+    }
+
+    private IEnumerable<string> ClonesOf(string snapshot) =>
+        _datasets.Values.Where(d => d["origin"]!["rawvalue"]!.GetValue<string>() == snapshot).Select(d => d["id"]!.GetValue<string>());
+
+    private static JsonArray Query(IEnumerable<JsonObject> rows, JsonArray args)
+    {
+        var filters = args.Count > 0 && args[0] is JsonArray f ? f : [];
+        return new JsonArray(rows.Where(row => filters.All(filter =>
+        {
+            var field = filter![0]!.GetValue<string>();
+            var expected = filter[2]!.ToJsonString();
+            return filter[1]!.GetValue<string>() == "=" && row[field]?.ToJsonString() == expected;
+        })).Select(r => (JsonNode)r.DeepClone()).ToArray());
+    }
+
+    private static JsonObject Dataset(string id, string type, bool readOnly, string origin, Dictionary<string, string> labels)
+    {
+        var userProperties = new JsonObject();
+        foreach (var (key, value) in labels)
+        {
+            userProperties[key] = Prop(value);
+        }
+
+        return new JsonObject
+        {
+            ["id"] = id,
+            ["name"] = id,
+            ["type"] = type,
+            // 25.10: value в верхнем регистре, rawvalue — как в ZFS.
+            ["readonly"] = Prop(readOnly ? "on" : "off"),
+            ["origin"] = Prop(origin),
+            ["user_properties"] = userProperties,
+        };
+    }
+
+    private static JsonObject Prop(string raw) => new() { ["value"] = raw.ToUpperInvariant(), ["rawvalue"] = raw, ["source"] = "LOCAL" };
+
+    private static RpcError NotFound(string id) => Validation(null, $"{id} does not exist", 2);
+
+    private static RpcError Validation(string? attribute, string message, int errno) => new(new JsonObject
+    {
+        ["code"] = -32602,
+        ["message"] = "Invalid params",
+        ["data"] = new JsonObject { ["error"] = 22, ["errname"] = "EINVAL", ["extra"] = new JsonArray(new JsonArray(attribute, message, errno)) },
+    });
+
+    private static RpcError CallError(int errno, string errname, string reason) => new(new JsonObject
+    {
+        ["code"] = -32001,
+        ["message"] = "Method call error",
+        ["data"] = new JsonObject { ["error"] = errno, ["errname"] = errname, ["reason"] = $"[{errname}] {reason}", ["trace"] = null, ["extra"] = null },
+    });
+
+    private static (X509Certificate2 Ca, X509Certificate2 Server) CreateCertificates()
+    {
+        using var caKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var caRequest = new CertificateRequest("CN=Club Test CA", caKey, HashAlgorithmName.SHA256);
+        caRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+        caRequest.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
+        var ca = caRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(30));
+
+        using var serverKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var serverRequest = new CertificateRequest("CN=localhost", serverKey, HashAlgorithmName.SHA256);
+        var san = new SubjectAlternativeNameBuilder();
+        san.AddDnsName("localhost");
+        serverRequest.CertificateExtensions.Add(san.Build());
+        serverRequest.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension([new Oid("1.3.6.1.5.5.7.3.1")], false));
+        using var signed = serverRequest.Create(ca, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(29), RandomNumberGenerator.GetBytes(8));
+        var server = X509CertificateLoader.LoadPkcs12(signed.CopyWithPrivateKey(serverKey).Export(X509ContentType.Pkcs12), null);
+        return (ca, server);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _app.StopAsync();
+        await _app.DisposeAsync();
+        File.Delete(CaPath);
+    }
+
+    private sealed class RpcError(JsonObject payload) : Exception
+    {
+        public JsonObject Payload { get; } = payload;
+    }
+}
