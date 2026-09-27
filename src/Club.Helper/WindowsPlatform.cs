@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
@@ -77,7 +78,7 @@ public sealed class MachineIdentity : IMachineIdentity
     {
         if (_cached is not null)
         {
-            return _cached with { BootTime = BootTime() };
+            return _cached with { BootTime = BootTime(), DhcpServers = DhcpServers() };
         }
 
         var json = await PowerShell.RunAsync(
@@ -91,16 +92,31 @@ public sealed class MachineIdentity : IMachineIdentity
         var uuid = doc.RootElement.GetProperty("uuid").GetString() ?? "";
         var board = doc.RootElement.GetProperty("board").GetString() ?? "";
         var hwid = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"{uuid.Trim().ToLowerInvariant()}|{board.Trim()}")));
-        var macs = NetworkInterface.GetAllNetworkInterfaces()
-            .Where(n => n.NetworkInterfaceType is NetworkInterfaceType.Ethernet or NetworkInterfaceType.GigabitEthernet)
+        // Основная карта (поднята, есть IPv4-шлюз) — первой: по первому MAC сервер резервирует адрес места в Kea.
+        var macs = EthernetInterfaces()
+            .OrderByDescending(n => n.OperationalStatus == OperationalStatus.Up && n.GetIPProperties().GatewayAddresses.Any(g => g.Address.AddressFamily == AddressFamily.InterNetwork))
+            .ThenByDescending(n => n.OperationalStatus == OperationalStatus.Up)
             .Select(n => n.GetPhysicalAddress().GetAddressBytes())
             .Where(b => b.Length == 6)
             .Select(b => string.Join(':', b.Select(x => x.ToString("x2"))))
             .Distinct()
             .ToList();
         _cached = new MachineFacts(hwid, Environment.MachineName, macs, doc.RootElement.GetProperty("os").GetString() ?? "", BootTime());
-        return _cached;
+        return _cached with { DhcpServers = DhcpServers() };
     }
+
+    private static IEnumerable<NetworkInterface> EthernetInterfaces() =>
+        NetworkInterface.GetAllNetworkInterfaces().Where(n => n.NetworkInterfaceType is NetworkInterfaceType.Ethernet or NetworkInterfaceType.GigabitEthernet);
+
+    /// <summary>DHCP-серверы текущих аренд поднятых Ethernet-карт (на каждый отчёт заново: аренда могла смениться).</summary>
+    private static List<string> DhcpServers() =>
+        EthernetInterfaces()
+            .Where(n => n.OperationalStatus == OperationalStatus.Up)
+            .SelectMany(n => n.GetIPProperties().DhcpServerAddresses)
+            .Where(a => a.AddressFamily == AddressFamily.InterNetwork)
+            .Select(a => a.ToString())
+            .Distinct()
+            .ToList();
 
     private static DateTimeOffset BootTime() => DateTimeOffset.UtcNow - TimeSpan.FromMilliseconds(Environment.TickCount64);
 }

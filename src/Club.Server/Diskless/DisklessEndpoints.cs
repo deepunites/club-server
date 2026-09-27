@@ -19,7 +19,7 @@ public sealed record VolumeAssignment(string LibraryVersion, string Portal, stri
 
 public sealed record MountedVolume(string State, string? TargetIqn, string? LibraryVersion, string? DriveLetter, bool? ReadOnlyVerified, string? Error);
 
-public sealed record MachineStatus(string HelperVersion, DateTimeOffset? BootTime, MountedVolume Volume);
+public sealed record MachineStatus(string HelperVersion, DateTimeOffset? BootTime, MountedVolume Volume, IReadOnlyList<string>? DhcpServers);
 
 public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume);
 
@@ -138,9 +138,10 @@ public static partial class DisklessEndpoints
         }
 
         var v = request.Volume;
+        var dhcp = request.DhcpServers?.Where(d => Network.IpPlan.TryParseIp(d, out _)).Distinct().Take(8).ToList();
         await machines.RecordStatusAsync(
             machineId, request.HelperVersion, ClientIp(context), request.BootTime,
-            new VolumeReport(v.State, v.TargetIqn, v.LibraryVersion, v.ReadOnlyVerified, Truncate(v.Error, 2000)), clock.GetUtcNow());
+            new VolumeReport(v.State, v.TargetIqn, v.LibraryVersion, v.ReadOnlyVerified, Truncate(v.Error, 2000)), dhcp, clock.GetUtcNow());
         return Results.Json(new StatusAccepted(clock.GetUtcNow(), await AssignmentAsync(library, options)), ApiJson.Options);
     }
 

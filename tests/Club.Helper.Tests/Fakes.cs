@@ -123,6 +123,8 @@ public sealed class FakeProcesses : IProcessInspector
 
 public sealed class FakeIdentity(string hwid) : IMachineIdentity
 {
+    public List<string> DhcpServers { get; } = [];
+
     public Task<MachineFacts> ReadAsync(CancellationToken ct) =>
-        Task.FromResult(new MachineFacts(hwid, "PC-TEST", ["aa:bb:cc:dd:ee:01"], "Windows 11 Pro 24H2", DateTimeOffset.UtcNow.AddMinutes(-3)));
+        Task.FromResult(new MachineFacts(hwid, "PC-TEST", ["aa:bb:cc:dd:ee:01"], "Windows 11 Pro 24H2", DateTimeOffset.UtcNow.AddMinutes(-3), [.. DhcpServers]));
 }

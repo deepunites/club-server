@@ -62,10 +62,12 @@ public sealed class HelperEndToEndTests : IAsyncLifetime
         await _nas.DisposeAsync();
     }
 
+    private FakeIdentity? _identity;
+
     private HelperLoop Helper(HttpClient? http = null)
     {
         var options = new HelperOptions { ClubKey = ServerFixture.ClubKey, DiskWaitSec = 1 };
-        var identity = new FakeIdentity(_hwid);
+        var identity = _identity ??= new FakeIdentity(_hwid);
         var api = new DisklessApiClient(http ?? _server.CreateClient(), options, _credentials, identity);
         var volumes = new VolumeManager(_windows, _processes, options, TimeProvider.System, NullLogger<VolumeManager>.Instance);
         return new HelperLoop(api, volumes, _cache, identity, options, NullLogger<HelperLoop>.Instance);
@@ -111,6 +113,15 @@ public sealed class HelperEndToEndTests : IAsyncLifetime
         machine = await MachineAsync();
         Assert.Equal(("mounted", "v3"), (machine.VolumeState, machine.VolumeVersion));
         Assert.False(_windows.EverWritableOnline);
+    }
+
+    [Fact]
+    public async Task Helper_reports_dhcp_servers_it_sees()
+    {
+        var helper = Helper();
+        _identity!.DhcpServers.AddRange(["192.168.77.1", "192.168.1.1"]);
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(["192.168.77.1", "192.168.1.1"], (await MachineAsync()).DhcpServers ?? []);
     }
 
     [Fact]

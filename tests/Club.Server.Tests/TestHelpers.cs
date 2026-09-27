@@ -24,10 +24,10 @@ public sealed class TestMachine(HttpClient http, Guid machineId, string hwid, st
         osVersion = "Windows 11 Pro 24H2",
     };
 
-    public static async Task<(TestMachine Machine, JsonElement Response)> RegisterAsync(HttpClient http, string? hwid = null)
+    public static async Task<(TestMachine Machine, JsonElement Response)> RegisterAsync(HttpClient http, string? hwid = null, params string[] macs)
     {
         hwid ??= Guid.NewGuid().ToString("N");
-        using var request = new HttpRequestMessage(HttpMethod.Post, "/diskless/v1/machines/register") { Content = JsonContent.Create(RegisterBody(hwid)) };
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/diskless/v1/machines/register") { Content = JsonContent.Create(RegisterBody(hwid, macs)) };
         request.Headers.Add("X-Club-Key", ServerFixture.ClubKey);
         using var response = await http.SendAsync(request);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();

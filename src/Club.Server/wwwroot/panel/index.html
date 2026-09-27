@@ -12,7 +12,8 @@
   <header class="topbar">
     <div class="brand" data-i18n="brand">Панель клуба</div>
     <nav class="tabs">
-      <a class="tab active" href="#machines" data-i18n="tabMachines">Рабочие станции</a>
+      <a class="tab" href="#machines" data-view="machines" data-i18n="tabMachines">Рабочие станции</a>
+      <a class="tab" href="#network" data-view="network" data-i18n="tabNetwork">Сеть</a>
     </nav>
     <div class="topbar-right">
       <select id="lang" aria-label="Language">
@@ -25,6 +26,8 @@
   </header>
 
   <main>
+    <div id="dhcp-alert" class="alert" role="alert" hidden></div>
+
     <section id="login" class="card login" hidden>
       <h1 data-i18n="loginTitle">Вход в панель</h1>
       <p class="muted" data-i18n="loginHint">Токен администратора из настроек сервера (Panel:AdminToken).</p>
@@ -67,6 +70,65 @@
           <tbody id="rows"></tbody>
         </table>
         <p id="empty" class="muted empty" data-i18n="empty" hidden>Машин пока нет. Установите помощник бездиска на ПК — он появится здесь.</p>
+      </div>
+    </section>
+
+    <section id="network" hidden>
+      <div class="screen-head">
+        <h1 data-i18n="tabNetwork">Сеть</h1>
+        <div class="summary" id="net-summary"></div>
+      </div>
+
+      <p id="net-error" class="error" hidden></p>
+
+      <div id="net-warnings" class="card warnings" hidden>
+        <h2 data-i18n="netWarnings">Предупреждения</h2>
+        <ul id="net-warning-list"></ul>
+      </div>
+
+      <div class="net-grid">
+        <form id="net-form" class="card net-form" novalidate>
+          <h2 data-i18n="netPlan">Адресный план</h2>
+          <p id="net-unconfigured" class="notice" data-i18n="netUnconfigured" hidden></p>
+          <div class="fields">
+            <label><span data-i18n="fSubnet">Подсеть</span><input name="subnet" class="mono" required></label>
+            <label><span data-i18n="fInterface">Интерфейс</span><input name="interface" class="mono" list="net-interfaces" required></label>
+            <label><span data-i18n="fDhcpServer">DHCP</span><input name="dhcpServer" class="mono" required></label>
+            <label><span data-i18n="fGateway">Шлюз</span><input name="gateway" class="mono" required></label>
+            <label class="wide"><span data-i18n="fDns">DNS</span><input name="dnsServers" class="mono" required></label>
+            <label><span data-i18n="fPoolStart">Пул с</span><input name="poolStart" class="mono" required></label>
+            <label><span data-i18n="fPoolEnd">Пул по</span><input name="poolEnd" class="mono" required></label>
+            <label><span data-i18n="fReservedStart">IP места №1</span><input name="reservedStart" class="mono" required></label>
+            <label><span data-i18n="fLeaseMin">Аренда, мин</span><input name="leaseTimeSec" type="number" min="5" max="10080" required></label>
+            <label><span data-i18n="fKeaSubnetId">ID подсети</span><input name="keaSubnetId" type="number" min="1" required></label>
+          </div>
+          <datalist id="net-interfaces"></datalist>
+          <p id="net-capacity" class="muted"></p>
+          <p id="net-form-error" class="error" hidden></p>
+          <p id="net-saved" class="ok-text" data-i18n="netSaved" hidden></p>
+          <div class="form-actions">
+            <button type="button" class="ghost" id="net-download" data-i18n="netDownload">Скачать kea-dhcp4.conf</button>
+            <button type="submit" id="net-save" data-i18n="save">Сохранить</button>
+          </div>
+          <p class="muted small" data-i18n="netDownloadHint"></p>
+        </form>
+
+        <div class="table-wrap">
+          <h2 class="table-title" data-i18n="netReservations">Резервации DHCP</h2>
+          <table>
+            <thead>
+              <tr>
+                <th data-i18n="colNumber">№</th>
+                <th data-i18n="colName">Имя</th>
+                <th data-i18n="colMac">MAC</th>
+                <th data-i18n="colIp">IP</th>
+                <th data-i18n="colHostname">Имя хоста</th>
+                <th data-i18n="colProblem">Проблема</th>
+              </tr>
+            </thead>
+            <tbody id="net-rows"></tbody>
+          </table>
+        </div>
       </div>
     </section>
   </main>

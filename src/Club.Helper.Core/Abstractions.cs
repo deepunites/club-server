@@ -55,7 +55,11 @@ public interface IProcessInspector
     Task<IReadOnlyList<string>> ProcessesRunningFromAsync(char driveLetter, CancellationToken ct);
 }
 
-public sealed record MachineFacts(string Hwid, string Hostname, IReadOnlyList<string> MacAddresses, string OsVersion, DateTimeOffset BootTime);
+/// <summary>
+/// Факты о машине. <c>MacAddresses</c> — первым MAC основной карты (с IPv4-шлюзом): по нему сервер делает резервацию DHCP.
+/// <c>DhcpServers</c> — кто выдал текущие аренды; чужой адрес здесь — чужой DHCP в сети клуба.
+/// </summary>
+public sealed record MachineFacts(string Hwid, string Hostname, IReadOnlyList<string> MacAddresses, string OsVersion, DateTimeOffset BootTime, IReadOnlyList<string>? DhcpServers = null);
 
 public interface IMachineIdentity
 {

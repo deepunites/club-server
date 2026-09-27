@@ -3,6 +3,7 @@ using Club.Server.Auth;
 using Club.Server.Data;
 using Club.Server.Diskless;
 using Club.Server.Library;
+using Club.Server.Network;
 using Club.Server.Panel;
 using Club.TrueNas;
 
@@ -14,6 +15,7 @@ var authOptions = builder.Configuration.GetSection("Auth").Get<AuthOptions>() ??
 var libraryOptions = builder.Configuration.GetSection("Library").Get<LibraryOptions>() ?? new LibraryOptions();
 var trueNasOptions = builder.Configuration.GetSection("TrueNas").Get<TrueNasOptions>() ?? new TrueNasOptions();
 var panelOptions = builder.Configuration.GetSection("Panel").Get<PanelOptions>() ?? new PanelOptions();
+var keaOptions = builder.Configuration.GetSection("Kea").Get<KeaOptions>() ?? new KeaOptions();
 
 builder.Services.ConfigureHttpJsonOptions(o => ApiJson.Configure(o.SerializerOptions));
 builder.Services.AddSingleton(TimeProvider.System);
@@ -25,6 +27,14 @@ builder.Services.AddSingleton<MachineAuthenticator>();
 builder.Services.AddSingleton(libraryOptions);
 builder.Services.AddSingleton(trueNasOptions);
 builder.Services.AddSingleton(panelOptions);
+builder.Services.AddSingleton(keaOptions);
+builder.Services.AddSingleton<NetworkRepository>();
+builder.Services.AddSingleton<KeaHostSync>();
+builder.Services.AddSingleton<NetworkState>();
+if (builder.Configuration.GetValue("Network:RunWorker", true))
+{
+    builder.Services.AddHostedService<NetworkWorker>();
+}
 builder.Services.AddSingleton<LibraryRepository>();
 builder.Services.AddSingleton<TrueNasClient>();
 builder.Services.AddSingleton<TrueNasStorage>();
@@ -50,6 +60,7 @@ app.UseMiddleware<PanelAuthMiddleware>();
 app.MapDisklessEndpoints();
 app.MapLibraryPanelEndpoints();
 app.MapMachinesPanelEndpoints();
+app.MapNetworkPanelEndpoints();
 app.MapGet("/", () => Results.Redirect("/panel/"));
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 

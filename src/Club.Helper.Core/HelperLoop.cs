@@ -91,7 +91,7 @@ public sealed class HelperLoop(DisklessApiClient api, VolumeManager volumes, IAs
         try
         {
             var facts = await identity.ReadAsync(ct);
-            return await api.ReportStatusAsync(new MachineStatus(options.HelperVersion, facts.BootTime, report), ct);
+            return await api.ReportStatusAsync(new MachineStatus(options.HelperVersion, facts.BootTime, report, facts.DhcpServers), ct);
         }
         catch (Exception ex) when (ex is ServerUnavailableException or PendingApprovalException)
         {

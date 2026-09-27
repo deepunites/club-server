@@ -253,7 +253,7 @@ public sealed class LibraryRepository(NpgsqlDataSource db)
     // ---- предупреждения сверки -------------------------------------------------------------------------------
 
     /// <summary>Заменяет набор активных предупреждений: новые добавляются, повторные обновляют last_seen, пропавшие закрываются.</summary>
-    public async Task ReplaceWarningsAsync(IReadOnlyCollection<(string Kind, string Subject, string Message)> warnings, DateTimeOffset now)
+    public async Task ReplaceWarningsAsync(IReadOnlyCollection<(string Kind, string Subject, string Message)> warnings, DateTimeOffset now, string source = "library")
     {
         await using var c = await db.OpenConnectionAsync();
         await using var tx = await c.BeginTransactionAsync();
@@ -261,26 +261,30 @@ public sealed class LibraryRepository(NpgsqlDataSource db)
         {
             await c.ExecuteAsync(
                 """
-                INSERT INTO storage_warnings (kind, subject, message, first_seen, last_seen)
-                VALUES (@kind, @subject, @message, @now, @now)
-                ON CONFLICT (kind, subject) DO UPDATE SET message = EXCLUDED.message, last_seen = @now,
+                INSERT INTO storage_warnings (kind, subject, message, first_seen, last_seen, source)
+                VALUES (@kind, @subject, @message, @now, @now, @source)
+                ON CONFLICT (kind, subject) DO UPDATE SET message = EXCLUDED.message, last_seen = @now, source = EXCLUDED.source,
                     first_seen = CASE WHEN storage_warnings.resolved_at IS NULL THEN storage_warnings.first_seen ELSE @now END,
                     resolved_at = NULL
                 """,
-                new { kind, subject, message, now }, tx);
+                new { kind, subject, message, now, source }, tx);
         }
 
         var keys = warnings.Select(w => w.Kind + "\u0001" + w.Subject).ToArray();
         await c.ExecuteAsync(
-            "UPDATE storage_warnings SET resolved_at = @now WHERE resolved_at IS NULL AND NOT (kind || chr(1) || subject = ANY(@keys))",
-            new { now, keys }, tx);
+            "UPDATE storage_warnings SET resolved_at = @now WHERE resolved_at IS NULL AND source = @source AND NOT (kind || chr(1) || subject = ANY(@keys))",
+            new { now, keys, source }, tx);
         await tx.CommitAsync();
     }
 
-    public async Task<IReadOnlyList<StorageWarning>> ActiveWarningsAsync()
+    /// <summary>Активные предупреждения; <paramref name="source"/> — только одного источника (library, network).</summary>
+    public async Task<IReadOnlyList<StorageWarning>> ActiveWarningsAsync(string? source = "library")
     {
         await using var c = await db.OpenConnectionAsync();
         return (await c.QueryAsync<StorageWarning>(
-            "SELECT kind, subject, message, first_seen AS FirstSeen, last_seen AS LastSeen FROM storage_warnings WHERE resolved_at IS NULL ORDER BY kind, subject")).ToList();
+            """
+            SELECT kind, subject, message, first_seen AS FirstSeen, last_seen AS LastSeen FROM storage_warnings
+            WHERE resolved_at IS NULL AND (@source::text IS NULL OR source = @source) ORDER BY kind, subject
+            """, new { source })).ToList();
     }
 }

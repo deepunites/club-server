@@ -240,11 +240,11 @@
      "macAddresses": {
       "type": "array",
       "minItems": 1,
+      "description": "MAC сетевых карт в нижнем регистре; нужны для DHCP/PXE и перезаливки.",
       "items": {
        "type": "string",
        "pattern": "^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"
-      },
-      "description": "MAC сетевых карт в нижнем регистре; нужны для DHCP/PXE и перезаливки."
+      }
      },
      "helperVersion": {
       "type": "string"
@@ -419,6 +419,15 @@
      },
      "volume": {
       "$ref": "#/components/schemas/MountedVolume"
+     },
+     "dhcpServers": {
+      "type": "array",
+      "maxItems": 8,
+      "description": "IPv4-адреса DHCP-серверов, выдавших текущие аренды поднятых Ethernet-карт. Сервер сравнивает их со своим DHCP: чужой адрес — предупреждение «чужой DHCP в сети клуба». Поле необязательное; не прислано — прежнее значение сохраняется, пустой массив — ПК аренд не имеет (статический адрес).",
+      "items": {
+       "type": "string",
+       "format": "ipv4"
+      }
      }
     }
    },

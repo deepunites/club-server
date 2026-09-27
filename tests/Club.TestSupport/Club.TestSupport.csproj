@@ -17,4 +17,8 @@
     <PackageReference Include="xunit" Version="2.9.3" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="Kea\dhcpdb_create-29.0.pgsql" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

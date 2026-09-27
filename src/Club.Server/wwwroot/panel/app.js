@@ -1,4 +1,4 @@
-// Экран «Рабочие станции». Без сборки и внешних зависимостей: панель работает в клубе без интернета.
+// Экраны «Рабочие станции» и «Сеть». Без сборки и внешних зависимостей: панель работает в клубе без интернета.
 (() => {
   "use strict";
 
@@ -12,6 +12,12 @@
   let dataJson = "";
   let timer = null;
   let editing = null;
+  let view = "machines";
+  let net = null;
+  let netJson = "";
+  let netSettings = null;
+  let formDirty = false;
+  const NET_FIELDS = ["subnet", "interface", "dhcpServer", "gateway", "dnsServers", "poolStart", "poolEnd", "reservedStart", "leaseTimeSec", "keaSubnetId"];
 
   function safeGet(storage, key) {
     try { return storage.getItem(key); } catch { return null; }
@@ -62,6 +68,7 @@
       const body = await response.json().catch(() => null);
       const error = new Error(body?.error?.message || `HTTP ${response.status}`);
       error.reason = body?.error?.details?.reason;
+      error.details = body?.error?.details;
       throw error;
     }
     return response.status === 204 ? null : response.json();
@@ -166,6 +173,180 @@
     renderRows();
   }
 
+  // ---------- Сеть ----------
+
+  // Красная плашка на любом экране: чужой DHCP раздаёт адреса в сети клуба.
+  function renderDhcpAlert() {
+    const foreign = net?.foreignDhcp ?? [];
+    $("dhcp-alert").hidden = foreign.length === 0;
+    $("dhcp-alert").replaceChildren(...foreign.map((f) => el("p", {}, t("dhcpAlert", { server: f.server, machines: f.seenBy.join(", ") }))));
+  }
+
+  function warningText(w) {
+    const key = `warn_${w.kind}`;
+    const text = t(key, { subject: w.subject });
+    return text === key ? w.message : text;
+  }
+
+  function renderNetSummary() {
+    const chips = [];
+    const chip = (kind, text, title) => chips.push(el("span", { class: "chip" }, badge(kind, text, title)));
+    if (!net.keaEnabled) chip("idle", t("keaOff"));
+    else if (!net.sync) chip("idle", t("keaNever"));
+    else if (net.sync.error) chip("bad", t("keaUnavailable"), net.sync.error);
+    else if (!net.sync.schemaOk) chip("bad", t("keaSchemaBad", { v: net.sync.schemaVersion ?? "—" }));
+    else chip("ok", t("keaSchema", { v: net.sync.schemaVersion }));
+    if (net.sync?.at) chips.push(el("span", { class: "chip" }, `${t("keaSynced")}: `, ago(net.sync.at)));
+    $("net-summary").replaceChildren(...chips);
+  }
+
+  function renderNetwork() {
+    if (!net) return;
+    renderDhcpAlert();
+    if (view !== "network") return;
+    renderNetSummary();
+    $("net-unconfigured").hidden = net.configured;
+    $("net-warnings").hidden = net.warnings.length === 0;
+    $("net-warning-list").replaceChildren(...net.warnings.map((w) => el("li", { title: w.message }, warningText(w), " · ", ago(w.lastSeen))));
+    $("net-rows").replaceChildren(...net.reservations.map((r) => el("tr", {},
+      el("td", { class: "num" }, r.seat),
+      el("td", {}, r.name),
+      el("td", { class: "mono" }, orDash(r.mac, true)),
+      el("td", { class: "mono" }, orDash(r.ip, true)),
+      el("td", { class: "mono" }, orDash(r.hostname, true)),
+      el("td", {}, r.problem ? badge("warn", t(`problem_${r.problem}`)) : dash()))));
+  }
+
+  function renderCapacity() {
+    if (!netSettings) return;
+    $("net-capacity").textContent = t("netCapacity", { n: netSettings.seatCapacity, start: netSettings.reservedStart });
+  }
+
+  function fillForm(s) {
+    const form = $("net-form");
+    for (const name of NET_FIELDS) {
+      const value = name === "dnsServers" ? s.dnsServers.join(", ") : name === "leaseTimeSec" ? Math.round(s.leaseTimeSec / 60) : s[name];
+      form.elements[name].value = value;
+      form.elements[name].classList.remove("invalid");
+    }
+    form.querySelectorAll(".field-error").forEach((node) => node.remove());
+    $("net-interfaces").replaceChildren(...(s.serverInterfaces ?? []).map((name) => el("option", { value: name })));
+    formDirty = false;
+    renderCapacity();
+  }
+
+  async function loadSettings(force) {
+    if (formDirty && !force) return;
+    try {
+      netSettings = await api("/network/settings");
+      fillForm(netSettings);
+    } catch (error) {
+      if (error.message === "unauthorized") return;
+      $("net-error").textContent = t("loadFailed", { error: error.message });
+      $("net-error").hidden = false;
+    }
+  }
+
+  async function loadNetwork() {
+    try {
+      const fresh = await api("/network/status");
+      const json = JSON.stringify(fresh);
+      $("net-error").hidden = true;
+      if (json !== netJson) {
+        net = fresh;
+        netJson = json;
+        renderNetwork();
+      }
+    } catch (error) {
+      if (error.message === "unauthorized") return;
+      $("net-error").textContent = t("loadFailed", { error: error.message });
+      $("net-error").hidden = false;
+    }
+  }
+
+  async function saveNetwork(event) {
+    event.preventDefault();
+    const form = $("net-form");
+    const value = (name) => form.elements[name].value.trim();
+    const body = {
+      subnet: value("subnet"),
+      interface: value("interface"),
+      dhcpServer: value("dhcpServer"),
+      gateway: value("gateway"),
+      dnsServers: value("dnsServers").split(/[\s,;]+/).filter(Boolean),
+      poolStart: value("poolStart"),
+      poolEnd: value("poolEnd"),
+      reservedStart: value("reservedStart"),
+      leaseTimeSec: Math.round(Number(value("leaseTimeSec")) * 60),
+      keaSubnetId: Number(value("keaSubnetId")),
+    };
+    form.querySelectorAll(".field-error").forEach((node) => node.remove());
+    form.querySelectorAll("input.invalid").forEach((node) => node.classList.remove("invalid"));
+    $("net-form-error").hidden = true;
+    $("net-saved").hidden = true;
+    $("net-save").disabled = true;
+    try {
+      netSettings = await api("/network/settings", { method: "PUT", body: JSON.stringify(body) });
+      fillForm(netSettings);
+      $("net-saved").hidden = false;
+      netJson = "";
+      await loadNetwork();
+    } catch (error) {
+      const errors = error.details?.errors ?? (error.details?.field ? [error.details] : []);
+      for (const e of errors) {
+        const input = form.elements[e.field];
+        if (!input) continue;
+        input.classList.add("invalid");
+        input.after(el("span", { class: "field-error" }, t(`reason_${e.reason}`)));
+      }
+      if (errors.length === 0) {
+        $("net-form-error").textContent = error.message;
+        $("net-form-error").hidden = false;
+      }
+    } finally {
+      $("net-save").disabled = false;
+    }
+  }
+
+  async function downloadConfig() {
+    try {
+      const response = await fetch(API + "/network/kea-dhcp4.conf", { headers: { Authorization: `Bearer ${token}` } });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.error?.details?.reason === "notConfigured" ? t("netUnconfigured") : body?.error?.message || `HTTP ${response.status}`);
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const link = el("a", { href: url, download: "kea-dhcp4.conf" });
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      $("net-form-error").textContent = error.message;
+      $("net-form-error").hidden = false;
+    }
+  }
+
+  // ---------- Навигация ----------
+
+  function route() {
+    view = location.hash === "#network" ? "network" : "machines";
+    document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === view));
+    if (!token) return;
+    $("machines").hidden = view !== "machines";
+    $("network").hidden = view !== "network";
+    if (view === "network") {
+      netJson = "";
+      loadSettings(false);
+    }
+    refresh();
+  }
+
+  function refresh() {
+    if (view === "machines") load();
+    loadNetwork();
+  }
+
   async function load() {
     try {
       const fresh = await api("/machines");
@@ -227,11 +408,14 @@
 
   function showApp() {
     $("login").hidden = true;
-    $("machines").hidden = false;
     $("logout").hidden = false;
-    load();
+    route();
     clearInterval(timer);
-    timer = setInterval(() => { if (!document.hidden && !$("edit").open) load(); }, REFRESH_MS);
+    timer = setInterval(() => {
+      if (document.hidden || $("edit").open) return;
+      refresh();
+      refreshAgo();
+    }, REFRESH_MS);
   }
 
   function logout() {
@@ -239,6 +423,8 @@
     safeSet(sessionStorage, "panel.token", null);
     clearInterval(timer);
     $("machines").hidden = true;
+    $("network").hidden = true;
+    $("dhcp-alert").hidden = true;
     $("logout").hidden = true;
     $("login").hidden = false;
   }
@@ -266,11 +452,17 @@
       applyStaticTexts();
       dataJson = "";
       render();
+      renderNetwork();
+      renderCapacity();
     });
     $("login-form").addEventListener("submit", login);
     $("logout").addEventListener("click", logout);
     $("edit-form").addEventListener("submit", saveEdit);
     $("edit-cancel").addEventListener("click", () => $("edit").close());
+    $("net-form").addEventListener("submit", saveNetwork);
+    $("net-form").addEventListener("input", () => { formDirty = true; $("net-saved").hidden = true; });
+    $("net-download").addEventListener("click", downloadConfig);
+    window.addEventListener("hashchange", route);
     if (token) showApp(); else logout();
   });
 })();

@@ -50,3 +50,20 @@ bootTime, volume { state, libraryVersion, readOnlyVerified, outdated, error }, r
 
 `status`: `pendingApproval` → `maintenance` → `neverSeen` / `online` (отчёт помощника не старше 90 с) / `offline`.
 Время из будущего (сбитые часы) считается невменяемым: в ответе `null`, на экране прочерк, в логе предупреждение.
+
+## Сеть
+
+Экран «Сеть» (`/panel/#network`). Подробно про Kea — `docs/network.md`.
+
+| Метод и путь | Что делает | Ответы |
+|---|---|---|
+| `GET /network/settings` | Адресный план: `configured, subnet, mask, keaSubnetId, interface, dhcpServer, gateway, dnsServers, poolStart, poolEnd, reservedStart, leaseTimeSec, seatCapacity, serverInterfaces` | 200 |
+| `PUT /network/settings` | Сохранить план (все поля, кроме вычисляемых) и сразу синхронизировать резервации Kea | 200 (план); 400 |
+| `GET /network/status` | `configured, keaEnabled, sync { at, schemaOk, schemaVersion, desired, inserted, updated, deleted, error }?, foreignDhcp [{ server, seenBy }], reservations [{ seat, name, mac, ip, hostname, problem }], warnings` | 200 |
+| `GET /network/kea-dhcp4.conf` | Конфиг Kea для `/etc/kea/kea-dhcp4.conf` | 200; 409 (`notConfigured`) |
+
+400 при сохранении: `details = { field, reason, errors: [{ field, reason }] }`. Причины: `format`, `outsideSubnet`,
+`notNetworkAddress`, `beforeStart`, `insidePool`, `coversInfrastructure`, `range`.
+
+`sync` отсутствует, пока запись в Kea выключена (`Kea:Enabled`) или план не сохранён. `warnings` — источник
+`network`: `manualReservation`, `seatOutOfRange`, `noMac`, `duplicateMac`, `keaSchema`, `keaUnavailable`, `foreignDhcp`.
