@@ -1,3 +1,4 @@
+using Club.TestSupport;
 using FluentMigrator.Runner;
 using Microsoft.Extensions.DependencyInjection;
 

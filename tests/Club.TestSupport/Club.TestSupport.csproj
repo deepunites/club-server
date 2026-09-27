@@ -8,4 +8,13 @@
     <ProjectReference Include="..\..\src\Club.TrueNas\Club.TrueNas.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Club.Server\Club.Server.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.12" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+  </ItemGroup>
+
 </Project>
