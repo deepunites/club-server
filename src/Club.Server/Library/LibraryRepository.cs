@@ -16,6 +16,7 @@ public sealed class LibraryVersion
     public string? TargetIqn { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
     public DateTimeOffset? PublishedAt { get; init; }
+    public DateTimeOffset? RetiredAt { get; init; }
     public string? LastError { get; init; }
 }
 
@@ -28,6 +29,9 @@ public sealed class StorageOperation
     public string? Step { get; init; }
     public int Attempts { get; init; }
     public string? LastError { get; init; }
+    public string? RequestedBy { get; init; }
+    public DateTimeOffset CreatedAt { get; init; }
+    public DateTimeOffset UpdatedAt { get; init; }
 }
 
 public sealed class StorageWarning
@@ -46,7 +50,12 @@ public sealed class LibraryRepository(NpgsqlDataSource db)
     private const string VersionColumns = """
         id, label, state, snapshot_id AS SnapshotId, clone_id AS CloneId, extent_name AS ExtentName,
         target_name AS TargetName, target_iqn AS TargetIqn, created_at AS CreatedAt, published_at AS PublishedAt,
-        last_error AS LastError
+        retired_at AS RetiredAt, last_error AS LastError
+        """;
+
+    private const string OperationColumns = """
+        id, kind, version_id AS VersionId, status, step, attempts, last_error AS LastError, requested_by AS RequestedBy,
+        created_at AS CreatedAt, updated_at AS UpdatedAt
         """;
 
     static LibraryRepository() => DapperSetup.Ensure();
@@ -112,14 +121,49 @@ public sealed class LibraryRepository(NpgsqlDataSource db)
     {
         await using var c = await db.OpenConnectionAsync();
         return (await c.QueryAsync<StorageOperation>(
-            "SELECT id, kind, version_id AS VersionId, status, step, attempts, last_error AS LastError FROM storage_operations WHERE status IN ('pending', 'running') ORDER BY created_at, id")).ToList();
+            $"SELECT {OperationColumns} FROM storage_operations WHERE status IN ('pending', 'running') ORDER BY created_at, id")).ToList();
     }
 
     public async Task<StorageOperation?> FindOperationAsync(Guid id)
     {
         await using var c = await db.OpenConnectionAsync();
         return await c.QuerySingleOrDefaultAsync<StorageOperation>(
-            "SELECT id, kind, version_id AS VersionId, status, step, attempts, last_error AS LastError FROM storage_operations WHERE id = @id", new { id });
+            $"SELECT {OperationColumns} FROM storage_operations WHERE id = @id", new { id });
+    }
+
+    public async Task<IReadOnlyList<StorageOperation>> RecentOperationsAsync(int limit)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        return (await c.QueryAsync<StorageOperation>(
+            $"SELECT {OperationColumns} FROM storage_operations ORDER BY created_at DESC, id LIMIT @limit", new { limit })).ToList();
+    }
+
+    public async Task<IReadOnlyList<LibraryVersion>> AllVersionsAsync()
+    {
+        await using var c = await db.OpenConnectionAsync();
+        return (await c.QueryAsync<LibraryVersion>($"SELECT {VersionColumns} FROM library_versions ORDER BY created_at DESC")).ToList();
+    }
+
+    /// <summary>Повтор упавшей операции: снова в очередь с нулём попыток; версия публикации — обратно в publishing.</summary>
+    public async Task<bool> RetryOperationAsync(Guid id, DateTimeOffset now)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        await using var tx = await c.BeginTransactionAsync();
+        var versionId = await c.QuerySingleOrDefaultAsync<Guid?>(
+            """
+            UPDATE storage_operations SET status = 'pending', attempts = 0, last_error = NULL, updated_at = @now
+            WHERE id = @id AND status = 'failed'
+            RETURNING version_id
+            """,
+            new { id, now }, tx);
+        var exists = await c.ExecuteScalarAsync<bool>("SELECT EXISTS (SELECT 1 FROM storage_operations WHERE id = @id AND status = 'pending')", new { id }, tx);
+        if (versionId is { } v)
+        {
+            await c.ExecuteAsync("UPDATE library_versions SET state = 'publishing', last_error = NULL WHERE id = @v AND state = 'failed'", new { v }, tx);
+        }
+
+        await tx.CommitAsync();
+        return exists;
     }
 
     public async Task MarkOperationAsync(Guid id, string status, string? step, string? error, bool countAttempt, DateTimeOffset now)

@@ -128,6 +128,14 @@ public sealed class FakeTrueNas : IAsyncDisposable
         }
     }
 
+    public void RemoveDataset(string id)
+    {
+        lock (_lock)
+        {
+            _datasets.Remove(id);
+        }
+    }
+
     public void AddFilesystem(string id)
     {
         lock (_lock)

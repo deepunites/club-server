@@ -8,11 +8,12 @@ using Microsoft.Extensions.DependencyInjection;
 namespace Club.Server.Tests;
 
 /// <summary>Оркестрация публикации версий библиотеки: своя база и свой поддельный TrueNAS на каждый тест.</summary>
-public sealed class LibraryTests : IAsyncLifetime
+public sealed partial class LibraryTests : IAsyncLifetime
 {
     private const string Master = "tank/club/lib";
     private const string Published = "tank/club/published";
     private const string Basename = "iqn.2005-10.org.freenas.ctl";
+    private const string PanelToken = "panel-test-token";
 
     private FakeTrueNas _nas = null!;
     private ServerFixture _server = null!;
@@ -36,6 +37,9 @@ public sealed class LibraryTests : IAsyncLifetime
             ["Library:PublishedParent"] = Published,
             ["Library:PortalAddress"] = "192.168.77.10:3260",
             ["Library:ExtentRetryDelayMs"] = "10",
+            ["Library:ExtentAttempts"] = "2",
+            ["Library:MaxAttempts"] = "1",
+            ["Panel:AdminToken"] = PanelToken,
             ["TrueNas:Host"] = options.Host,
             ["TrueNas:Port"] = options.Port.ToString(),
             ["TrueNas:Username"] = options.Username,

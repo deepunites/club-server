@@ -1,0 +1,33 @@
+# API панели администратора
+
+Внутренний API нашей панели (не часть контракта с шеллом). Префикс `/panel/api/v1`, JSON как у агентского API:
+camelCase, enum строками, время `2026-09-27T10:15:30.123Z`, ошибки — конверт `{ error: { code, message, details, traceId } }`.
+
+**Доступ — временный:** `Authorization: Bearer <Panel:AdminToken>`. Пустой токен в конфиге закрывает панель целиком
+(`401 unauthorized`, `details.reason = "panelToken"`). Заменить входом владельца, когда появятся учётные записи персонала.
+
+## Библиотека игр
+
+Операции асинхронные: запрос ставит операцию в журнал и отвечает `202 { operationId }`; выполняет фоновый
+исполнитель (раз в `Library:WorkerIntervalSec`, по умолчанию 15 с). Ход — через `GET /library` или
+`GET /library/operations/{id}`.
+
+| Метод и путь | Что делает | Ответы |
+|---|---|---|
+| `GET /library` | Обзор: `storageEnabled`, `current`, `rollback`, все `versions`, `openOperations`, `warnings` | 200 |
+| `POST /library/versions` `{ label }` | Опубликовать новую версию (снапшот мастер-тома → RO-клон → iSCSI). `label`: `^[a-z0-9][a-z0-9-]{0,39}$` | 202; 400 `validation`; 409 `conflict` (`exists`) |
+| `POST /library/rollback` | Сделать откатную версию текущей (объекты не пересоздаются) | 202; 409 `conflict` (`noRollback`) |
+| `GET /library/operations?limit=50` | Последние операции (1…200) | 200 |
+| `GET /library/operations/{id}` | Одна операция | 200; 404 |
+| `POST /library/operations/{id}/retry` | Повторить упавшую операцию (после исправления причины) | 202; 404; 409 (`notFailed`) |
+| `GET /storage/warnings` | Активные предупреждения сверки намерений с TrueNAS | 200 |
+
+Версия: `id, label, state (publishing|published|retiring|retired|failed), role (current|rollback|null), targetIqn,
+createdAt, publishedAt, retiredAt, lastError`.
+
+Операция: `id, kind (publish|rollback), versionLabel, status (pending|running|done|failed), step (snapshot|clone|extent|
+target|promote|done), attempts, lastError, requestedBy, createdAt, updatedAt`.
+
+Предупреждение: `kind, subject, message, firstSeen, lastSeen`. Виды: `missingSnapshot`, `missingClone`, `cloneWritable`,
+`cloneOrigin`, `missingExtent`, `extentMismatch`, `missingTarget`, `missingLun`, `orphanClone`, `retireBlocked`.
+Сервер ничего не исправляет сам — решение за администратором.
