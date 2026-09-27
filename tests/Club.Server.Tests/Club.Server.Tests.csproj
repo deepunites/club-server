@@ -23,6 +23,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Club.Server\Club.Server.csproj" />
+    <ProjectReference Include="..\Club.TestSupport\Club.TestSupport.csproj" />
   </ItemGroup>
 
 </Project>

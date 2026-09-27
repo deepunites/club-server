@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Club.TrueNas\Club.TrueNas.csproj" />
+    <ProjectReference Include="..\Club.TestSupport\Club.TestSupport.csproj" />
   </ItemGroup>
 
 </Project>

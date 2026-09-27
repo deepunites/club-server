@@ -12,14 +12,17 @@ using Npgsql;
 namespace Club.Server.Tests;
 
 /// <summary>Сервер в памяти поверх отдельной временной базы в локальном PostgreSQL.</summary>
-public sealed class ServerFixture : WebApplicationFactory<Program>, IAsyncLifetime
+public class ServerFixture : WebApplicationFactory<Program>, IAsyncLifetime
 {
+    /// <summary>Дополнительные настройки (например, модуль библиотеки поверх поддельного TrueNAS).</summary>
+    public Dictionary<string, string> Settings { get; } = new();
+
     public const string ClubKey = "test-club-key";
     private const string AdminConnection = "Host=/var/run/postgresql;Database=postgres";
     private readonly string _database = "club_test_" + Guid.NewGuid().ToString("N");
     private readonly string _keyPath = Path.Combine(Path.GetTempPath(), $"club-test-{Guid.NewGuid():N}.pem");
 
-    public async Task InitializeAsync()
+    public virtual async Task InitializeAsync()
     {
         await using var connection = new NpgsqlConnection(AdminConnection);
         await connection.OpenAsync();
@@ -46,6 +49,10 @@ public sealed class ServerFixture : WebApplicationFactory<Program>, IAsyncLifeti
         builder.UseSetting("Auth:SigningKeyPath", _keyPath);
         builder.UseSetting("Realtime:PingIntervalSec", "2");
         builder.UseSetting("Realtime:PongTimeoutSec", "1");
+        foreach (var (key, value) in Settings)
+        {
+            builder.UseSetting(key, value);
+        }
     }
 }
 

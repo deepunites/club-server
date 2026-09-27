@@ -14,7 +14,9 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
-namespace Club.TrueNas.Tests;
+namespace Club.TestSupport;
+
+using Club.TrueNas;
 
 /// <summary>
 /// Поддельный middleware TrueNAS 25.10 для тестов адаптера: настоящий TLS (свой CA), JSON-RPC 2.0 по WebSocket,
@@ -41,6 +43,9 @@ public sealed class FakeTrueNas : IAsyncDisposable
     public string[] OfferedVersions { get; set; } = ["v25.10.4", "v25.10.5", "v26.0.0"];
     public string Release { get; set; } = "25.10.7";
     public ConcurrentBag<string> Calls { get; } = [];
+
+    /// <summary>TrueNAS «лежит»: открытые соединения рвутся, новые и /api/versions отклоняются.</summary>
+    public bool Down { get; set; }
     public int Connections;
 
     private FakeTrueNas(WebApplication app, string caPath)
@@ -61,7 +66,7 @@ public sealed class FakeTrueNas : IAsyncDisposable
         var app = builder.Build();
         var fake = new FakeTrueNas(app, caPath);
         app.UseWebSockets();
-        app.MapGet("/api/versions", () => Results.Json(fake.OfferedVersions));
+        app.MapGet("/api/versions", () => fake.Down ? Results.StatusCode(503) : Results.Json(fake.OfferedVersions));
         app.Map("/api/{version}", (HttpContext context) => fake.HandleSocketAsync(context));
         await app.StartAsync();
         fake.Port = new Uri(app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First()).Port;
@@ -114,6 +119,15 @@ public sealed class FakeTrueNas : IAsyncDisposable
         }
     }
 
+    /// <summary>Ручное вмешательство мимо сервера: снять readonly с датасета (для тестов сверки).</summary>
+    public void MakeWritable(string id)
+    {
+        lock (_lock)
+        {
+            _datasets[id]["readonly"] = Prop("off");
+        }
+    }
+
     public void AddFilesystem(string id)
     {
         lock (_lock)
@@ -124,9 +138,9 @@ public sealed class FakeTrueNas : IAsyncDisposable
 
     private async Task HandleSocketAsync(HttpContext context)
     {
-        if (!context.WebSockets.IsWebSocketRequest)
+        if (!context.WebSockets.IsWebSocketRequest || Down)
         {
-            context.Response.StatusCode = 400;
+            context.Response.StatusCode = Down ? 503 : 400;
             return;
         }
 
@@ -148,6 +162,12 @@ public sealed class FakeTrueNas : IAsyncDisposable
             if (result.MessageType == WebSocketMessageType.Close)
             {
                 await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
+                return;
+            }
+
+            if (Down)
+            {
+                socket.Abort();
                 return;
             }
 
@@ -505,8 +525,12 @@ public sealed class FakeTrueNas : IAsyncDisposable
         return new JsonArray(rows.Where(row => filters.All(filter =>
         {
             var field = filter![0]!.GetValue<string>();
-            var expected = filter[2]!.ToJsonString();
-            return filter[1]!.GetValue<string>() == "=" && row[field]?.ToJsonString() == expected;
+            return filter[1]!.GetValue<string>() switch
+            {
+                "=" => row[field]?.ToJsonString() == filter[2]!.ToJsonString(),
+                "^" => row[field]?.GetValue<string>().StartsWith(filter[2]!.GetValue<string>(), StringComparison.Ordinal) == true,
+                var op => throw new NotSupportedException($"fake filter operator {op}"),
+            };
         })).Select(r => (JsonNode)r.DeepClone()).ToArray());
     }
 

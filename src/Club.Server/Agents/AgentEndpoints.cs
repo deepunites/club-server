@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using Club.Server.Api;
 using Club.Server.Auth;
 using Club.Server.Data;
+using Club.Server.Library;
 
 namespace Club.Server.Agents;
 
@@ -84,7 +85,7 @@ public static class AgentEndpoints
         api.MapGet("/updates/{channel}/manifest", () => Results.NoContent());
     }
 
-    private static async Task<IResult> RegisterAsync(HttpContext context, AgentRegisterRequest request, PcRepository pcs, TokenService tokens, AuthOptions options, TimeProvider clock)
+    private static async Task<IResult> RegisterAsync(HttpContext context, AgentRegisterRequest request, PcRepository pcs, TokenService tokens, AuthOptions options, LibraryRepository library, LibraryOptions libraryOptions, TimeProvider clock)
     {
         var clubKey = context.Request.Headers["X-Club-Key"].ToString();
         if (string.IsNullOrEmpty(options.ClubApiKey) || string.IsNullOrEmpty(clubKey) || !Secrets.FixedTimeEquals(clubKey, options.ClubApiKey))
@@ -118,7 +119,7 @@ public static class AgentEndpoints
         var refresh = await IssueRefreshTokenAsync(pcs, pc, options, clock);
         var zone = await pcs.GetZoneAsync(pc.ZoneId);
         return Results.Json(
-            new AgentRegisterResponse(pc.Id, ToPc(pc, zone), access, refresh, Convert.ToBase64String(pc.SigningSecret), expiresAt, clock.GetUtcNow(), BuildConfig(pc, zone)),
+            new AgentRegisterResponse(pc.Id, ToPc(pc, zone), access, refresh, Convert.ToBase64String(pc.SigningSecret), expiresAt, clock.GetUtcNow(), BuildConfig(pc, zone, await GamesShareAsync(library, libraryOptions))),
             ApiJson.Options);
     }
 
@@ -173,11 +174,11 @@ public static class AgentEndpoints
             ApiJson.Options);
     }
 
-    private static async Task<IResult> ConfigAsync(Guid pcId, HttpContext context, PcRepository pcs)
+    private static async Task<IResult> ConfigAsync(Guid pcId, HttpContext context, PcRepository pcs, LibraryRepository library, LibraryOptions libraryOptions)
     {
         var agent = RequireSelf(context, pcId);
         var zone = await pcs.GetZoneAsync(agent.Pc.ZoneId);
-        var config = BuildConfig(agent.Pc, zone);
+        var config = BuildConfig(agent.Pc, zone, await GamesShareAsync(library, libraryOptions));
         return WithETag(context, config.Version.ToString(CultureInfo.InvariantCulture), () => Results.Json(config, ApiJson.Options));
     }
 
@@ -197,15 +198,37 @@ public static class AgentEndpoints
     /// <summary>Версия конфига ПК: меняется и при правке ПК, и при правке его зоны.</summary>
     private static int ConfigVersion(PcRow pc, ZoneRow zone) => pc.ConfigVersion * 100_000 + zone.ConfigVersion;
 
-    private static AgentServerConfig BuildConfig(PcRow pc, ZoneRow zone) => new(
+    /// <summary>
+    /// Игровой том для агента: текущая опубликованная версия библиотеки. Только iSCSI и всегда readOnly —
+    /// по умолчанию агент монтирует SMB и на запись (club-contracts/docs/SHELL_CHANGES.md п. 7).
+    /// </summary>
+    private static async Task<JsonElement?> GamesShareAsync(LibraryRepository library, LibraryOptions options)
+    {
+        if (!options.Enabled || (await library.PointersAsync()).Current is not { TargetIqn: { } iqn })
+        {
+            return null;
+        }
+
+        return JsonSerializer.SerializeToElement(new
+        {
+            gamesShare = new
+            {
+                enabled = true,
+                driveLetter = options.DriveLetter,
+                iscsi = new { portal = options.PortalAddress, targetIqn = iqn, readOnly = true },
+            },
+        }, ApiJson.Options);
+    }
+
+    private static AgentServerConfig BuildConfig(PcRow pc, ZoneRow zone, JsonElement? gamesShare) => new(
         Version: ConfigVersion(pc, zone),
         PcName: pc.Name,
         Zone: zone.Id,
         Number: pc.Number,
         // Пул аккаунтов и облачные сейвы — открытый вопрос Q8; у агента они включены по умолчанию (SHELL_CHANGES.md п. 5).
         Games: JsonSerializer.SerializeToElement(new { accountPool = new { enabled = false }, cloudSave = new { enabled = false } }, ApiJson.Options),
-        // Игровой том задаёт модуль хранилища через зону; пока зона без тома — раздел не отправляется.
-        Storage: zone.Storage is null ? null : JsonDocument.Parse(zone.Storage).RootElement.Clone(),
+        // Игровой том — текущая версия библиотеки; пока её нет, раздел не отправляется и агент ничего не монтирует.
+        Storage: gamesShare ?? (zone.Storage is null ? null : JsonDocument.Parse(zone.Storage).RootElement.Clone()),
         Updates: new UpdatesConfigOverride(Channel: null, CheckIntervalSec: 86_400),
         Shell: new ShellConfigOverride(ShellFeatures));
 

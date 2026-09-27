@@ -43,6 +43,13 @@ public sealed class TrueNasStorage(TrueNasClient client)
         return rows.EnumerateArray().Select(ParseDataset).FirstOrDefault();
     }
 
+    /// <summary>Датасеты, id которых начинается с префикса (фильтр <c>^</c> middleware).</summary>
+    public async Task<IReadOnlyList<ZfsDataset>> ListDatasetsAsync(string idPrefix, CancellationToken ct = default)
+    {
+        var rows = await client.CallAsync("pool.dataset.query", [new object[] { new object[] { "id", "^", idPrefix } }, new { extra = new { retrieve_children = true } }], ct);
+        return rows.EnumerateArray().Select(ParseDataset).Where(d => d.Id.StartsWith(idPrefix, StringComparison.Ordinal)).ToList();
+    }
+
     /// <summary>zvol с метками; уже существующий возвращается как есть (проверка — по факту, а не по тексту ошибки).</summary>
     public async Task<ZfsDataset> EnsureZvolAsync(string id, long volsizeBytes, string volblocksize, IReadOnlyDictionary<string, string> labels, CancellationToken ct = default)
     {
