@@ -199,7 +199,7 @@ public sealed class LibraryRepository(NpgsqlDataSource db)
 
     /// <summary>
     /// Новая версия становится текущей, прежняя текущая — откатной, прежняя откатная уходит на разборку.
-    /// Версии конфига всех зон растут в той же транзакции: агенты получат новый targetIqn со следующим heartbeat.
+    /// Помощники бездиска получат новый targetIqn в ответе на следующий отчёт о состоянии.
     /// </summary>
     public async Task<Guid?> PromoteAsync(Guid versionId, DateTimeOffset now)
     {
@@ -225,7 +225,6 @@ public sealed class LibraryRepository(NpgsqlDataSource db)
             await c.ExecuteAsync("UPDATE library_versions SET state = 'retiring' WHERE id = @r", new { r }, tx);
         }
 
-        await c.ExecuteAsync("UPDATE zones SET config_version = config_version + 1", transaction: tx);
         await tx.CommitAsync();
         return retiring;
     }
@@ -247,7 +246,6 @@ public sealed class LibraryRepository(NpgsqlDataSource db)
             return false;
         }
 
-        await c.ExecuteAsync("UPDATE zones SET config_version = config_version + 1", transaction: tx);
         await tx.CommitAsync();
         return true;
     }

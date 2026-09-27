@@ -25,7 +25,7 @@ public sealed class PanelAuthMiddleware(RequestDelegate next, PanelOptions optio
             return;
         }
 
-        var token = AgentAuthenticator.BearerToken(context);
+        var token = MachineAuthenticator.BearerToken(context);
         if (string.IsNullOrEmpty(options.AdminToken) || string.IsNullOrEmpty(token) || !Secrets.FixedTimeEquals(token, options.AdminToken))
         {
             throw ApiException.Unauthorized("panelToken", "Panel access token required");

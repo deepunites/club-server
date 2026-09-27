@@ -8,15 +8,10 @@
     <PackageReference Include="FluentMigrator.Runner.Postgres" Version="8.0.1" />
     <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" Version="8.23.0" />
     <PackageReference Include="Npgsql" Version="10.0.3" />
-    <PackageReference Include="YamlDotNet" Version="18.1.0" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Club.TrueNas\Club.TrueNas.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Content Include="..\..\contracts\openapi.yaml" Link="contracts\openapi.yaml" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

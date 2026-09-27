@@ -7,7 +7,7 @@ namespace Club.Server.Auth;
 
 public sealed class AuthOptions
 {
-    /// <summary>Ключ клуба для <c>POST /agents/register</c> (<c>X-Club-Key</c>, <c>agent.json → server.clubApiKey</c>).</summary>
+    /// <summary>Ключ клуба для <c>POST /diskless/v1/machines/register</c> (<c>X-Club-Key</c>), задаётся при установке помощника.</summary>
     public string ClubApiKey { get; set; } = "";
 
     /// <summary>Идентификатор клуба в claim <c>club</c>.</summary>
@@ -22,20 +22,17 @@ public sealed class AuthOptions
 
     public int RefreshTokenDays { get; set; } = 30;
 
-    /// <summary>Окно подписи запросов, секунды (контракт: ±300).</summary>
-    public int SignatureWindowSec { get; set; } = 300;
-
-    /// <summary>Новый ПК без одобрения администратора получает pcId сразу (для стенда). В клубе — false.</summary>
+    /// <summary>Новая машина без одобрения администратора получает токены сразу (для стенда). В клубе — false.</summary>
     public bool AutoApprovePcs { get; set; }
 }
 
-/// <summary>Claims токена агента, нужные серверу.</summary>
-public sealed record AgentPrincipal(Guid PcId, string Hwid, int CredentialsVersion, DateTimeOffset ExpiresAt);
+/// <summary>Claims токена машины, нужные серверу.</summary>
+public sealed record MachinePrincipal(Guid MachineId, string Hwid, int CredentialsVersion, DateTimeOffset ExpiresAt);
 
-/// <summary>Выпуск и проверка JWT агента (RS256). Ключ хранится в PEM-файле и переживает перезапуск.</summary>
+/// <summary>Выпуск и проверка JWT помощника бездиска (RS256). Ключ хранится в PEM-файле и переживает перезапуск.</summary>
 public sealed class TokenService
 {
-    private const string Audience = "club-agent";
+    private const string Audience = "club-diskless";
     private readonly AuthOptions _options;
     private readonly TimeProvider _clock;
     private readonly RsaSecurityKey _key;
@@ -48,7 +45,7 @@ public sealed class TokenService
         _key = LoadOrCreateKey(options.SigningKeyPath);
     }
 
-    public (string Token, DateTimeOffset ExpiresAt) IssueAccessToken(Guid pcId, string hwid, int credentialsVersion)
+    public (string Token, DateTimeOffset ExpiresAt) IssueAccessToken(Guid machineId, string hwid, int credentialsVersion)
     {
         var now = _clock.GetUtcNow();
         var expires = now.AddMinutes(_options.AccessTokenMinutes);
@@ -62,10 +59,10 @@ public sealed class TokenService
             SigningCredentials = new SigningCredentials(_key, SecurityAlgorithms.RsaSha256),
             Claims = new Dictionary<string, object>
             {
-                ["sub"] = pcId.ToString(),
+                ["sub"] = machineId.ToString(),
                 ["club"] = _options.ClubId,
                 ["hwid"] = hwid,
-                ["role"] = "agent",
+                ["role"] = "machine",
                 ["cv"] = credentialsVersion,
                 ["jti"] = Guid.NewGuid().ToString(),
             },
@@ -74,7 +71,7 @@ public sealed class TokenService
     }
 
     /// <summary>Проверяет токен; <c>null</c> и причина (<c>expired</c> или <c>invalid</c>) при отказе.</summary>
-    public async Task<(AgentPrincipal? Principal, string? Reason)> ValidateAsync(string token)
+    public async Task<(MachinePrincipal? Principal, string? Reason)> ValidateAsync(string token)
     {
         var result = await _handler.ValidateTokenAsync(token, new TokenValidationParameters
         {
@@ -96,15 +93,15 @@ public sealed class TokenService
         }
 
         var claims = result.ClaimsIdentity;
-        if (claims.FindFirst("role")?.Value != "agent"
-            || !Guid.TryParse(claims.FindFirst("sub")?.Value, out var pcId)
+        if (claims.FindFirst("role")?.Value != "machine"
+            || !Guid.TryParse(claims.FindFirst("sub")?.Value, out var machineId)
             || !int.TryParse(claims.FindFirst("cv")?.Value, out var cv)
             || result.SecurityToken is not JsonWebToken jwt)
         {
             return (null, "invalid");
         }
 
-        return (new AgentPrincipal(pcId, claims.FindFirst("hwid")?.Value ?? "", cv, new DateTimeOffset(jwt.ValidTo, TimeSpan.Zero)), null);
+        return (new MachinePrincipal(machineId, claims.FindFirst("hwid")?.Value ?? "", cv, new DateTimeOffset(jwt.ValidTo, TimeSpan.Zero)), null);
     }
 
     private static RsaSecurityKey LoadOrCreateKey(string path)

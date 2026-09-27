@@ -74,23 +74,21 @@ public sealed partial class LibraryTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Published_version_reaches_agent_config_as_read_only_iscsi()
+    public async Task Published_version_reaches_helper_as_read_only_iscsi()
     {
-        var (agent, register) = await TestAgent.RegisterAsync(_server.CreateClient());
-        Assert.False(register.GetProperty("config").TryGetProperty("storage", out _)); // до публикации тома нет
-        var before = register.GetProperty("config").GetProperty("version").GetInt32();
+        var (machine, _) = await TestMachine.RegisterAsync(_server.CreateClient());
+        using var before = await machine.SendAsync(HttpMethod.Get, $"/diskless/v1/machines/{machine.MachineId}/volume");
+        Assert.Equal(System.Net.HttpStatusCode.NoContent, before.StatusCode); // до публикации тома нет
 
         await PublishAsync("2026-09");
 
-        using var response = await agent.SendAsync(HttpMethod.Get, $"/api/v1/agents/{agent.PcId}/config");
-        var config = await Contract.ReadAsync(response, "AgentServerConfig");
-        Assert.True(config.GetProperty("version").GetInt32() > before);
-        var share = config.GetProperty("storage").GetProperty("gamesShare");
-        Assert.True(share.GetProperty("enabled").GetBoolean());
-        var iscsi = share.GetProperty("iscsi");
-        Assert.Equal($"{Basename}:games-2026-09", iscsi.GetProperty("targetIqn").GetString());
-        Assert.Equal("192.168.77.10:3260", iscsi.GetProperty("portal").GetString());
-        Assert.True(iscsi.GetProperty("readOnly").GetBoolean());
+        using var response = await machine.SendAsync(HttpMethod.Get, $"/diskless/v1/machines/{machine.MachineId}/volume");
+        var volume = await Contract.ReadAsync(response, "VolumeAssignment");
+        Assert.Equal($"{Basename}:games-2026-09", volume.GetProperty("targetIqn").GetString());
+        Assert.Equal("192.168.77.10:3260", volume.GetProperty("portal").GetString());
+        Assert.Equal("2026-09", volume.GetProperty("libraryVersion").GetString());
+        Assert.True(volume.GetProperty("readOnly").GetBoolean());
+        Assert.Equal("G", volume.GetProperty("driveLetter").GetString());
 
         var clone = await _storage.GetDatasetAsync($"{Published}/lib-2026-09");
         Assert.True(clone!.ReadOnly);
@@ -138,9 +136,9 @@ public sealed partial class LibraryTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Rollback_swaps_current_and_rollback_and_updates_config()
+    public async Task Rollback_swaps_current_and_rollback_and_status_reply_points_to_it()
     {
-        var (agent, _) = await TestAgent.RegisterAsync(_server.CreateClient());
+        var (machine, _) = await TestMachine.RegisterAsync(_server.CreateClient());
         await PublishAsync("v1");
         await PublishAsync("v2");
 
@@ -149,9 +147,11 @@ public sealed partial class LibraryTests : IAsyncLifetime
         var pointers = await _repository.PointersAsync();
         Assert.Equal(("v1", "v2"), (pointers.Current!.Label, pointers.Rollback!.Label));
 
-        using var response = await agent.SendAsync(HttpMethod.Get, $"/api/v1/agents/{agent.PcId}/config");
-        var config = await response.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal($"{Basename}:games-v1", config.GetProperty("storage").GetProperty("gamesShare").GetProperty("iscsi").GetProperty("targetIqn").GetString());
+        // Помощник на v2 сообщает факты и в ответе узнаёт, что текущая теперь v1.
+        using var response = await machine.SendAsync(HttpMethod.Put, $"/diskless/v1/machines/{machine.MachineId}/status",
+            TestMachine.Status("mounted", $"{Basename}:games-v2", "v2", readOnly: true));
+        var reply = await Contract.ReadAsync(response, "StatusAccepted");
+        Assert.Equal($"{Basename}:games-v1", reply.GetProperty("volume").GetProperty("targetIqn").GetString());
         Assert.Equal(2, _nas.Count("target")); // откат не пересоздаёт и не удаляет объекты
     }
 

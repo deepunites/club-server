@@ -1,9 +1,6 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using Club.Server.Api;
 using Json.Schema;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -14,13 +11,13 @@ namespace Club.Server.Tests;
 /// <summary>Сервер в памяти поверх отдельной временной базы в локальном PostgreSQL.</summary>
 public class ServerFixture : WebApplicationFactory<Program>, IAsyncLifetime
 {
-    /// <summary>Дополнительные настройки (например, модуль библиотеки поверх поддельного TrueNAS).</summary>
-    public Dictionary<string, string> Settings { get; } = new();
-
     public const string ClubKey = "test-club-key";
     private const string AdminConnection = "Host=/var/run/postgresql;Database=postgres";
     private readonly string _database = "club_test_" + Guid.NewGuid().ToString("N");
     private readonly string _keyPath = Path.Combine(Path.GetTempPath(), $"club-test-{Guid.NewGuid():N}.pem");
+
+    /// <summary>Дополнительные настройки (например, модуль библиотеки поверх поддельного TrueNAS).</summary>
+    public Dictionary<string, string> Settings { get; } = new();
 
     public virtual async Task InitializeAsync()
     {
@@ -47,8 +44,6 @@ public class ServerFixture : WebApplicationFactory<Program>, IAsyncLifetime
         builder.UseSetting("Auth:ClubApiKey", ClubKey);
         builder.UseSetting("Auth:AutoApprovePcs", "true");
         builder.UseSetting("Auth:SigningKeyPath", _keyPath);
-        builder.UseSetting("Realtime:PingIntervalSec", "2");
-        builder.UseSetting("Realtime:PongTimeoutSec", "1");
         foreach (var (key, value) in Settings)
         {
             builder.UseSetting(key, value);
@@ -56,102 +51,76 @@ public class ServerFixture : WebApplicationFactory<Program>, IAsyncLifetime
     }
 }
 
-/// <summary>Зарегистрированный агент: подписывает запросы так же, как club-shell (ServerClient.Authorize).</summary>
-public sealed class TestAgent(HttpClient http, Guid pcId, string accessToken, string refreshToken, byte[] secret)
+/// <summary>Зарегистрированная машина — как помощник бездиска на ПК.</summary>
+public sealed class TestMachine(HttpClient http, Guid machineId, string hwid, string accessToken, string refreshToken)
 {
-    public Guid PcId { get; } = pcId;
+    public Guid MachineId { get; } = machineId;
+    public string Hwid { get; } = hwid;
     public string AccessToken { get; } = accessToken;
     public string RefreshToken { get; } = refreshToken;
-    public HttpClient Http { get; } = http;
 
-    public static object RegisterBody(string hwid) => new
+    public static object RegisterBody(string hwid, params string[] macs) => new
     {
         hwid,
-        machineName = "PC-TEST",
-        agentVersion = "1.4.2",
-        hardware = new { cpu = new { name = "Test CPU" } },
-        ipAddress = "10.0.1.12",
-        macAddress = "aa:bb:cc:dd:ee:ff",
+        hostname = "PC-TEST",
+        macAddresses = macs.Length > 0 ? macs : ["aa:bb:cc:dd:ee:ff"],
+        helperVersion = "1.0.0",
+        osVersion = "Windows 11 Pro 24H2",
     };
 
-    public static async Task<(TestAgent Agent, JsonElement Response)> RegisterAsync(HttpClient http, string? hwid = null)
+    public static async Task<(TestMachine Machine, JsonElement Response)> RegisterAsync(HttpClient http, string? hwid = null)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/v1/agents/register") { Content = JsonContent.Create(RegisterBody(hwid ?? Guid.NewGuid().ToString("N"))) };
+        hwid ??= Guid.NewGuid().ToString("N");
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/diskless/v1/machines/register") { Content = JsonContent.Create(RegisterBody(hwid)) };
         request.Headers.Add("X-Club-Key", ServerFixture.ClubKey);
         using var response = await http.SendAsync(request);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.True(response.IsSuccessStatusCode, body.ToString());
-        return (new TestAgent(
-            http,
-            body.GetProperty("pcId").GetGuid(),
-            body.GetProperty("accessToken").GetString()!,
-            body.GetProperty("refreshToken").GetString()!,
-            Convert.FromBase64String(body.GetProperty("signingSecret").GetString()!)), body);
+        return (new TestMachine(http, body.GetProperty("machineId").GetGuid(), hwid, body.GetProperty("accessToken").GetString()!, body.GetProperty("refreshToken").GetString()!), body);
     }
 
-    public Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, object? body = null, long? timestamp = null, string? etag = null) =>
-        Http.SendAsync(Signed(method, path, body is null ? null : JsonSerializer.SerializeToUtf8Bytes(body), timestamp, etag));
-
-    public HttpRequestMessage Signed(HttpMethod method, string path, byte[]? body, long? timestamp = null, string? etag = null)
+    public Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, object? body = null)
     {
-        var ts = (timestamp ?? DateTimeOffset.UtcNow.ToUnixTimeSeconds()).ToString(System.Globalization.CultureInfo.InvariantCulture);
-        var bodyHash = Convert.ToHexStringLower(SHA256.HashData(body ?? []));
-        var signature = Convert.ToHexStringLower(HMACSHA256.HashData(secret, Encoding.UTF8.GetBytes(ts + method.Method + path + bodyHash)));
         var request = new HttpRequestMessage(method, path);
         if (body is not null)
         {
-            request.Content = new ByteArrayContent(body);
-            request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
+            request.Content = JsonContent.Create(body, options: ApiJson.Options);
         }
 
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", AccessToken);
-        request.Headers.Add("X-Timestamp", ts);
-        request.Headers.Add("X-Signature", signature);
-        if (etag is not null)
-        {
-            request.Headers.TryAddWithoutValidation("If-None-Match", etag);
-        }
-
-        return request;
+        return http.SendAsync(request);
     }
 
-    public static object Heartbeat() => new
+    public static object Status(string state = "none", string? iqn = null, string? version = null, bool? readOnly = null) => new
     {
-        status = "free",
-        agentVersion = "1.4.2",
-        shellVersion = "1.4.2",
-        uptimeSec = 8123,
-        ipAddress = "10.0.1.12",
-        policyVersion = 0,
-        runningGames = Array.Empty<object>(),
-        offlineQueue = 0,
-        shellConnected = true,
+        helperVersion = "1.0.0",
+        bootTime = DateTimeOffset.UtcNow.AddMinutes(-5),
+        volume = new { state, targetIqn = iqn, libraryVersion = version, driveLetter = iqn is null ? null : "G", readOnlyVerified = readOnly },
     };
 }
 
-/// <summary>Проверка тела ответа по схеме из собранного контракта (contracts/openapi.json).</summary>
+/// <summary>Проверка тела ответа по схеме из спецификации API бездиска (docs/diskless-api.json).</summary>
 public static class Contract
 {
-    private static readonly Uri BaseUri = new("https://club.local/openapi.json");
-    private static readonly Lazy<(SchemaRegistry Registry, JsonElement Document)> Loaded = new(() =>
-    {
-        var document = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "contracts", "openapi.json"))).RootElement.Clone();
-        var registry = new SchemaRegistry();
-        registry.Register(BaseUri, new JsonElementBaseDocument(document, BaseUri));
-        return (registry, document);
-    });
+    private static readonly Uri BaseUri = new("https://club.local/diskless-api.json");
 
-    public static JsonElement Document => Loaded.Value.Document;
-
-    // Расширения контракта (x-csharp, x-source, discriminator и т. п.) — не ключевые слова JSON Schema.
+    // Расширения и служебные ключи OpenAPI — не ключевые слова JSON Schema.
     private static readonly Dialect Dialect = Dialect.Draft202012.With([], allowUnknownKeywords: true);
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, JsonSchema> Schemas = new();
+
+    private static readonly Lazy<SchemaRegistry> Registry = new(() =>
+    {
+        var document = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "spec", "diskless-api.json"))).RootElement.Clone();
+        var registry = new SchemaRegistry();
+        registry.Register(BaseUri, new JsonElementBaseDocument(document, BaseUri));
+        return registry;
+    });
 
     public static void AssertMatches(string schemaName, JsonElement instance)
     {
         var schema = Schemas.GetOrAdd(schemaName, name =>
         {
-            var options = new BuildOptions { SchemaRegistry = Loaded.Value.Registry, Dialect = Dialect };
+            var options = new BuildOptions { SchemaRegistry = Registry.Value, Dialect = Dialect };
             var reference = JsonDocument.Parse($$"""{ "$ref": "{{BaseUri}}#/components/schemas/{{name}}" }""").RootElement;
             return JsonSchema.Build(reference, options, new Uri($"https://club.local/check/{name}"));
         });
@@ -160,7 +129,7 @@ public static class Contract
         {
             var errors = (result.Details ?? []).Where(d => d.Errors is { Count: > 0 })
                 .Select(d => $"{d.InstanceLocation}: {string.Join("; ", d.Errors!.Values)}");
-            Assert.Fail($"{schemaName} does not match contract:\n{string.Join("\n", errors)}\n{instance}");
+            Assert.Fail($"{schemaName} does not match spec:\n{string.Join("\n", errors)}\n{instance}");
         }
     }
 
@@ -173,15 +142,11 @@ public static class Contract
 
     public static void AssertError(JsonElement body, string code, string? reason = null)
     {
-        AssertMatches("ServerErrorEnvelope", body);
+        AssertMatches("ErrorEnvelope", body);
         Assert.Equal(code, body.GetProperty("error").GetProperty("code").GetString());
         if (reason is not null)
         {
             Assert.Equal(reason, body.GetProperty("error").GetProperty("details").GetProperty("reason").GetString());
         }
     }
-
-    public static JsonNode? Node(JsonElement element) => JsonNode.Parse(element.GetRawText());
-
-    public static string Format(DateTimeOffset value) => ApiJson.FormatTime(value);
 }

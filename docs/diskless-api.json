@@ -1,0 +1,470 @@
+{
+ "openapi": "3.1.0",
+ "info": {
+  "title": "Club diskless API",
+  "version": "1.0.0",
+  "description": "API бездиска между сервером клуба и помощником бездиска на ПК (служба Windows). Не зависит от шелла: касса,\nигроки и сессии — зона шелла, здесь только машины и том библиотеки игр.\n\n- JSON: camelCase, время `2026-09-27T10:15:30.123Z`, null не передаётся.\n- Ошибки: `{ \"error\": { \"code\", \"message\", \"details\", \"traceId\" } }`.\n- Доступ: регистрация по `X-Club-Key`; дальше `Authorization: Bearer <accessToken>` (JWT, ~1 ч) и одноразовый\n  refresh. Только HTTPS в клубе.\n- Помощник монтирует том всегда read-only. Сервер никогда не управляет Windows напрямую: помощник сам опрашивает\n  состояние и сообщает факты.\n"
+ },
+ "servers": [
+  {
+   "url": "https://{host}/diskless/v1",
+   "variables": {
+    "host": {
+     "default": "club-server"
+    }
+   }
+  }
+ ],
+ "paths": {
+  "/machines/register": {
+   "post": {
+    "operationId": "registerMachine",
+    "summary": "Регистрация ПК (по HWID; номер места выдаёт сервер)",
+    "security": [
+     {
+      "clubKey": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/MachineRegisterRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Машина зарегистрирована или узнана по HWID; прежние токены отозваны.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/MachineRegisterResponse"
+        }
+       }
+      }
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "401": {
+      "$ref": "#/components/responses/Error"
+     },
+     "403": {
+      "description": "`pendingApproval` — машина в реестре, ждёт одобрения администратора.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorEnvelope"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/machines/refresh": {
+   "post": {
+    "operationId": "refreshMachineToken",
+    "summary": "Новый access-токен; refresh одноразовый, повтор отзывает все токены машины",
+    "security": [],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/RefreshRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Новая пара токенов.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/RefreshResponse"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/machines/{machineId}/volume": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/MachineId"
+    }
+   ],
+   "get": {
+    "operationId": "getVolume",
+    "summary": "Какой том библиотеки монтировать сейчас",
+    "security": [
+     {
+      "machineBearer": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Текущая опубликованная версия библиотеки.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/VolumeAssignment"
+        }
+       }
+      }
+     },
+     "204": {
+      "description": "Тома нет (библиотека не опубликована) — помощник ничего не монтирует."
+     },
+     "401": {
+      "$ref": "#/components/responses/Error"
+     },
+     "403": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/machines/{machineId}/status": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/MachineId"
+    }
+   ],
+   "put": {
+    "operationId": "reportStatus",
+    "summary": "Факты с ПК (раз в ~30 с) и в ответ — актуальный том",
+    "security": [
+     {
+      "machineBearer": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/MachineStatus"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Принято. `volume` отсутствует, если тома нет.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/StatusAccepted"
+        }
+       }
+      }
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "401": {
+      "$ref": "#/components/responses/Error"
+     },
+     "403": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  }
+ },
+ "components": {
+  "securitySchemes": {
+   "clubKey": {
+    "type": "apiKey",
+    "in": "header",
+    "name": "X-Club-Key"
+   },
+   "machineBearer": {
+    "type": "http",
+    "scheme": "bearer",
+    "bearerFormat": "JWT"
+   }
+  },
+  "parameters": {
+   "MachineId": {
+    "name": "machineId",
+    "in": "path",
+    "required": true,
+    "schema": {
+     "type": "string",
+     "format": "uuid"
+    }
+   }
+  },
+  "responses": {
+   "Error": {
+    "description": "Ошибка.",
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/ErrorEnvelope"
+      }
+     }
+    }
+   }
+  },
+  "schemas": {
+   "MachineRegisterRequest": {
+    "type": "object",
+    "required": [
+     "hwid",
+     "hostname",
+     "macAddresses",
+     "helperVersion"
+    ],
+    "properties": {
+     "hwid": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Стабильный идентификатор железа (sha256 hex); смена железа = новая машина."
+     },
+     "hostname": {
+      "type": "string",
+      "minLength": 1
+     },
+     "macAddresses": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+       "type": "string",
+       "pattern": "^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"
+      },
+      "description": "MAC сетевых карт в нижнем регистре; нужны для DHCP/PXE и перезаливки."
+     },
+     "helperVersion": {
+      "type": "string"
+     },
+     "osVersion": {
+      "type": "string"
+     }
+    }
+   },
+   "MachineRegisterResponse": {
+    "type": "object",
+    "required": [
+     "machineId",
+     "number",
+     "name",
+     "zone",
+     "accessToken",
+     "refreshToken",
+     "expiresAt",
+     "serverTime"
+    ],
+    "properties": {
+     "machineId": {
+      "type": "string",
+      "format": "uuid"
+     },
+     "number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Номер места."
+     },
+     "name": {
+      "type": "string"
+     },
+     "zone": {
+      "type": "string"
+     },
+     "accessToken": {
+      "type": "string"
+     },
+     "refreshToken": {
+      "type": "string"
+     },
+     "expiresAt": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "serverTime": {
+      "type": "string",
+      "format": "date-time"
+     }
+    }
+   },
+   "RefreshRequest": {
+    "type": "object",
+    "required": [
+     "refreshToken",
+     "hwid"
+    ],
+    "properties": {
+     "refreshToken": {
+      "type": "string"
+     },
+     "hwid": {
+      "type": "string"
+     }
+    }
+   },
+   "RefreshResponse": {
+    "type": "object",
+    "required": [
+     "accessToken",
+     "refreshToken",
+     "expiresAt"
+    ],
+    "properties": {
+     "accessToken": {
+      "type": "string"
+     },
+     "refreshToken": {
+      "type": "string"
+     },
+     "expiresAt": {
+      "type": "string",
+      "format": "date-time"
+     }
+    }
+   },
+   "VolumeAssignment": {
+    "type": "object",
+    "required": [
+     "libraryVersion",
+     "portal",
+     "targetIqn",
+     "readOnly",
+     "driveLetter"
+    ],
+    "properties": {
+     "libraryVersion": {
+      "type": "string",
+      "description": "Метка версии библиотеки (например 2026-09)."
+     },
+     "portal": {
+      "type": "string",
+      "description": "Портал iSCSI, `host:port`."
+     },
+     "targetIqn": {
+      "type": "string"
+     },
+     "readOnly": {
+      "type": "boolean",
+      "const": true,
+      "description": "Том общий для всех ПК — только чтение."
+     },
+     "driveLetter": {
+      "type": "string",
+      "pattern": "^[D-Z]$"
+     }
+    }
+   },
+   "VolumeState": {
+    "type": "string",
+    "enum": [
+     "none",
+     "mounting",
+     "mounted",
+     "switchPending",
+     "failed"
+    ],
+    "description": "none — тома нет или отключён; mounting — подключение идёт; mounted — смонтирован и read-only проверен;\nswitchPending — есть новая версия, но старый том занят запущенной игрой; failed — ошибка, см. error.\n"
+   },
+   "MountedVolume": {
+    "type": "object",
+    "required": [
+     "state"
+    ],
+    "properties": {
+     "state": {
+      "$ref": "#/components/schemas/VolumeState"
+     },
+     "targetIqn": {
+      "type": "string"
+     },
+     "libraryVersion": {
+      "type": "string"
+     },
+     "driveLetter": {
+      "type": "string"
+     },
+     "readOnlyVerified": {
+      "type": "boolean",
+      "description": "Диск на ПК подтверждённо read-only (атрибут диска), а не только по настройке."
+     },
+     "error": {
+      "type": "string"
+     }
+    }
+   },
+   "MachineStatus": {
+    "type": "object",
+    "required": [
+     "helperVersion",
+     "volume"
+    ],
+    "properties": {
+     "helperVersion": {
+      "type": "string"
+     },
+     "bootTime": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "volume": {
+      "$ref": "#/components/schemas/MountedVolume"
+     }
+    }
+   },
+   "StatusAccepted": {
+    "type": "object",
+    "required": [
+     "serverTime"
+    ],
+    "properties": {
+     "serverTime": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "volume": {
+      "$ref": "#/components/schemas/VolumeAssignment"
+     }
+    }
+   },
+   "ErrorEnvelope": {
+    "type": "object",
+    "required": [
+     "error"
+    ],
+    "properties": {
+     "error": {
+      "type": "object",
+      "required": [
+       "code",
+       "message",
+       "traceId"
+      ],
+      "properties": {
+       "code": {
+        "type": "string"
+       },
+       "message": {
+        "type": "string"
+       },
+       "details": {},
+       "traceId": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   }
+  }
+ }
+}
