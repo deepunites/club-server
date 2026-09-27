@@ -42,11 +42,15 @@ if (builder.Configuration.GetValue("Database:MigrateOnStart", true))
 }
 
 app.UseMiddleware<ApiErrorMiddleware>();
+app.UseDefaultFiles();
+app.UseStaticFiles();
 app.UseMiddleware<MachineAuthMiddleware>();
 app.UseMiddleware<PanelAuthMiddleware>();
 
 app.MapDisklessEndpoints();
 app.MapLibraryPanelEndpoints();
+app.MapMachinesPanelEndpoints();
+app.MapGet("/", () => Results.Redirect("/panel/"));
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
 app.Run();

@@ -31,3 +31,22 @@ target|promote|done), attempts, lastError, requestedBy, createdAt, updatedAt`.
 Предупреждение: `kind, subject, message, firstSeen, lastSeen`. Виды: `missingSnapshot`, `missingClone`, `cloneWritable`,
 `cloneOrigin`, `missingExtent`, `extentMismatch`, `missingTarget`, `missingLun`, `orphanClone`, `retireBlocked`.
 Сервер ничего не исправляет сам — решение за администратором.
+
+## Рабочие станции
+
+Экран — `/panel/` (статическая страница из `src/Club.Server/wwwroot/panel`, без сборки и внешних зависимостей,
+ru/uz/en; узбекский перевод — черновой, проверить носителем). Обновляется раз в 5 с; перерисовывается только при
+изменении данных.
+
+| Метод и путь | Что делает | Ответы |
+|---|---|---|
+| `GET /machines` | Реестр: `machines`, `zones`, `currentLibraryVersion`, счётчики `online/offline/pending/maintenance` | 200 |
+| `POST /machines/{id}/approve` | Одобрить новую машину: при следующей попытке регистрации помощник получит токены | 204; 404 |
+| `POST /machines/{id}/reject` | Удалить неодобренную машину из реестра | 204; 404; 409 (`alreadyApproved`) |
+| `PATCH /machines/{id}` `{ number?, name?, zone?, maintenance? }` | Номер места (1…9999, уникален), имя, зона, режим обслуживания | 204; 400; 404; 409 (`numberTaken`) |
+
+Машина: `id, number, name, zone, status, hostname, ipAddress, macAddresses, helperVersion, osVersion, lastSeenAt,
+bootTime, volume { state, libraryVersion, readOnlyVerified, outdated, error }, registeredAt`.
+
+`status`: `pendingApproval` → `maintenance` → `neverSeen` / `online` (отчёт помощника не старше 90 с) / `offline`.
+Время из будущего (сбитые часы) считается невменяемым: в ответе `null`, на экране прочерк, в логе предупреждение.

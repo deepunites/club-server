@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Панель клуба</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="i18n.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand" data-i18n="brand">Панель клуба</div>
+    <nav class="tabs">
+      <a class="tab active" href="#machines" data-i18n="tabMachines">Рабочие станции</a>
+    </nav>
+    <div class="topbar-right">
+      <select id="lang" aria-label="Language">
+        <option value="ru">RU</option>
+        <option value="uz">UZ</option>
+        <option value="en">EN</option>
+      </select>
+      <button id="logout" class="ghost" data-i18n="logout" hidden>Выйти</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="login" class="card login" hidden>
+      <h1 data-i18n="loginTitle">Вход в панель</h1>
+      <p class="muted" data-i18n="loginHint">Токен администратора из настроек сервера (Panel:AdminToken).</p>
+      <form id="login-form">
+        <input id="token" type="password" autocomplete="current-password" required>
+        <button type="submit" data-i18n="loginButton">Войти</button>
+      </form>
+      <p id="login-error" class="error" hidden></p>
+    </section>
+
+    <section id="machines" hidden>
+      <div class="screen-head">
+        <h1 data-i18n="tabMachines">Рабочие станции</h1>
+        <div class="summary" id="summary"></div>
+      </div>
+
+      <div id="pending" class="pending" hidden>
+        <h2 data-i18n="pendingTitle">Ждут одобрения</h2>
+        <div id="pending-list" class="pending-list"></div>
+      </div>
+
+      <p id="load-error" class="error" hidden></p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th data-i18n="colNumber">№</th>
+              <th data-i18n="colName">Имя</th>
+              <th data-i18n="colStatus">Статус</th>
+              <th data-i18n="colIp">IP</th>
+              <th data-i18n="colMac">MAC</th>
+              <th data-i18n="colZone">Зона</th>
+              <th data-i18n="colVolume">Библиотека</th>
+              <th data-i18n="colHelper">Помощник</th>
+              <th data-i18n="colSeen">Связь</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <p id="empty" class="muted empty" data-i18n="empty" hidden>Машин пока нет. Установите помощник бездиска на ПК — он появится здесь.</p>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="edit">
+    <form id="edit-form" method="dialog">
+      <h2 data-i18n="editTitle">Машина</h2>
+      <label><span data-i18n="colNumber">№</span><input id="edit-number" type="number" min="1" max="9999" required></label>
+      <label><span data-i18n="colName">Имя</span><input id="edit-name" maxlength="64" required></label>
+      <label><span data-i18n="colZone">Зона</span><select id="edit-zone"></select></label>
+      <label class="check"><input id="edit-maintenance" type="checkbox"><span data-i18n="maintenance">Обслуживание</span></label>
+      <p id="edit-error" class="error" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="ghost" id="edit-cancel" data-i18n="cancel">Отмена</button>
+        <button type="submit" id="edit-save" data-i18n="save">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

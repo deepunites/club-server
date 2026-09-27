@@ -149,6 +149,61 @@ public sealed class MachineRepository(NpgsqlDataSource db)
         await c.ExecuteAsync("DELETE FROM machine_refresh_tokens WHERE machine_id = @id", new { id });
     }
 
+    /// <summary>Одобрение новой машины: при следующей попытке регистрации помощник получит токены.</summary>
+    public async Task<bool> ApproveAsync(Guid id)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        return await c.ExecuteAsync("UPDATE machines SET approved = true, maintenance = false WHERE id = @id", new { id }) == 1;
+    }
+
+    /// <summary>Отклонение: неодобренная машина удаляется из реестра (одобренные так не удаляются).</summary>
+    public async Task<bool> RejectPendingAsync(Guid id)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        return await c.ExecuteAsync("DELETE FROM machines WHERE id = @id AND NOT approved", new { id }) == 1;
+    }
+
+    public sealed record MachineChanges(int? Number, string? Name, string? ZoneId, bool? Maintenance);
+
+    public enum UpdateResult
+    {
+        Updated,
+        NotFound,
+        NumberTaken,
+        UnknownZone,
+    }
+
+    public async Task<UpdateResult> UpdateAsync(Guid id, MachineChanges changes)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        if (changes.ZoneId is { } zone && !await c.ExecuteScalarAsync<bool>("SELECT EXISTS (SELECT 1 FROM zones WHERE id = @zone)", new { zone }))
+        {
+            return UpdateResult.UnknownZone;
+        }
+
+        try
+        {
+            var rows = await c.ExecuteAsync(
+                """
+                UPDATE machines SET number = COALESCE(@Number, number), name = COALESCE(@Name, name),
+                                    zone_id = COALESCE(@ZoneId, zone_id), maintenance = COALESCE(@Maintenance, maintenance)
+                WHERE id = @id
+                """,
+                new { id, changes.Number, changes.Name, changes.ZoneId, changes.Maintenance });
+            return rows == 1 ? UpdateResult.Updated : UpdateResult.NotFound;
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
+        {
+            return UpdateResult.NumberTaken;
+        }
+    }
+
+    public async Task<IReadOnlyList<(string Id, string Name)>> ZonesAsync()
+    {
+        await using var c = await db.OpenConnectionAsync();
+        return (await c.QueryAsync<(string, string)>("SELECT id, name FROM zones ORDER BY name")).ToList();
+    }
+
     /// <summary>Отчёт помощника: факты о томе на ПК и отметка «машина на связи» (считается для подписки).</summary>
     public async Task RecordStatusAsync(Guid id, string helperVersion, string ipAddress, DateTimeOffset? bootTime, VolumeReport volume, DateTimeOffset now)
     {
