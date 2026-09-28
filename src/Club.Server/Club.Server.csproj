@@ -14,4 +14,9 @@
     <ProjectReference Include="..\Club.TrueNas\Club.TrueNas.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Файлы, которые wimboot подкладывает в WinPE (docs/imaging.md). -->
+    <EmbeddedResource Include="Imaging\WinPE\*" LogicalName="WinPE.%(Filename)%(Extension)" />
+  </ItemGroup>
+
 </Project>

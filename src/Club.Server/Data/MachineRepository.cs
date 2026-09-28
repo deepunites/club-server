@@ -26,6 +26,8 @@ public sealed class MachineRow
     public bool? VolumeRoVerified { get; init; }
     public string? VolumeError { get; init; }
     public string[]? DhcpServers { get; init; }
+    public string? ImageVersion { get; init; }
+    public string? SystemDiskJson { get; init; }
     public int CredentialsVersion { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
 }
@@ -48,7 +50,7 @@ public sealed class MachineRepository(NpgsqlDataSource db)
         id, number, name, zone_id AS ZoneId, hwid, hostname, mac_addresses AS MacAddresses, ip_address AS IpAddress,
         approved, maintenance, helper_version AS HelperVersion, os_version AS OsVersion, last_seen_at AS LastSeenAt,
         boot_time AS BootTime, volume_state AS VolumeState, volume_iqn AS VolumeIqn, volume_version AS VolumeVersion,
-        volume_ro_verified AS VolumeRoVerified, volume_error AS VolumeError, dhcp_servers AS DhcpServers, credentials_version AS CredentialsVersion,
+        volume_ro_verified AS VolumeRoVerified, volume_error AS VolumeError, dhcp_servers AS DhcpServers, image_version AS ImageVersion, system_disk::text AS SystemDiskJson, credentials_version AS CredentialsVersion,
         created_at AS CreatedAt
         """;
 
@@ -64,6 +66,12 @@ public sealed class MachineRepository(NpgsqlDataSource db)
     {
         await using var c = await db.OpenConnectionAsync();
         return await c.QuerySingleOrDefaultAsync<MachineRow>($"SELECT {Columns} FROM machines WHERE hwid = @hwid", new { hwid });
+    }
+
+    public async Task<MachineRow?> FindByMacAsync(string mac)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        return await c.QuerySingleOrDefaultAsync<MachineRow>($"SELECT {Columns} FROM machines WHERE @mac = ANY(mac_addresses) ORDER BY approved DESC LIMIT 1", new { mac });
     }
 
     public async Task<IReadOnlyList<MachineRow>> AllAsync()
@@ -206,7 +214,8 @@ public sealed class MachineRepository(NpgsqlDataSource db)
     }
 
     /// <summary>Отчёт помощника: факты о томе на ПК и отметка «машина на связи» (считается для подписки).</summary>
-    public async Task RecordStatusAsync(Guid id, string helperVersion, string ipAddress, DateTimeOffset? bootTime, VolumeReport volume, IReadOnlyList<string>? dhcpServers, DateTimeOffset now)
+    public async Task RecordStatusAsync(Guid id, string helperVersion, string ipAddress, DateTimeOffset? bootTime, VolumeReport volume, IReadOnlyList<string>? dhcpServers, DateTimeOffset now,
+        string? imageVersion = null, string? systemDiskJson = null)
     {
         await using var c = await db.OpenConnectionAsync();
         await c.ExecuteAsync(
@@ -214,9 +223,15 @@ public sealed class MachineRepository(NpgsqlDataSource db)
             UPDATE machines SET last_seen_at = @now, helper_version = @helperVersion, ip_address = @ipAddress, boot_time = @bootTime,
                    volume_state = @State, volume_iqn = @TargetIqn, volume_version = @LibraryVersion,
                    volume_ro_verified = @ReadOnlyVerified, volume_error = @Error,
-                   dhcp_servers = COALESCE(@dhcpServers, dhcp_servers)
+                   dhcp_servers = COALESCE(@dhcpServers, dhcp_servers),
+                   image_version = COALESCE(@imageVersion, image_version),
+                   system_disk = COALESCE(@systemDiskJson::jsonb, system_disk)
             WHERE id = @id
             """,
-            new { id, now, helperVersion, ipAddress, bootTime, volume.State, volume.TargetIqn, volume.LibraryVersion, volume.ReadOnlyVerified, volume.Error, dhcpServers = dhcpServers?.ToArray() });
+            new
+            {
+                id, now, helperVersion, ipAddress, bootTime, volume.State, volume.TargetIqn, volume.LibraryVersion, volume.ReadOnlyVerified, volume.Error,
+                dhcpServers = dhcpServers?.ToArray(), imageVersion, systemDiskJson,
+            });
     }
 }

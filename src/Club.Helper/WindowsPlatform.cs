@@ -78,7 +78,7 @@ public sealed class MachineIdentity : IMachineIdentity
     {
         if (_cached is not null)
         {
-            return _cached with { BootTime = BootTime(), DhcpServers = DhcpServers() };
+            return _cached with { BootTime = BootTime(), DhcpServers = DhcpServers(), ImageVersion = ImageVersion() };
         }
 
         var json = await PowerShell.RunAsync(
@@ -86,7 +86,11 @@ public sealed class MachineIdentity : IMachineIdentity
             $product = Get-CimInstance -ClassName Win32_ComputerSystemProduct
             $board = Get-CimInstance -ClassName Win32_BaseBoard
             $os = Get-CimInstance -ClassName Win32_OperatingSystem
-            [pscustomobject]@{ uuid = [string]$product.UUID; board = [string]$board.SerialNumber; os = "$($os.Caption) $($os.Version)" } | ConvertTo-Json -Compress
+            $disk = Get-Partition -DriveLetter $env:SystemDrive.Substring(0, 1) | Get-Disk
+            [pscustomobject]@{
+                uuid = [string]$product.UUID; board = [string]$board.SerialNumber; os = "$($os.Caption) $($os.Version)"
+                diskSerial = ([string]$disk.SerialNumber).Trim(); diskModel = [string]$disk.FriendlyName; diskSize = [long]$disk.Size; diskBus = [string]$disk.BusType
+            } | ConvertTo-Json -Compress
             """, null, ct);
         using var doc = JsonDocument.Parse(json);
         var uuid = doc.RootElement.GetProperty("uuid").GetString() ?? "";
@@ -101,8 +105,26 @@ public sealed class MachineIdentity : IMachineIdentity
             .Select(b => string.Join(':', b.Select(x => x.ToString("x2"))))
             .Distinct()
             .ToList();
-        _cached = new MachineFacts(hwid, Environment.MachineName, macs, doc.RootElement.GetProperty("os").GetString() ?? "", BootTime());
-        return _cached with { DhcpServers = DhcpServers() };
+        var root = doc.RootElement;
+        var systemDisk = root.TryGetProperty("diskSize", out var size) && size.TryGetInt64(out var bytes) && bytes > 0
+            ? new SystemDiskFacts(root.GetProperty("diskSerial").GetString(), root.GetProperty("diskModel").GetString(), bytes, root.GetProperty("diskBus").GetString() ?? "")
+            : null;
+        _cached = new MachineFacts(hwid, Environment.MachineName, macs, root.GetProperty("os").GetString() ?? "", BootTime(), SystemDisk: systemDisk);
+        return _cached with { DhcpServers = DhcpServers(), ImageVersion = ImageVersion() };
+    }
+
+    /// <summary>Версия образа, которую записал WinPE при заливке (<c>image.json</c> в папке состояния помощника).</summary>
+    private static string? ImageVersion()
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(StateDirectory.Path, "image.json")));
+            return doc.RootElement.TryGetProperty("label", out var label) ? label.GetString() : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return null;
+        }
     }
 
     private static IEnumerable<NetworkInterface> EthernetInterfaces() =>

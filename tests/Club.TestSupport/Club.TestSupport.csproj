@@ -19,6 +19,8 @@
 
   <ItemGroup>
     <None Include="Kea\dhcpdb_create-29.0.pgsql" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Imaging\two-images.wim" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="KeaNetns\run.sh;KeaNetns\dhcp_probe.py" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

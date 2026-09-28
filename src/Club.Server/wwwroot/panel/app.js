@@ -1,4 +1,4 @@
-// Экраны «Рабочие станции» и «Сеть». Без сборки и внешних зависимостей: панель работает в клубе без интернета.
+// Экраны «Рабочие станции», «Сеть» и «Образы Windows». Без сборки и внешних зависимостей: панель работает в клубе без интернета.
 (() => {
   "use strict";
 
@@ -17,6 +17,9 @@
   let netJson = "";
   let netSettings = null;
   let formDirty = false;
+  let imgs = null;
+  let imgsJson = "";
+  let reimaging = null;
   const NET_FIELDS = ["subnet", "interface", "dhcpServer", "gateway", "dnsServers", "poolStart", "poolEnd", "reservedStart", "leaseTimeSec", "keaSubnetId"];
 
   function safeGet(storage, key) {
@@ -98,6 +101,16 @@
     neverSeen: ["idle", "neverSeen"],
     pendingApproval: ["warn", "pendingApproval"],
     maintenance: ["info", "maintenanceStatus"],
+    reimaging: ["warn", "reimaging"],
+  };
+
+  const REIMAGE = {
+    requested: "info",
+    deploying: "info",
+    failed: "bad",
+    booting: "info",
+    done: "ok",
+    cancelled: "idle",
   };
 
   const VOLUME = {
@@ -120,6 +133,41 @@
     return el("div", { class: "badges" }, badges);
   }
 
+  // Версия образа на ПК и ход перезаливки: этап, проценты, причина сбоя.
+  function windowsCell(m) {
+    const r = m.reimage;
+    const parts = [m.imageVersion ? el("span", { class: "mono" }, m.imageVersion) : dash()];
+    if (r) {
+      let text = t(`rs_${r.state}`);
+      if (r.state === "deploying" && r.step) text += ` · ${t(`st_${r.step}`)}${r.percent !== null && r.percent !== undefined ? ` ${r.percent}%` : ""}`;
+      if (r.state === "failed" && r.failure) {
+        const key = `fr_${r.failure}`;
+        text += ` · ${t(key) === key ? t(`st_${r.failure}`) : t(key)}`;
+      }
+      if (r.attempts > 1) text += ` (#${r.attempts})`;
+      parts.push(el("div", {}, badge(REIMAGE[r.state] || "idle", text, r.message || "")));
+      if (r.state === "deploying" && r.step === "download" && r.percent !== null && r.percent !== undefined) {
+        parts.push(el("div", { class: "progress" }, el("span", { style: `width:${r.percent}%` })));
+      }
+    }
+    return el("td", { class: "reimage-cell" }, parts);
+  }
+
+  function reimageActions(m) {
+    const r = m.reimage;
+    const active = r && ["requested", "deploying", "failed", "booting"].includes(r.state);
+    const buttons = [el("button", { class: "ghost small", onclick: () => openEdit(m) }, t("edit"))];
+    if (r && ["requested", "failed"].includes(r.state) && !r.diskTouched) {
+      buttons.push(el("button", { class: "danger small", onclick: () => {
+        if (confirm(t("reimageConfirmCancel", { name: m.name }))) act(`/machines/${m.id}/reimage/cancel`);
+      } }, t("reimageCancel")));
+    }
+    if (!active || r.state === "booting" || r.state === "failed") {
+      buttons.push(el("button", { class: "ghost small", onclick: () => openReimage(m) }, t("reimage")));
+    }
+    return el("td", {}, el("div", { class: "row-actions" }, buttons));
+  }
+
   function zoneName(id) {
     return data?.zones.find((z) => z.id === id)?.name ?? id;
   }
@@ -129,7 +177,9 @@
     const chips = [chip(data.online, "sumOnline"), chip(data.offline, "sumOffline")];
     if (data.pending) chips.push(chip(data.pending, "sumPending"));
     if (data.maintenance) chips.push(chip(data.maintenance, "sumMaintenance"));
+    if (data.reimaging) chips.push(chip(data.reimaging, "sumReimaging"));
     chips.push(el("span", { class: "chip" }, `${t("sumLibrary")}: `, data.currentLibraryVersion ? el("b", {}, data.currentLibraryVersion) : dash()));
+    chips.push(el("span", { class: "chip" }, `${t("sumImage")}: `, data.currentImageVersion ? el("b", {}, data.currentImageVersion) : dash()));
     $("summary").replaceChildren(...chips);
   }
 
@@ -160,9 +210,10 @@
         el("td", { class: "mono" }, m.macAddresses.length ? m.macAddresses.join(", ") : dash()),
         el("td", {}, zoneName(m.zone)),
         el("td", {}, volumeCell(m.volume)),
+        windowsCell(m),
         el("td", {}, orDash(m.helperVersion, true)),
         el("td", {}, ago(m.lastSeenAt)),
-        el("td", {}, el("button", { class: "ghost", onclick: () => openEdit(m) }, t("edit"))));
+        reimageActions(m));
     }));
   }
 
@@ -327,14 +378,166 @@
     }
   }
 
+  // ---------- Перезаливка ----------
+
+  function problemText(error) {
+    const key = `re_${error.reason}`;
+    return error.reason && t(key) !== key ? t(key) : error.message;
+  }
+
+  async function openReimage(machine) {
+    reimaging = machine;
+    $("reimage-name").textContent = machine.name;
+    $("reimage-new-disk").checked = false;
+    $("reimage-error").hidden = true;
+    let overview = imgs;
+    try { overview = await api("/images"); } catch { /* покажем то, что есть */ }
+    const options = [];
+    if (overview?.current) options.push(el("option", { value: overview.current }, `${overview.current} (${t("imgCurrent")})`));
+    if (overview?.rollback) options.push(el("option", { value: overview.rollback }, `${overview.rollback} (${t("imgRollback")})`));
+    $("reimage-image").replaceChildren(...options);
+    $("reimage-start").disabled = options.length === 0;
+    if (options.length === 0) {
+      $("reimage-error").textContent = t("re_noImage");
+      $("reimage-error").hidden = false;
+    }
+    $("reimage").showModal();
+  }
+
+  async function startReimage(event) {
+    event.preventDefault();
+    try {
+      await api(`/machines/${reimaging.id}/reimage`, {
+        method: "POST",
+        body: JSON.stringify({ image: $("reimage-image").value, allowNewDisk: $("reimage-new-disk").checked }),
+      });
+      $("reimage").close();
+      dataJson = "";
+      await load();
+    } catch (error) {
+      $("reimage-error").textContent = problemText(error);
+      $("reimage-error").hidden = false;
+    }
+  }
+
+  // ---------- Образы Windows ----------
+
+  const IMAGE_STATE = { importing: "info", ready: "ok", failed: "bad" };
+
+  function size(bytes) {
+    if (bytes === null || bytes === undefined) return dash();
+    if (bytes >= 1 << 30) return `${(bytes / (1 << 30)).toFixed(1)} GiB`;
+    return bytes >= 1 << 20 ? `${Math.round(bytes / (1 << 20))} MiB` : `${Math.max(1, Math.round(bytes / 1024))} KiB`;
+  }
+
+  function renderImages() {
+    if (!imgs || view !== "images") return;
+    $("img-disabled").hidden = imgs.enabled;
+    const chips = [];
+    const chip = (key, label) => chips.push(el("span", { class: "chip" }, `${t(key)}: `, label ? el("b", {}, label) : dash()));
+    chip("imgCurrent", imgs.current);
+    chip("imgRollback", imgs.rollback);
+    if (imgs.rollback) {
+      chips.push(el("button", { class: "ghost small", onclick: () => {
+        if (confirm(t("imgRollbackConfirm", { label: imgs.rollback }))) imageAct("/images/rollback", "POST");
+      } }, t("imgRollbackBtn")));
+    }
+    $("img-summary").replaceChildren(...chips);
+
+    $("img-warnings").hidden = imgs.warnings.length === 0;
+    $("img-warning-list").replaceChildren(...imgs.warnings.map((w) => el("li", { title: w.message }, warningText(w), " · ", ago(w.lastSeen))));
+
+    $("img-incoming-empty").hidden = imgs.incoming.length > 0 || !imgs.enabled;
+    $("img-incoming").replaceChildren(...imgs.incoming.map((f) => {
+      const suggested = f.name.replace(/\.(wim|esd)$/i, "").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[^a-z0-9]+/, "").slice(0, 40);
+      const label = el("input", { class: "label mono", value: suggested, title: t("labelHint") });
+      const index = el("input", { class: "index", type: "number", min: "1", value: "1" });
+      const error = el("span", { class: "field-error" });
+      return el("form", { class: "incoming-item", onsubmit: async (e) => {
+        e.preventDefault();
+        error.textContent = "";
+        try {
+          await api("/images/import", { method: "POST", body: JSON.stringify({ file: f.name, label: label.value.trim(), index: Number(index.value) }) });
+          imgsJson = "";
+          await loadImages();
+        } catch (err) {
+          const key = `reason_${err.reason}`;
+          error.textContent = err.reason === "format" ? t("labelHint") : t(key) !== key ? t(key) : err.message;
+        }
+      } },
+        el("div", { class: "file" }, el("b", { class: "mono" }, f.name), el("div", { class: "muted" }, size(f.sizeBytes), " · ", ago(f.modifiedAt))),
+        el("label", {}, t("imgLabel"), label),
+        el("label", {}, t("imgIndex"), index),
+        el("button", { type: "submit" }, t("imgImport")),
+        error);
+    }));
+
+    $("img-empty").hidden = imgs.images.length > 0;
+    $("img-rows").replaceChildren(...imgs.images.map((i) => {
+      const badges = [badge(IMAGE_STATE[i.state] || "idle", t(`is_${i.state}`), i.lastError || "")];
+      if (i.role) badges.push(badge(i.role === "current" ? "ok" : "info", t(i.role === "current" ? "imgCurrent" : "imgRollback")));
+      if (i.generalized === true) badges.push(badge("ok", t("gen_true")));
+      if (i.generalized === false) badges.push(badge("bad", t("gen_false")));
+      const editions = i.wimImages.map((w) => el("div", { class: w.index === i.imageIndex ? "picked" : "muted" },
+        `${w.index}. ${w.name}`, w.build ? ` · ${w.build}` : "", w.architecture ? ` · ${w.architecture}` : ""));
+      const actions = [];
+      if (i.state === "ready" && i.role !== "current") {
+        actions.push(el("button", { class: "small", onclick: () => {
+          if (confirm(t("imgPublishConfirm", { label: i.label }))) imageAct(`/images/${encodeURIComponent(i.label)}/publish`, "POST");
+        } }, t("imgPublish")));
+      }
+      if (!i.publishedAt && !i.role && i.state !== "importing") {
+        actions.push(el("button", { class: "danger small", onclick: () => {
+          if (confirm(t("imgDeleteConfirm", { label: i.label }))) imageAct(`/images/${encodeURIComponent(i.label)}`, "DELETE");
+        } }, t("imgDelete")));
+      }
+      return el("tr", {},
+        el("td", { class: "mono" }, el("b", {}, i.label)),
+        el("td", {}, el("div", { class: "badges" }, badges), i.lastError ? el("div", { class: "error small" }, i.lastError) : null),
+        el("td", { class: "editions" }, editions.length ? editions : dash()),
+        el("td", {}, size(i.sizeBytes)),
+        el("td", { class: "mono", title: i.sha256 || "" }, i.sha256 ? `${i.sha256.slice(0, 12)}…` : dash()),
+        el("td", {}, el("div", { class: "row-actions" }, actions)));
+    }));
+  }
+
+  async function loadImages() {
+    try {
+      const fresh = await api("/images");
+      const json = JSON.stringify(fresh);
+      $("img-error").hidden = true;
+      if (json !== imgsJson) {
+        imgs = fresh;
+        imgsJson = json;
+        renderImages();
+      }
+    } catch (error) {
+      if (error.message === "unauthorized") return;
+      $("img-error").textContent = t("loadFailed", { error: error.message });
+      $("img-error").hidden = false;
+    }
+  }
+
+  async function imageAct(path, method) {
+    try {
+      await api(path, { method });
+    } catch (error) {
+      alert(problemText(error));
+    }
+    imgsJson = "";
+    await loadImages();
+  }
+
   // ---------- Навигация ----------
 
   function route() {
-    view = location.hash === "#network" ? "network" : "machines";
+    view = location.hash === "#network" ? "network" : location.hash === "#images" ? "images" : "machines";
     document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === view));
     if (!token) return;
     $("machines").hidden = view !== "machines";
     $("network").hidden = view !== "network";
+    $("images").hidden = view !== "images";
+    if (view === "images") imgsJson = "";
     if (view === "network") {
       netJson = "";
       loadSettings(false);
@@ -344,6 +547,7 @@
 
   function refresh() {
     if (view === "machines") load();
+    if (view === "images") loadImages();
     loadNetwork();
   }
 
@@ -412,7 +616,7 @@
     route();
     clearInterval(timer);
     timer = setInterval(() => {
-      if (document.hidden || $("edit").open) return;
+      if (document.hidden || $("edit").open || $("reimage").open) return;
       refresh();
       refreshAgo();
     }, REFRESH_MS);
@@ -424,6 +628,7 @@
     clearInterval(timer);
     $("machines").hidden = true;
     $("network").hidden = true;
+    $("images").hidden = true;
     $("dhcp-alert").hidden = true;
     $("logout").hidden = true;
     $("login").hidden = false;
@@ -454,6 +659,8 @@
       render();
       renderNetwork();
       renderCapacity();
+      imgsJson = "";
+      renderImages();
     });
     $("login-form").addEventListener("submit", login);
     $("logout").addEventListener("click", logout);
@@ -462,6 +669,8 @@
     $("net-form").addEventListener("submit", saveNetwork);
     $("net-form").addEventListener("input", () => { formDirty = true; $("net-saved").hidden = true; });
     $("net-download").addEventListener("click", downloadConfig);
+    $("reimage-form").addEventListener("submit", startReimage);
+    $("reimage-cancel").addEventListener("click", () => $("reimage").close());
     window.addEventListener("hashchange", route);
     if (token) showApp(); else logout();
   });

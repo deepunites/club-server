@@ -26,11 +26,7 @@ public class ServerFixture : WebApplicationFactory<Program>, IAsyncLifetime
     async Task IAsyncLifetime.DisposeAsync()
     {
         await DisposeAsync();
-        NpgsqlConnection.ClearAllPools();
-        await using var connection = new NpgsqlConnection(AdminConnection);
-        await connection.OpenAsync();
-        await using var command = new NpgsqlCommand($"DROP DATABASE IF EXISTS {_database} WITH (FORCE)", connection);
-        await command.ExecuteNonQueryAsync();
+        await TestDatabases.DropAsync(_database);
         File.Delete(_keyPath);
     }
 

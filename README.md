@@ -16,6 +16,8 @@ src/Club.Helper      помощник бездиска — служба Windows 
 docs/diskless-api.yaml  спецификация API бездиска (OpenAPI 3.1); .json генерирует scripts/build-spec.sh
 docs/panel-api.md    API панели администратора
 docs/network.md      Kea DHCP: адресный план, установка, резервации, чужой DHCP
+docs/imaging.md      образы Windows и перезаливка по PXE (iPXE, wimboot, WinPE)
+scripts/winpe/       сборка WinPE (Windows ADK)
 docs/research/       исследование API TrueNAS и стека .NET (источники и статусы проверки)
 tests/               интеграционные тесты: временная база PostgreSQL, поддельный TrueNAS с TLS
 ```
@@ -43,8 +45,13 @@ tests/               интеграционные тесты: временная
   ручные резервации не трогаются, генерация `kea-dhcp4.conf` (проверяется `kea-dhcp4 -t`), детект чужого DHCP по
   отчётам помощников. Установка Kea и конфига — вручную от root.
 
-Не сделано: проверка помощника и Kea на стенде, PXE, образы Windows и перезаливка, остальные экраны панели,
-вход в панель по учётным записям.
+- **Образы Windows и перезаливка** (`docs/imaging.md`, секция `Imaging`): импорт install.wim (разбор WIM, sha256),
+  текущая и откатная версии; перезаливка из панели — PXE-флаг классом в резервации Kea, iPXE + wimboot + WinPE,
+  скрипт заливки по плану сервера (какой диск стирать — только системный), флаг снимается только после bcdboot.
+  Проверено на настоящей Kea 3.0.3 (в сетевом пространстве без root) и скриптом WinPE в PowerShell с заглушками.
+
+Не сделано: проверка помощника, Kea и заливки на стенде; Secure Boot для PXE (решение владельца), USB-обёртка
+образа, активация Windows; остальные экраны панели, вход в панель по учётным записям.
 
 ## Запуск
 
@@ -58,3 +65,7 @@ ASPNETCORE_ENVIRONMENT=Development dotnet run --project src/Club.Server --urls h
 ```bash
 dotnet test ClubServer.sln
 ```
+
+Необязательные проверки на настоящих программах (без них соответствующие тесты ничего не проверяют):
+`KEA_DHCP4` (+ `KEA_HOOKS_PATH`, `LD_LIBRARY_PATH` для распакованного пакета) — Kea: `kea-dhcp4 -t` и выдача
+загрузчика в сетевом пространстве `unshare -r -n`; `PWSH` — скрипт заливки WinPE в PowerShell.

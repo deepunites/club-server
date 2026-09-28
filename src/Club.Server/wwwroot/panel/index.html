@@ -14,6 +14,7 @@
     <nav class="tabs">
       <a class="tab" href="#machines" data-view="machines" data-i18n="tabMachines">Рабочие станции</a>
       <a class="tab" href="#network" data-view="network" data-i18n="tabNetwork">Сеть</a>
+      <a class="tab" href="#images" data-view="images" data-i18n="tabImages">Образы Windows</a>
     </nav>
     <div class="topbar-right">
       <select id="lang" aria-label="Language">
@@ -62,6 +63,7 @@
               <th data-i18n="colMac">MAC</th>
               <th data-i18n="colZone">Зона</th>
               <th data-i18n="colVolume">Библиотека</th>
+              <th data-i18n="colImage">Windows</th>
               <th data-i18n="colHelper">Помощник</th>
               <th data-i18n="colSeen">Связь</th>
               <th></th>
@@ -70,6 +72,43 @@
           <tbody id="rows"></tbody>
         </table>
         <p id="empty" class="muted empty" data-i18n="empty" hidden>Машин пока нет. Установите помощник бездиска на ПК — он появится здесь.</p>
+      </div>
+    </section>
+
+    <section id="images" hidden>
+      <div class="screen-head">
+        <h1 data-i18n="tabImages">Образы Windows</h1>
+        <div class="summary" id="img-summary"></div>
+      </div>
+      <p id="img-error" class="error" hidden></p>
+      <p id="img-disabled" class="notice" data-i18n="imgDisabled" hidden></p>
+      <div id="img-warnings" class="card warnings" hidden>
+        <h2 data-i18n="netWarnings">Предупреждения</h2>
+        <ul id="img-warning-list"></ul>
+      </div>
+
+      <div class="card incoming">
+        <h2 data-i18n="imgIncoming">Новые файлы</h2>
+        <p id="img-incoming-empty" class="muted" data-i18n="imgIncomingEmpty" hidden></p>
+        <div id="img-incoming" class="incoming-list"></div>
+      </div>
+
+      <div class="table-wrap">
+        <h2 class="table-title" data-i18n="imgList">Версии образа</h2>
+        <table>
+          <thead>
+            <tr>
+              <th data-i18n="imgLabel">Версия</th>
+              <th data-i18n="colStatus">Статус</th>
+              <th data-i18n="colEditions">Состав</th>
+              <th data-i18n="colSize">Размер</th>
+              <th data-i18n="colSha">sha256</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="img-rows"></tbody>
+        </table>
+        <p id="img-empty" class="muted empty" data-i18n="imgEmpty" hidden></p>
       </div>
     </section>
 
@@ -144,6 +183,21 @@
       <div class="dialog-actions">
         <button type="button" class="ghost" id="edit-cancel" data-i18n="cancel">Отмена</button>
         <button type="submit" id="edit-save" data-i18n="save">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="reimage">
+    <form id="reimage-form" method="dialog">
+      <h2><span data-i18n="reimageTitle">Перезаливка Windows</span>: <span id="reimage-name"></span></h2>
+      <p class="muted small" data-i18n="reimageHint"></p>
+      <label><span data-i18n="reimageImage">Образ</span><select id="reimage-image"></select></label>
+      <label class="check"><input id="reimage-new-disk" type="checkbox"><span data-i18n="reimageAllowNewDisk"></span></label>
+      <p class="muted small" data-i18n="reimageAllowNewDiskHint"></p>
+      <p id="reimage-error" class="error" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="ghost" id="reimage-cancel" data-i18n="cancel">Отмена</button>
+        <button type="submit" class="danger-solid" id="reimage-start" data-i18n="reimageStart">Перезалить</button>
       </div>
     </form>
   </dialog>

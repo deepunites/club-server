@@ -271,6 +271,33 @@ components:
           items:
             type: string
             format: ipv4
+        imageVersion:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9._-]{0,39}$'
+          description: >-
+            Версия образа Windows на ПК — метка из %ProgramData%\ClubDiskless\image.json, который пишет WinPE при
+            заливке. Сервер закрывает задание перезаливки, когда Windows выходит на связь с нужной версией.
+        systemDisk:
+          $ref: '#/components/schemas/SystemDisk'
+    SystemDisk:
+      type: object
+      description: >-
+        Диск, с которого загружена Windows (Get-Disk). При перезаливке WinPE стирает только диск с этим серийным
+        номером: второй диск или флешка не пострадают.
+      required: [sizeBytes, busType]
+      properties:
+        serial:
+          type: string
+          maxLength: 128
+        model:
+          type: string
+        sizeBytes:
+          type: integer
+          format: int64
+          minimum: 1
+        busType:
+          type: string
+          examples: [NVMe, SATA, SAS, RAID]
     StatusAccepted:
       type: object
       required: [serverTime]

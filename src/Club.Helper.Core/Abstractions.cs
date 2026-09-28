@@ -59,7 +59,12 @@ public interface IProcessInspector
 /// Факты о машине. <c>MacAddresses</c> — первым MAC основной карты (с IPv4-шлюзом): по нему сервер делает резервацию DHCP.
 /// <c>DhcpServers</c> — кто выдал текущие аренды; чужой адрес здесь — чужой DHCP в сети клуба.
 /// </summary>
-public sealed record MachineFacts(string Hwid, string Hostname, IReadOnlyList<string> MacAddresses, string OsVersion, DateTimeOffset BootTime, IReadOnlyList<string>? DhcpServers = null);
+public sealed record MachineFacts(
+    string Hwid, string Hostname, IReadOnlyList<string> MacAddresses, string OsVersion, DateTimeOffset BootTime, IReadOnlyList<string>? DhcpServers = null,
+    string? ImageVersion = null, SystemDiskFacts? SystemDisk = null);
+
+/// <summary>Диск, с которого загружена Windows: по серийному номеру WinPE при перезаливке стирает именно его.</summary>
+public sealed record SystemDiskFacts(string? Serial, string? Model, long SizeBytes, string BusType);
 
 public interface IMachineIdentity
 {

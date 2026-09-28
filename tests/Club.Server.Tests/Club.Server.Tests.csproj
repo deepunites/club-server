@@ -19,6 +19,7 @@
 
   <ItemGroup>
     <Content Include="..\..\docs\diskless-api.json" Link="spec\diskless-api.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="WinPE\harness.ps1" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

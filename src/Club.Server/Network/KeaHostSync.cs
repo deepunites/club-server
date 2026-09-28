@@ -27,15 +27,21 @@ public sealed record KeaSyncResult(bool SchemaOk, string? SchemaVersion, int Des
 /// Наши строки помечены <c>user_context.clubsrv</c>; строки без метки (ручные) не трогаются никогда —
 /// конфликт с ними (тот же MAC или IP в подсети) становится предупреждением, а машина остаётся без резервации.
 /// </summary>
-public sealed class KeaHostSync(KeaOptions options, MachineRepository machines, NetworkRepository network, ILogger<KeaHostSync> logger)
+public sealed class KeaHostSync(KeaOptions options, MachineRepository machines, NetworkRepository network, Imaging.ImageRepository images, ILogger<KeaHostSync> logger)
 {
     private const short HwAddress = 0;
+
+    /// <summary>
+    /// Класс клиента в резервации = PXE-флаг: только с ним Kea отдаёт загрузчик (классы <c>club-reimage-*</c> в
+    /// <see cref="KeaConfig"/>). Без него ПК получает адрес без имени загрузочного файла и сразу грузится с диска.
+    /// </summary>
+    public const string ReimageClass = "club-reimage";
     private const long LockKey = 0x436C75624B6561; // "ClubKea"
 
-    public sealed record DesiredHost(Guid MachineId, int Seat, byte[] Mac, uint Ip, string Hostname);
+    public sealed record DesiredHost(Guid MachineId, int Seat, byte[] Mac, uint Ip, string Hostname, bool Pxe = false);
 
     /// <summary>Что должно быть в Kea по реестру и адресному плану; конфликты внутри реестра — сразу предупреждения.</summary>
-    public static (IReadOnlyList<DesiredHost> Hosts, IReadOnlyList<KeaConflict> Conflicts) Plan(IReadOnlyList<MachineRow> registry, IpPlan plan)
+    public static (IReadOnlyList<DesiredHost> Hosts, IReadOnlyList<KeaConflict> Conflicts) Plan(IReadOnlyList<MachineRow> registry, IpPlan plan, IReadOnlySet<Guid>? pxeArmed = null)
     {
         var hosts = new List<DesiredHost>();
         var conflicts = new List<KeaConflict>();
@@ -59,7 +65,7 @@ public sealed class KeaHostSync(KeaOptions options, MachineRepository machines, 
                 continue;
             }
 
-            hosts.Add(new DesiredHost(m.Id, m.Number, mac, ip, Hostname(m.Name, m.Number)));
+            hosts.Add(new DesiredHost(m.Id, m.Number, mac, ip, Hostname(m.Name, m.Number), pxeArmed?.Contains(m.Id) ?? false));
         }
 
         return (hosts, conflicts);
@@ -75,7 +81,7 @@ public sealed class KeaHostSync(KeaOptions options, MachineRepository machines, 
         }
 
         var plan = new IpPlan(settings);
-        var (desired, conflicts) = Plan(await machines.AllAsync(), plan);
+        var (desired, conflicts) = Plan(await machines.AllAsync(), plan, await images.ArmedMachinesAsync());
         var conflictList = conflicts.ToList();
 
         await using var db = new NpgsqlConnection(options.ConnectionString);
@@ -116,7 +122,8 @@ public sealed class KeaHostSync(KeaOptions options, MachineRepository machines, 
 
             if (ours.TryGetValue(host.MachineId, out var current))
             {
-                if (current.Mac.AsSpan().SequenceEqual(host.Mac) && current.Ip == host.Ip && current.Hostname == host.Hostname && current.SubnetId == settings.KeaSubnetId)
+                if (current.Mac.AsSpan().SequenceEqual(host.Mac) && current.Ip == host.Ip && current.Hostname == host.Hostname && current.SubnetId == settings.KeaSubnetId
+                    && current.Classes == (host.Pxe ? ReimageClass : null))
                 {
                     keep.Add(host.MachineId);
                     continue;
@@ -147,8 +154,8 @@ public sealed class KeaHostSync(KeaOptions options, MachineRepository machines, 
         foreach (var host in toInsert)
         {
             await ExecAsync(db, tx, ct,
-                "INSERT INTO hosts (dhcp_identifier, dhcp_identifier_type, dhcp4_subnet_id, ipv4_address, hostname, user_context) VALUES ($1, $2, $3, $4, $5, $6)",
-                host.Mac, HwAddress, (long)settings.KeaSubnetId, (long)host.Ip, host.Hostname, Context(host));
+                "INSERT INTO hosts (dhcp_identifier, dhcp_identifier_type, dhcp4_subnet_id, ipv4_address, hostname, user_context, dhcp4_client_classes) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                host.Mac, HwAddress, (long)settings.KeaSubnetId, (long)host.Ip, host.Hostname, Context(host), host.Pxe ? ReimageClass : (object)DBNull.Value);
         }
 
         await tx.CommitAsync(ct);
@@ -160,14 +167,14 @@ public sealed class KeaHostSync(KeaOptions options, MachineRepository machines, 
         return new KeaSyncResult(true, version, desired.Count, inserted, updated, deleted, conflictList);
     }
 
-    private sealed record KeaHost(int HostId, byte[] Mac, long? SubnetId, uint? Ip, string? Hostname, Guid? MachineId);
+    private sealed record KeaHost(int HostId, byte[] Mac, long? SubnetId, uint? Ip, string? Hostname, Guid? MachineId, string? Classes);
 
     /// <summary>Строки Kea в нашей подсети (hw-address) плюс наши строки из других подсетей (после смены subnet id).</summary>
     private static async Task<List<KeaHost>> ReadHostsAsync(NpgsqlConnection db, NpgsqlTransaction tx, int subnetId, CancellationToken ct)
     {
         await using var cmd = new NpgsqlCommand(
             """
-            SELECT host_id, dhcp_identifier, dhcp4_subnet_id, ipv4_address, hostname, user_context FROM hosts
+            SELECT host_id, dhcp_identifier, dhcp4_subnet_id, ipv4_address, hostname, user_context, dhcp4_client_classes FROM hosts
             WHERE dhcp_identifier_type = 0 AND (dhcp4_subnet_id = $1 OR user_context LIKE '%"clubsrv"%')
             FOR UPDATE
             """, db, tx);
@@ -182,7 +189,8 @@ public sealed class KeaHostSync(KeaOptions options, MachineRepository machines, 
                 reader.IsDBNull(2) ? null : reader.GetInt64(2),
                 reader.IsDBNull(3) ? null : (uint)reader.GetInt64(3),
                 reader.IsDBNull(4) ? null : reader.GetString(4),
-                reader.IsDBNull(5) ? null : OurMachineId(reader.GetString(5))));
+                reader.IsDBNull(5) ? null : OurMachineId(reader.GetString(5)),
+                reader.IsDBNull(6) ? null : reader.GetString(6)));
         }
 
         return rows;

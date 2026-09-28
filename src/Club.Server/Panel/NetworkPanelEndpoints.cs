@@ -95,7 +95,7 @@ public static class NetworkPanelEndpoints
             return Results.Json(new NetworkStatusView(settings.Configured, kea.Enabled, sync, state.Foreign, reservations, warnings), ApiJson.Options);
         });
 
-        panel.MapGet("/kea-dhcp4.conf", async (NetworkRepository network) =>
+        panel.MapGet("/kea-dhcp4.conf", async (NetworkRepository network, Imaging.ImagingOptions imaging) =>
         {
             var settings = await network.GetAsync();
             if (!settings.Configured)
@@ -103,9 +103,15 @@ public static class NetworkPanelEndpoints
                 throw new ApiException(StatusCodes.Status409Conflict, ErrorCodes.Conflict, "Network settings are not saved yet", new { reason = "notConfigured" });
             }
 
-            return Results.Text(KeaConfig.Render(settings), "application/json; charset=utf-8");
+            return Results.Text(KeaConfig.Render(settings, pxe: PxeBootFor(settings, imaging)), "application/json; charset=utf-8");
         });
     }
+
+    /// <summary>PXE в конфиге Kea — только при включённых образах и известном адресе сервера для ПК; TFTP — на этой же машине.</summary>
+    public static PxeBoot? PxeBootFor(NetworkSettings settings, Imaging.ImagingOptions imaging) =>
+        imaging.Enabled && Uri.TryCreate(imaging.PublicBaseUrl, UriKind.Absolute, out var url) && url.Scheme == Uri.UriSchemeHttp
+            ? new PxeBoot(settings.DhcpServer, url.ToString().TrimEnd('/') + Imaging.PxeEndpoints.Prefix + "/boot.ipxe")
+            : null;
 
     private static NetworkSettingsView View(NetworkSettings s) =>
         new(s.Configured, s.Subnet, new IpPlan(s).Mask, s.KeaSubnetId, s.Interface, s.DhcpServer, s.Gateway, s.DnsServers,

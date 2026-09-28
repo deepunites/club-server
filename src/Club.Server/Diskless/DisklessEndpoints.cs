@@ -19,7 +19,11 @@ public sealed record VolumeAssignment(string LibraryVersion, string Portal, stri
 
 public sealed record MountedVolume(string State, string? TargetIqn, string? LibraryVersion, string? DriveLetter, bool? ReadOnlyVerified, string? Error);
 
-public sealed record MachineStatus(string HelperVersion, DateTimeOffset? BootTime, MountedVolume Volume, IReadOnlyList<string>? DhcpServers);
+public sealed record SystemDiskReport(string? Serial, string? Model, long SizeBytes, string BusType);
+
+public sealed record MachineStatus(
+    string HelperVersion, DateTimeOffset? BootTime, MountedVolume Volume, IReadOnlyList<string>? DhcpServers,
+    string? ImageVersion = null, SystemDiskReport? SystemDisk = null);
 
 public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume);
 
@@ -128,7 +132,7 @@ public static partial class DisklessEndpoints
         return Results.Json(new RefreshResponse(access, refresh, expiresAt), ApiJson.Options);
     }
 
-    private static async Task<IResult> StatusAsync(Guid machineId, MachineStatus request, HttpContext context, MachineRepository machines, LibraryRepository library, LibraryOptions options, TimeProvider clock)
+    private static async Task<IResult> StatusAsync(Guid machineId, MachineStatus request, HttpContext context, MachineRepository machines, LibraryRepository library, LibraryOptions options, Imaging.ImageRepository images, TimeProvider clock)
     {
         RequireSelf(context, machineId);
         Require(request.HelperVersion, "helperVersion");
@@ -141,7 +145,14 @@ public static partial class DisklessEndpoints
         var dhcp = request.DhcpServers?.Where(d => Network.IpPlan.TryParseIp(d, out _)).Distinct().Take(8).ToList();
         await machines.RecordStatusAsync(
             machineId, request.HelperVersion, ClientIp(context), request.BootTime,
-            new VolumeReport(v.State, v.TargetIqn, v.LibraryVersion, v.ReadOnlyVerified, Truncate(v.Error, 2000)), dhcp, clock.GetUtcNow());
+            new VolumeReport(v.State, v.TargetIqn, v.LibraryVersion, v.ReadOnlyVerified, Truncate(v.Error, 2000)), dhcp, clock.GetUtcNow(),
+            ImageVersionOrNull(request.ImageVersion), SystemDiskJson(request.SystemDisk));
+        if (ImageVersionOrNull(request.ImageVersion) is { } imageVersion)
+        {
+            // Windows после перезаливки вышла на связь с нужной версией образа — задание перезаливки выполнено.
+            await images.CompleteBootedAsync(machineId, imageVersion, clock.GetUtcNow());
+        }
+
         return Results.Json(new StatusAccepted(clock.GetUtcNow(), await AssignmentAsync(library, options)), ApiJson.Options);
     }
 
@@ -172,6 +183,17 @@ public static partial class DisklessEndpoints
     }
 
     private static string ClientIp(HttpContext context) => context.Connection.RemoteIpAddress?.ToString() ?? "";
+
+    private static string? ImageVersionOrNull(string? value) =>
+        value is not null && Imaging.ImageLibrary.LabelPattern().IsMatch(value) ? value : null;
+
+    /// <summary>Системный диск — только с правдоподобными значениями (иначе WinPE выбрал бы диск по мусору).</summary>
+    private static string? SystemDiskJson(SystemDiskReport? disk) =>
+        disk is { SizeBytes: > 0 } && !string.IsNullOrWhiteSpace(disk.BusType) && (disk.Serial?.Length ?? 0) <= 128
+            ? System.Text.Json.JsonSerializer.Serialize(
+                new Imaging.SystemDisk(disk.Serial?.Trim(), Truncate(disk.Model, 128), disk.SizeBytes, Truncate(disk.BusType, 32)!),
+                System.Text.Json.JsonSerializerOptions.Web)
+            : null;
 
     private static string? Truncate(string? value, int max) => value is null || value.Length <= max ? value : value[..max];
 }

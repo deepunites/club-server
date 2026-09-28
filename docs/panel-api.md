@@ -67,3 +67,28 @@ bootTime, volume { state, libraryVersion, readOnlyVerified, outdated, error }, r
 
 `sync` отсутствует, пока запись в Kea выключена (`Kea:Enabled`) или план не сохранён. `warnings` — источник
 `network`: `manualReservation`, `seatOutOfRange`, `noMac`, `duplicateMac`, `keaSchema`, `keaUnavailable`, `foreignDhcp`.
+
+## Образы Windows и перезаливка
+
+Подробно — `docs/imaging.md`.
+
+| Метод и путь | Что делает | Ответы |
+|---|---|---|
+| `GET /images` | `enabled, current, rollback, images [{ label, state, role, sizeBytes, sha256, imageIndex, wimImages, generalized, createdAt, importedAt, publishedAt, lastError }], incoming [{ name, sizeBytes, modifiedAt }], warnings` | 200 |
+| `POST /images/import` `{ file, label, index }` | Импорт файла из `incoming/` (фоновый: перенос, разбор WIM, sha256) | 202; 400 (`file`/`label`); 409 (`labelTaken`, `imagingDisabled`) |
+| `POST /images/{label}/publish` | Сделать текущей; прежняя — откатная, более старая удаляется | 204; 404; 409 (`imageNotReady`) |
+| `POST /images/rollback` | Поменять текущую и откатную местами | 204; 409 (`noRollback`) |
+| `DELETE /images/{label}` | Удалить неопубликованную версию | 204; 409 (`inUse`) |
+| `POST /machines/{id}/reimage` `{ image?, allowNewDisk? }` | Перезалить (по умолчанию текущей версией) | 202; 409 (`noImage`, `imageNotReady`, `noReservation`, `alreadyRequested`, `keaDisabled`, `imagingDisabled`, `notApproved`) |
+| `POST /machines/{id}/reimage/cancel` | Отменить, пока диск не тронут | 204; 404; 409 (`diskTouched`) |
+
+В `GET /machines` у машины `imageVersion` и `reimage { state, image, step, percent, message, failure, diskTouched,
+pxeArmed, attempts, updatedAt }`, статус `reimaging`, в обзоре `currentImageVersion` и `reimaging`.
+`failure` — шаг или причина: `systemDiskNotFound`, `ambiguousDisks`, `diskTooSmall`, `noInternalDisk`,
+`biosNotSupported`, `imageUnavailable`, `notGeneralized`, `partition`, `download`, `verify`, `apply`, `identity`, `bcdboot`.
+
+Для WinPE и iPXE (без авторизации): `GET /pxe/v1/boot.ipxe`, `/pxe/v1/machines/{mac}/boot.ipxe`,
+`/pxe/v1/winpe/{club-deploy.ps1|winpeshl.ini|clubdeploy.json}`, `/pxe/v1/files/{путь в PxeRoot}`;
+`POST /deploy/v1/start`, `PUT /deploy/v1/jobs/{id}/progress`, `GET /deploy/v1/jobs/{id}/image` (Range),
+`POST /deploy/v1/jobs/{id}/unattend|fail|complete`.
+

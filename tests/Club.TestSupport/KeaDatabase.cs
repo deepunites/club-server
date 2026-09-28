@@ -35,29 +35,22 @@ public sealed class KeaDatabase : IAsyncDisposable
         return await cmd.ExecuteNonQueryAsync();
     }
 
-    /// <summary>Строки <c>hosts</c>: MAC (hex), подсеть, IP, имя хоста, user_context.</summary>
-    public async Task<List<(string Mac, long Subnet, string Ip, string? Hostname, string? Context)>> HostsAsync()
+    /// <summary>Строки <c>hosts</c>: MAC (hex), подсеть, IP, имя хоста, user_context, классы клиента (PXE-флаг).</summary>
+    public async Task<List<(string Mac, long Subnet, string Ip, string? Hostname, string? Context, string? Classes)>> HostsAsync()
     {
         await using var c = new NpgsqlConnection(ConnectionString);
         await c.OpenAsync();
         await using var cmd = new NpgsqlCommand(
-            "SELECT encode(dhcp_identifier, 'hex'), dhcp4_subnet_id, (('0.0.0.0'::inet) + ipv4_address)::text, hostname, user_context FROM hosts ORDER BY ipv4_address", c);
-        var rows = new List<(string, long, string, string?, string?)>();
+            "SELECT encode(dhcp_identifier, 'hex'), dhcp4_subnet_id, (('0.0.0.0'::inet) + ipv4_address)::text, hostname, user_context, dhcp4_client_classes FROM hosts ORDER BY ipv4_address", c);
+        var rows = new List<(string, long, string, string?, string?, string?)>();
         await using var reader = await cmd.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            rows.Add((reader.GetString(0), reader.GetInt64(1), reader.GetString(2).Split('/')[0], reader.IsDBNull(3) ? null : reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4)));
+            rows.Add((reader.GetString(0), reader.GetInt64(1), reader.GetString(2).Split('/')[0], reader.IsDBNull(3) ? null : reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5)));
         }
 
         return rows;
     }
 
-    public async ValueTask DisposeAsync()
-    {
-        NpgsqlConnection.ClearAllPools();
-        await using var admin = new NpgsqlConnection(AdminConnection);
-        await admin.OpenAsync();
-        await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS {_name} WITH (FORCE)", admin);
-        await drop.ExecuteNonQueryAsync();
-    }
+    public async ValueTask DisposeAsync() => await TestDatabases.DropAsync(_name);
 }

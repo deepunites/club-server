@@ -11,7 +11,9 @@ public sealed record VolumeAssignment(string LibraryVersion, string Portal, stri
 
 public sealed record MountedVolume(string State, string? TargetIqn = null, string? LibraryVersion = null, string? DriveLetter = null, bool? ReadOnlyVerified = null, string? Error = null);
 
-public sealed record MachineStatus(string HelperVersion, DateTimeOffset? BootTime, MountedVolume Volume, IReadOnlyList<string>? DhcpServers = null);
+public sealed record MachineStatus(
+    string HelperVersion, DateTimeOffset? BootTime, MountedVolume Volume, IReadOnlyList<string>? DhcpServers = null,
+    string? ImageVersion = null, SystemDiskFacts? SystemDisk = null);
 
 public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume);
 
