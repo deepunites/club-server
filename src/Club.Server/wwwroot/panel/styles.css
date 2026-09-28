@@ -218,3 +218,6 @@ td.wrap { white-space: normal; min-width: 300px; }
   main { padding: 12px; }
   .fields { grid-template-columns: 1fr; }
 }
+
+/* Действия в строке машины — столбиком: таблица рабочих станций широкая. */
+#rows .row-actions { flex-direction: column; align-items: stretch; }
