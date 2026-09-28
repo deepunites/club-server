@@ -17,6 +17,25 @@ public sealed class VolumeManager(IWindowsStorage storage, IProcessInspector pro
     /// <summary>Таргеты версий библиотеки называются <c>games-&lt;версия&gt;</c>; чужие iSCSI-подключения ПК не трогаем.</summary>
     public const string ManagedTargetMarker = ":games-";
 
+    /// <summary>Папки на смонтированном томе; не удалось прочитать — <c>null</c> (сообщим в следующий раз).</summary>
+    public async Task<IReadOnlyList<string>?> ContentsAsync(MountedVolume report, CancellationToken ct)
+    {
+        if (report.State != "mounted" || report.DriveLetter is not { Length: 1 } letter)
+        {
+            return null;
+        }
+
+        try
+        {
+            return await storage.ListFoldersAsync(letter[0], ct);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            logger.LogWarning("Could not list folders on {Letter}: {Reason}", letter, ex.Message);
+            return null;
+        }
+    }
+
     public async Task<MountedVolume> ApplyAsync(VolumeAssignment? desired, CancellationToken ct)
     {
         var managed = (await storage.ConnectedTargetsAsync(ct))

@@ -47,6 +47,9 @@ public interface IWindowsStorage
 
     /// <summary>Назначает букву основному разделу диска. Буква занята другим томом — исключение.</summary>
     Task AssignDriveLetterAsync(int diskNumber, char letter, CancellationToken ct);
+
+    /// <summary>Папки верхнего уровня тома (без скрытых и системных) — «состав» версии библиотеки для панели.</summary>
+    Task<IReadOnlyList<string>> ListFoldersAsync(char driveLetter, CancellationToken ct);
 }
 
 /// <summary>Процессы, запущенные с тома (исполняемый файл на букве тома).</summary>

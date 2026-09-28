@@ -3,9 +3,14 @@ using Club.Server.Library;
 
 namespace Club.Server.Panel;
 
+/// <summary><c>mountedOn</c> — сколько ПК на связи сейчас работают с этой версией; <c>contents</c> — папки тома по отчёту помощника.</summary>
 public sealed record LibraryVersionView(
     Guid Id, string Label, string State, string? Role, string? TargetIqn, DateTimeOffset CreatedAt,
-    DateTimeOffset? PublishedAt, DateTimeOffset? RetiredAt, string? LastError);
+    DateTimeOffset? PublishedAt, DateTimeOffset? RetiredAt, string? LastError,
+    int MountedOn = 0, IReadOnlyList<string>? Contents = null, DateTimeOffset? ContentsAt = null);
+
+/// <summary>ПК на связи (одобренные, отчёт не старше 90 с) по отношению к текущей версии.</summary>
+public sealed record LibraryAdoption(int Online, int OnCurrent, int OnOlder, int SwitchPending, int Failed, int NotMounted);
 
 public sealed record StorageOperationView(
     Guid Id, string Kind, string? VersionLabel, string Status, string? Step, int Attempts, string? LastError,
@@ -19,7 +24,8 @@ public sealed record LibraryOverview(
     LibraryVersionView? Rollback,
     IReadOnlyList<LibraryVersionView> Versions,
     IReadOnlyList<StorageOperationView> OpenOperations,
-    IReadOnlyList<StorageWarningView> Warnings);
+    IReadOnlyList<StorageWarningView> Warnings,
+    LibraryAdoption? Machines = null);
 
 public sealed record PublishRequest(string Label);
 
@@ -35,19 +41,35 @@ public static class LibraryPanelEndpoints
     {
         var panel = app.MapGroup(PanelAuthMiddleware.Prefix + "/v1");
 
-        panel.MapGet("/library", async (LibraryRepository repository, LibraryOptions options) =>
+        panel.MapGet("/library", async (LibraryRepository repository, LibraryOptions options, Data.MachineRepository machines, TimeProvider clock) =>
         {
             var pointers = await repository.PointersAsync();
             var versions = await repository.AllVersionsAsync();
             var labels = versions.ToDictionary(v => v.Id, v => v.Label);
+            var now = clock.GetUtcNow();
+            var online = (await machines.AllAsync())
+                .Where(m => m.Approved && m.LastSeenAt is { } seen && seen <= now.AddMinutes(5) && now - seen <= MachinesPanelEndpoints.OnlineWindow)
+                .ToList();
+            var mounted = online.Where(m => m.VolumeState is "mounted" or "switchPending" && m.VolumeVersion is not null)
+                .GroupBy(m => m.VolumeVersion!)
+                .ToDictionary(g => g.Key, g => g.Count());
+            var current = pointers.Current?.Label;
+            var adoption = new LibraryAdoption(
+                online.Count,
+                online.Count(m => m.VolumeState == "mounted" && current is not null && m.VolumeVersion == current),
+                online.Count(m => m.VolumeState == "mounted" && m.VolumeVersion != current),
+                online.Count(m => m.VolumeState == "switchPending"),
+                online.Count(m => m.VolumeState == "failed"),
+                online.Count(m => m.VolumeState is "none" or "mounting"));
             return Results.Json(
                 new LibraryOverview(
                     options.Enabled,
-                    pointers.Current is null ? null : View(pointers.Current, pointers),
-                    pointers.Rollback is null ? null : View(pointers.Rollback, pointers),
-                    versions.Select(v => View(v, pointers)).ToList(),
+                    pointers.Current is null ? null : View(pointers.Current, pointers, mounted),
+                    pointers.Rollback is null ? null : View(pointers.Rollback, pointers, mounted),
+                    versions.Select(v => View(v, pointers, mounted)).ToList(),
                     (await repository.OpenOperationsAsync()).Select(o => View(o, labels)).ToList(),
-                    (await repository.ActiveWarningsAsync()).Select(View).ToList()),
+                    (await repository.ActiveWarningsAsync()).Select(View).ToList(),
+                    adoption),
                 ApiJson.Options);
         });
 
@@ -108,10 +130,11 @@ public static class LibraryPanelEndpoints
         }
     }
 
-    private static LibraryVersionView View(LibraryVersion v, LibraryPointers pointers) => new(
+    private static LibraryVersionView View(LibraryVersion v, LibraryPointers pointers, IReadOnlyDictionary<string, int> mounted) => new(
         v.Id, v.Label, v.State,
         v.Id == pointers.Current?.Id ? "current" : v.Id == pointers.Rollback?.Id ? "rollback" : null,
-        v.TargetIqn, v.CreatedAt, v.PublishedAt, v.RetiredAt, v.LastError);
+        v.TargetIqn, v.CreatedAt, v.PublishedAt, v.RetiredAt, v.LastError,
+        mounted.GetValueOrDefault(v.Label), v.Contents, v.ContentsAt);
 
     private static StorageOperationView View(StorageOperation o, IReadOnlyDictionary<Guid, string> labels) => new(
         o.Id, o.Kind, o.VersionId is { } id && labels.TryGetValue(id, out var label) ? label : null,

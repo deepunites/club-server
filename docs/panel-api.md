@@ -23,7 +23,16 @@ camelCase, enum строками, время `2026-09-27T10:15:30.123Z`, оши�
 | `GET /storage/warnings` | Активные предупреждения сверки намерений с TrueNAS | 200 |
 
 Версия: `id, label, state (publishing|published|retiring|retired|failed), role (current|rollback|null), targetIqn,
-createdAt, publishedAt, retiredAt, lastError`.
+createdAt, publishedAt, retiredAt, lastError, mountedOn, contents, contentsAt`. `mountedOn` — сколько ПК на связи
+работают с этой версией (подключена или ждут выхода из игры, чтобы переключиться); `contents` — папки верхнего уровня
+тома по отчёту помощника (null — ещё ни один ПК не сообщил).
+
+В обзоре также `machines { online, onCurrent, onOlder, switchPending, failed, notMounted }` — ПК на связи (одобренные,
+отчёт не старше 90 с) по отношению к текущей версии.
+
+Экран — вкладка «Библиотека игр» (`/panel/#library`): текущая и откатная версии, откат, публикация новой версии
+(метка по умолчанию — сегодняшняя дата), шаги выполняющихся операций, распределение ПК по версиям, состав версии,
+журнал операций с повтором упавших, предупреждения сверки.
 
 Операция: `id, kind (publish|rollback), versionLabel, status (pending|running|done|failed), step (snapshot|clone|extent|
 target|promote|done), attempts, lastError, requestedBy, createdAt, updatedAt`.

@@ -400,6 +400,15 @@
      },
      "error": {
       "type": "string"
+     },
+     "contents": {
+      "type": "array",
+      "maxItems": 1000,
+      "description": "Папки верхнего уровня тома (без скрытых и системных) — «состав» версии библиотеки для панели. Помощник шлёт их один раз после подключения версии. Сервер принимает только при state=mounted и readOnlyVerified=true.",
+      "items": {
+       "type": "string",
+       "maxLength": 255
+      }
      }
     }
    },

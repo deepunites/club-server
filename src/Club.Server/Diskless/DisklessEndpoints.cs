@@ -17,7 +17,9 @@ public sealed record RefreshResponse(string AccessToken, string RefreshToken, Da
 
 public sealed record VolumeAssignment(string LibraryVersion, string Portal, string TargetIqn, bool ReadOnly, string DriveLetter);
 
-public sealed record MountedVolume(string State, string? TargetIqn, string? LibraryVersion, string? DriveLetter, bool? ReadOnlyVerified, string? Error);
+public sealed record MountedVolume(
+    string State, string? TargetIqn, string? LibraryVersion, string? DriveLetter, bool? ReadOnlyVerified, string? Error,
+    IReadOnlyList<string>? Contents = null);
 
 public sealed record SystemDiskReport(string? Serial, string? Model, long SizeBytes, string BusType);
 
@@ -151,6 +153,11 @@ public static partial class DisklessEndpoints
             new VolumeReport(v.State, v.TargetIqn, v.LibraryVersion, v.ReadOnlyVerified, Truncate(v.Error, 2000)), dhcp, clock.GetUtcNow(),
             ImageVersionOrNull(request.ImageVersion), SystemDiskJson(request.SystemDisk),
             request.SecureBoot is { } sb ? System.Text.Json.JsonSerializer.Serialize(sb, System.Text.Json.JsonSerializerOptions.Web) : null);
+        if (v is { State: "mounted", ReadOnlyVerified: true, LibraryVersion: { } mountedVersion, Contents: { } contents })
+        {
+            await library.SetContentsAsync(mountedVersion, CleanFolders(contents), clock.GetUtcNow());
+        }
+
         if (ImageVersionOrNull(request.ImageVersion) is { } imageVersion)
         {
             // Windows после перезаливки вышла на связь с нужной версией образа — задание перезаливки выполнено.
@@ -187,6 +194,15 @@ public static partial class DisklessEndpoints
     }
 
     private static string ClientIp(HttpContext context) => context.Connection.RemoteIpAddress?.ToString() ?? "";
+
+    /// <summary>Имена папок с ПК — только правдоподобные: без управляющих символов, до 255 символов, не больше 1000.</summary>
+    private static List<string> CleanFolders(IReadOnlyList<string> folders) =>
+        folders.Select(f => f?.Trim() ?? "")
+            .Where(f => f.Length is > 0 and <= 255 && !f.Any(char.IsControl))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .Take(1000)
+            .ToList();
 
     private static string? ImageVersionOrNull(string? value) =>
         value is not null && Imaging.ImageLibrary.LabelPattern().IsMatch(value) ? value : null;

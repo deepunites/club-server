@@ -9,7 +9,9 @@ namespace Club.Helper.Core;
 // DTO по docs/diskless-api.yaml.
 public sealed record VolumeAssignment(string LibraryVersion, string Portal, string TargetIqn, bool ReadOnly, string DriveLetter);
 
-public sealed record MountedVolume(string State, string? TargetIqn = null, string? LibraryVersion = null, string? DriveLetter = null, bool? ReadOnlyVerified = null, string? Error = null);
+public sealed record MountedVolume(
+    string State, string? TargetIqn = null, string? LibraryVersion = null, string? DriveLetter = null, bool? ReadOnlyVerified = null, string? Error = null,
+    IReadOnlyList<string>? Contents = null);
 
 public sealed record MachineStatus(
     string HelperVersion, DateTimeOffset? BootTime, MountedVolume Volume, IReadOnlyList<string>? DhcpServers = null,

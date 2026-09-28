@@ -131,4 +131,43 @@ public sealed partial class LibraryTests
         Assert.Equal("cloneWritable", warning.GetProperty("kind").GetString());
         Assert.Equal(1, (await OverviewAsync()).GetProperty("warnings").GetArrayLength());
     }
+
+    private static object Report(string state, string? version, bool? readOnly = true, string[]? contents = null) => new
+    {
+        helperVersion = "1.1.0",
+        volume = new { state, libraryVersion = version, targetIqn = version is null ? null : $"{Basename}:games-{version}", driveLetter = "G", readOnlyVerified = readOnly, contents },
+    };
+
+    [Fact]
+    public async Task Panel_shows_which_pcs_run_which_version_and_what_is_inside()
+    {
+        await PublishAsync("v1");
+        await PublishAsync("v2");
+        var http = _server.CreateClient();
+        async Task ReportAsync(string hwid, object body)
+        {
+            var (machine, _) = await TestMachine.RegisterAsync(http, hwid, $"02:00:00:00:00:0{hwid[^1]}");
+            using var response = await machine.SendAsync(HttpMethod.Put, $"/diskless/v1/machines/{machine.MachineId}/status", body);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+
+        await ReportAsync("hw-1", Report("mounted", "v2", contents: ["Dota 2", "Counter-Strike 2", "  ", "bad\u0001name", "dota 2"]));
+        await ReportAsync("hw-2", Report("switchPending", "v1"));
+        await ReportAsync("hw-3", Report("failed", null, readOnly: null));
+        // Том без подтверждённого read-only — его «состав» не принимается.
+        await ReportAsync("hw-4", Report("mounted", "v1", readOnly: false, contents: ["Malware"]));
+
+        var overview = await OverviewAsync();
+        var machines = overview.GetProperty("machines");
+        Assert.Equal((4, 1, 1, 1, 1, 0), (
+            machines.GetProperty("online").GetInt32(), machines.GetProperty("onCurrent").GetInt32(), machines.GetProperty("onOlder").GetInt32(),
+            machines.GetProperty("switchPending").GetInt32(), machines.GetProperty("failed").GetInt32(), machines.GetProperty("notMounted").GetInt32()));
+
+        var versions = overview.GetProperty("versions").EnumerateArray().ToDictionary(v => v.GetProperty("label").GetString()!);
+        Assert.Equal(1, versions["v2"].GetProperty("mountedOn").GetInt32());
+        Assert.Equal(2, versions["v1"].GetProperty("mountedOn").GetInt32()); // ждёт выхода из игры + без проверки RO
+        Assert.Equal(["Counter-Strike 2", "Dota 2"], versions["v2"].GetProperty("contents").EnumerateArray().Select(e => e.GetString()!).ToArray());
+        Assert.False(versions["v1"].TryGetProperty("contents", out _));
+        Assert.Equal(2, overview.GetProperty("current").GetProperty("contents").GetArrayLength());
+    }
 }

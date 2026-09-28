@@ -93,6 +93,14 @@ public sealed class WindowsStorage : IWindowsStorage
     public Task SetDiskOnlineAsync(int diskNumber, CancellationToken ct) =>
         PowerShell.RunAsync("Set-Disk -Number ([int]$env:CLUB_DISK) -IsOffline $false", Disk(diskNumber), ct);
 
+    public Task<IReadOnlyList<string>> ListFoldersAsync(char driveLetter, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<string>>(new DirectoryInfo($"{driveLetter}:\\").EnumerateDirectories()
+            .Where(d => (d.Attributes & (FileAttributes.Hidden | FileAttributes.System)) == 0)
+            .Select(d => d.Name)
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .Take(1000)
+            .ToList());
+
     public Task AssignDriveLetterAsync(int diskNumber, char letter, CancellationToken ct) =>
         PowerShell.RunAsync(
             """

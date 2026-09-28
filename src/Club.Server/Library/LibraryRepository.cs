@@ -18,6 +18,11 @@ public sealed class LibraryVersion
     public DateTimeOffset? PublishedAt { get; init; }
     public DateTimeOffset? RetiredAt { get; init; }
     public string? LastError { get; init; }
+    public string? ContentsJson { get; init; }
+    public DateTimeOffset? ContentsAt { get; init; }
+
+    public IReadOnlyList<string>? Contents =>
+        ContentsJson is null ? null : System.Text.Json.JsonSerializer.Deserialize<List<string>>(ContentsJson);
 }
 
 public sealed class StorageOperation
@@ -50,7 +55,7 @@ public sealed class LibraryRepository(NpgsqlDataSource db)
     private const string VersionColumns = """
         id, label, state, snapshot_id AS SnapshotId, clone_id AS CloneId, extent_name AS ExtentName,
         target_name AS TargetName, target_iqn AS TargetIqn, created_at AS CreatedAt, published_at AS PublishedAt,
-        retired_at AS RetiredAt, last_error AS LastError
+        retired_at AS RetiredAt, last_error AS LastError, contents::text AS ContentsJson, contents_at AS ContentsAt
         """;
 
     private const string OperationColumns = """
@@ -136,6 +141,15 @@ public sealed class LibraryRepository(NpgsqlDataSource db)
         await using var c = await db.OpenConnectionAsync();
         return (await c.QueryAsync<StorageOperation>(
             $"SELECT {OperationColumns} FROM storage_operations ORDER BY created_at DESC, id LIMIT @limit", new { limit })).ToList();
+    }
+
+    /// <summary>Состав версии по отчёту помощника (перезаписывается: версия неизменна, отчёты совпадают).</summary>
+    public async Task SetContentsAsync(string label, IReadOnlyList<string> folders, DateTimeOffset now)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        await c.ExecuteAsync(
+            "UPDATE library_versions SET contents = @json::jsonb, contents_at = @now WHERE label = @label AND state IN ('publishing', 'published')",
+            new { label, json = System.Text.Json.JsonSerializer.Serialize(folders), now });
     }
 
     public async Task<IReadOnlyList<LibraryVersion>> AllVersionsAsync()

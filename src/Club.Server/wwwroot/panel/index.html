@@ -13,8 +13,9 @@
     <div class="brand" data-i18n="brand">Панель клуба</div>
     <nav class="tabs">
       <a class="tab" href="#machines" data-view="machines" data-i18n="tabMachines">Рабочие станции</a>
-      <a class="tab" href="#network" data-view="network" data-i18n="tabNetwork">Сеть</a>
+      <a class="tab" href="#library" data-view="library" data-i18n="tabLibrary">Библиотека игр</a>
       <a class="tab" href="#images" data-view="images" data-i18n="tabImages">Образы Windows</a>
+      <a class="tab" href="#network" data-view="network" data-i18n="tabNetwork">Сеть</a>
     </nav>
     <div class="topbar-right">
       <select id="lang" aria-label="Language">
@@ -72,6 +73,75 @@
           <tbody id="rows"></tbody>
         </table>
         <p id="empty" class="muted empty" data-i18n="empty" hidden>Машин пока нет. Установите помощник бездиска на ПК — он появится здесь.</p>
+      </div>
+    </section>
+
+    <section id="library" hidden>
+      <div class="screen-head">
+        <h1 data-i18n="tabLibrary">Библиотека игр</h1>
+        <div class="summary" id="lib-summary"></div>
+      </div>
+      <p id="lib-error" class="error" hidden></p>
+      <p id="lib-disabled" class="notice" data-i18n="libDisabled" hidden></p>
+      <div id="lib-warnings" class="card warnings" hidden>
+        <h2 data-i18n="netWarnings">Предупреждения</h2>
+        <ul id="lib-warning-list"></ul>
+      </div>
+
+      <div class="lib-grid">
+        <form id="lib-publish" class="card lib-card">
+          <h2 data-i18n="libPublishTitle">Новая версия</h2>
+          <p class="muted small" data-i18n="libPublishHint"></p>
+          <div class="publish-row">
+            <label><span data-i18n="imgLabel">Версия</span><input id="lib-label" class="mono" maxlength="40" required></label>
+            <button type="submit" id="lib-publish-button" data-i18n="imgPublish">Опубликовать</button>
+          </div>
+          <p id="lib-publish-error" class="error small" hidden></p>
+        </form>
+        <div class="card lib-card">
+          <h2 data-i18n="libAdoptionTitle">ПК на связи</h2>
+          <div id="lib-adoption"></div>
+        </div>
+      </div>
+
+      <div id="lib-ops" class="card lib-ops" hidden>
+        <h2 data-i18n="libOpsTitle">Выполняется</h2>
+        <div id="lib-op-list"></div>
+      </div>
+
+      <div class="table-wrap spaced">
+        <h2 class="table-title" data-i18n="libVersions">Версии библиотеки</h2>
+        <table>
+          <thead>
+            <tr>
+              <th data-i18n="imgLabel">Версия</th>
+              <th data-i18n="colStatus">Статус</th>
+              <th data-i18n="libColMachines">ПК</th>
+              <th data-i18n="colEditions">Состав</th>
+              <th data-i18n="libColPublished">Опубликована</th>
+              <th>IQN</th>
+            </tr>
+          </thead>
+          <tbody id="lib-rows"></tbody>
+        </table>
+        <p id="lib-empty" class="muted empty" data-i18n="libEmpty" hidden></p>
+      </div>
+
+      <div class="table-wrap">
+        <h2 class="table-title" data-i18n="libHistory">Журнал операций</h2>
+        <table>
+          <thead>
+            <tr>
+              <th data-i18n="libColWhen">Когда</th>
+              <th data-i18n="libColOperation">Операция</th>
+              <th data-i18n="imgLabel">Версия</th>
+              <th data-i18n="colStatus">Статус</th>
+              <th data-i18n="libColAttempts">Попытки</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="lib-history"></tbody>
+        </table>
       </div>
     </section>
 

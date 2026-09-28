@@ -137,6 +137,24 @@ public sealed class HelperEndToEndTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Helper_reports_version_contents_once_per_version()
+    {
+        _windows.Folders['G'] = ["Dota 2", "VALORANT"];
+        var helper = Helper();
+        await PublishAsync("v1");
+        await helper.TickAsync(CancellationToken.None);
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(1, _windows.FolderListings); // второй такт состав не шлёт
+        var library = _server.Services.GetRequiredService<LibraryRepository>();
+        Assert.Equal(["Dota 2", "VALORANT"], (await library.FindVersionAsync("v1"))!.Contents);
+
+        _windows.Folders['G'] = ["Dota 2", "VALORANT", "Counter-Strike 2"];
+        await PublishAsync("v2");
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(["Counter-Strike 2", "Dota 2", "VALORANT"], (await library.FindVersionAsync("v2"))!.Contents);
+    }
+
+    [Fact]
     public async Task Server_down_at_boot_mounts_the_last_known_version()
     {
         await PublishAsync("v1");

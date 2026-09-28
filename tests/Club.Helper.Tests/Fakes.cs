@@ -92,6 +92,17 @@ public sealed class FakeWindowsStorage : IWindowsStorage
         return Task.CompletedTask;
     }
 
+    /// <summary>Папки на томе по букве (состав версии).</summary>
+    public Dictionary<char, List<string>> Folders { get; } = new();
+
+    public int FolderListings { get; private set; }
+
+    public Task<IReadOnlyList<string>> ListFoldersAsync(char driveLetter, CancellationToken ct)
+    {
+        FolderListings++;
+        return Task.FromResult<IReadOnlyList<string>>(Folders.TryGetValue(driveLetter, out var list) ? list : []);
+    }
+
     /// <summary>Внешнее вмешательство: кто-то снял read-only с диска таргета.</summary>
     public void MakeWritable(string iqn) => _sessions[iqn].ReadOnly = false;
 

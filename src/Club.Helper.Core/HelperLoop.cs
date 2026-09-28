@@ -34,6 +34,7 @@ public sealed class HelperLoop(DisklessApiClient api, VolumeManager volumes, IAs
 {
     private VolumeAssignment? _desired;
     private bool _known;
+    private string? _contentsReportedFor;
 
     public MountedVolume? LastReport { get; private set; }
 
@@ -90,8 +91,20 @@ public sealed class HelperLoop(DisklessApiClient api, VolumeManager volumes, IAs
     {
         try
         {
+            // Состав версии (папки на томе) — один раз после подключения версии, а не в каждом отчёте.
+            if (report.State == "mounted" && report.LibraryVersion != _contentsReportedFor)
+            {
+                report = report with { Contents = await volumes.ContentsAsync(report, ct) };
+            }
+
             var facts = await identity.ReadAsync(ct);
-            return await api.ReportStatusAsync(new MachineStatus(options.HelperVersion, facts.BootTime, report, facts.DhcpServers, facts.ImageVersion, facts.SystemDisk, facts.SecureBoot), ct);
+            var reply = await api.ReportStatusAsync(new MachineStatus(options.HelperVersion, facts.BootTime, report, facts.DhcpServers, facts.ImageVersion, facts.SystemDisk, facts.SecureBoot), ct);
+            if (report.Contents is not null)
+            {
+                _contentsReportedFor = report.LibraryVersion;
+            }
+
+            return reply;
         }
         catch (Exception ex) when (ex is ServerUnavailableException or PendingApprovalException)
         {

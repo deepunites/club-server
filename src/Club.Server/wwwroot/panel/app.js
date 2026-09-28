@@ -1,4 +1,4 @@
-// Экраны «Рабочие станции», «Сеть» и «Образы Windows». Без сборки и внешних зависимостей: панель работает в клубе без интернета.
+// Экраны «Рабочие станции», «Библиотека игр», «Образы Windows» и «Сеть». Без сборки и внешних зависимостей: панель работает в клубе без интернета.
 (() => {
   "use strict";
 
@@ -20,6 +20,9 @@
   let imgs = null;
   let imgsJson = "";
   let reimaging = null;
+  let lib = null;
+  let libJson = "";
+  const openContents = new Set();
   const NET_FIELDS = ["subnet", "interface", "dhcpServer", "gateway", "dnsServers", "poolStart", "poolEnd", "reservedStart", "leaseTimeSec", "keaSubnetId"];
 
   function safeGet(storage, key) {
@@ -428,6 +431,160 @@
     }
   }
 
+  // ---------- Библиотека игр ----------
+
+  const LIB_STATE = { publishing: "info", published: "ok", retiring: "idle", retired: "idle", failed: "bad" };
+  const OP_STATUS = { pending: "idle", running: "info", done: "ok", failed: "bad" };
+  const PUBLISH_STEPS = ["snapshot", "clone", "extent", "target", "promote"];
+
+  function suggestLabel() {
+    const d = new Date();
+    const base = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const taken = new Set((lib?.versions ?? []).map((v) => v.label));
+    if (!taken.has(base)) return base;
+    for (let i = 2; ; i++) if (!taken.has(`${base}-${i}`)) return `${base}-${i}`;
+  }
+
+  function renderAdoption() {
+    const a = lib.machines;
+    if (!a || a.online === 0) {
+      $("lib-adoption").replaceChildren(el("p", { class: "muted" }, t("libNoOnline")));
+      return;
+    }
+    const parts = [
+      ["onCurrent", "seg-ok"], ["onOlder", "seg-info"], ["switchPending", "seg-warn"], ["failed", "seg-bad"], ["notMounted", ""],
+    ].filter(([key]) => a[key] > 0);
+    $("lib-adoption").replaceChildren(
+      el("div", { class: "muted small" }, t("libOnlineOf", { n: a.online })),
+      el("div", { class: "adoption-bar" }, parts.map(([key, cls]) => el("span", { class: cls, style: `width:${(100 * a[key]) / a.online}%`, title: `${t(`ad_${key}`)}: ${a[key]}` }))),
+      el("div", { class: "legend" }, parts.map(([key, cls]) => el("span", {}, el("i", { class: cls || "seg-idle", style: cls ? "" : "background:var(--idle-bg)" }), `${t(`ad_${key}`)}: `, el("b", {}, a[key])))));
+  }
+
+  function renderOperation(op) {
+    const steps = op.kind === "publish" ? PUBLISH_STEPS : ["promote"];
+    const at = op.status === "done" ? steps.length : Math.max(0, steps.indexOf(op.step ?? steps[0]));
+    return el("div", { class: "op" },
+      el("div", { class: "op-head" },
+        el("div", {}, el("b", {}, t(`op_${op.kind}`)), op.versionLabel ? el("span", { class: "mono" }, ` ${op.versionLabel}`) : null, " ",
+          badge(OP_STATUS[op.status] || "idle", t(`os_${op.status}`)), op.attempts > 1 ? el("span", { class: "muted small" }, ` #${op.attempts}`) : null),
+        op.status === "failed" ? el("button", { class: "small", onclick: () => libAct(`/library/operations/${op.id}/retry`) }, t("libRetry")) : null),
+      el("div", { class: "steps" }, steps.map((step, i) => el("span", {
+        class: `step ${i < at ? "done" : i === at ? (op.status === "failed" ? "failed" : "active") : ""}`,
+      }, t(`step_${step}`)))),
+      op.lastError ? el("div", { class: "error small" }, op.lastError) : null);
+  }
+
+  function contentsCell(v) {
+    if (!v.contents) return el("td", { class: "muted small", title: t("libContentsHint") }, v.state === "published" ? t("libNoContents") : "");
+    const details = el("details", { title: t("libContentsHint") },
+      el("summary", {}, t("libFolders", { n: v.contents.length })),
+      el("div", { class: "folders" }, v.contents.map((name) => el("span", { class: "folder" }, name))));
+    details.open = openContents.has(v.label);
+    details.addEventListener("toggle", () => { if (details.open) openContents.add(v.label); else openContents.delete(v.label); });
+    return el("td", { class: "wrap" }, details);
+  }
+
+  function renderLibrary(history) {
+    if (!lib || view !== "library") return;
+    $("lib-disabled").hidden = lib.storageEnabled;
+
+    const chips = [];
+    const chip = (key, label) => chips.push(el("span", { class: "chip" }, `${t(key)}: `, label ? el("b", {}, label) : dash()));
+    chip("imgCurrent", lib.current?.label);
+    chip("imgRollback", lib.rollback?.label);
+    if (lib.rollback) {
+      chips.push(el("button", { class: "ghost small", onclick: () => {
+        if (confirm(t("libRollbackConfirm", { label: lib.rollback.label }))) libAct("/library/rollback");
+      } }, t("libRollback")));
+    }
+    $("lib-summary").replaceChildren(...chips);
+
+    $("lib-warnings").hidden = lib.warnings.length === 0;
+    $("lib-warning-list").replaceChildren(...lib.warnings.map((w) => el("li", { title: w.message }, warningText(w), " · ", ago(w.lastSeen))));
+
+    renderAdoption();
+    if (!$("lib-label").value || $("lib-label").dataset.auto === "1") {
+      $("lib-label").value = suggestLabel();
+      $("lib-label").dataset.auto = "1";
+    }
+
+    $("lib-ops").hidden = lib.openOperations.length === 0;
+    $("lib-op-list").replaceChildren(...lib.openOperations.map(renderOperation));
+
+    const visible = lib.versions.filter((v) => v.state !== "retired").concat(lib.versions.filter((v) => v.state === "retired").slice(0, 5));
+    $("lib-empty").hidden = visible.length > 0;
+    $("lib-rows").replaceChildren(...visible.map((v) => {
+      const badges = [badge(LIB_STATE[v.state] || "idle", t(`ls_${v.state}`), v.lastError || "")];
+      if (v.role) badges.push(badge(v.role === "current" ? "ok" : "info", t(v.role === "current" ? "imgCurrent" : "imgRollback")));
+      return el("tr", { class: v.state === "retired" ? "retired" : "" },
+        el("td", { class: "mono" }, el("b", {}, v.label)),
+        el("td", {}, el("div", { class: "badges" }, badges), v.lastError ? el("div", { class: "error small" }, v.lastError) : null),
+        el("td", { class: "num" }, v.mountedOn || dash()),
+        contentsCell(v),
+        el("td", {}, v.publishedAt ? ago(v.publishedAt) : dash()),
+        el("td", { class: "mono small" }, orDash(v.targetIqn, true)));
+    }));
+
+    if (history) {
+      $("lib-history").replaceChildren(...history.map((op) => el("tr", {},
+        el("td", {}, ago(op.createdAt)),
+        el("td", {}, t(`op_${op.kind}`)),
+        el("td", { class: "mono" }, orDash(op.versionLabel, true)),
+        el("td", {}, badge(OP_STATUS[op.status] || "idle", t(`os_${op.status}`), op.lastError || ""),
+          op.step && op.status !== "done" ? el("span", { class: "muted small" }, ` ${t(`step_${op.step}`)}`) : null),
+        el("td", { class: "num" }, op.attempts),
+        el("td", {}, op.status === "failed" ? el("button", { class: "small ghost", onclick: () => libAct(`/library/operations/${op.id}/retry`) }, t("libRetry")) : null))));
+    }
+  }
+
+  async function loadLibrary() {
+    try {
+      const [fresh, history] = await Promise.all([api("/library"), api("/library/operations?limit=15")]);
+      const json = JSON.stringify([fresh, history]);
+      $("lib-error").hidden = true;
+      if (json !== libJson) {
+        lib = fresh;
+        libJson = json;
+        renderLibrary(history);
+      }
+    } catch (error) {
+      if (error.message === "unauthorized") return;
+      $("lib-error").textContent = t("loadFailed", { error: error.message });
+      $("lib-error").hidden = false;
+    }
+  }
+
+  async function libAct(path) {
+    try {
+      await api(path, { method: "POST" });
+    } catch (error) {
+      alert(problemText(error));
+    }
+    libJson = "";
+    await loadLibrary();
+  }
+
+  async function publishLibrary(event) {
+    event.preventDefault();
+    const label = $("lib-label").value.trim();
+    $("lib-publish-error").hidden = true;
+    if (!confirm(t("libPublishConfirm", { label }))) return;
+    $("lib-publish-button").disabled = true;
+    try {
+      await api("/library/versions", { method: "POST", body: JSON.stringify({ label }) });
+      $("lib-label").value = "";
+      $("lib-label").dataset.auto = "1";
+      libJson = "";
+      await loadLibrary();
+    } catch (error) {
+      const key = `reason_${error.reason}`;
+      $("lib-publish-error").textContent = error.reason === "format" ? t("libLabelHint") : t(key) !== key ? t(key) : error.message;
+      $("lib-publish-error").hidden = false;
+    } finally {
+      $("lib-publish-button").disabled = false;
+    }
+  }
+
   // ---------- Образы Windows ----------
 
   const IMAGE_STATE = { importing: "info", ready: "ok", failed: "bad" };
@@ -560,13 +717,15 @@
   // ---------- Навигация ----------
 
   function route() {
-    view = location.hash === "#network" ? "network" : location.hash === "#images" ? "images" : "machines";
+    view = { "#network": "network", "#images": "images", "#library": "library" }[location.hash] ?? "machines";
     document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === view));
     if (!token) return;
     $("machines").hidden = view !== "machines";
     $("network").hidden = view !== "network";
     $("images").hidden = view !== "images";
+    $("library").hidden = view !== "library";
     if (view === "images") imgsJson = "";
+    if (view === "library") libJson = "";
     if (view === "network") {
       netJson = "";
       loadSettings(false);
@@ -577,6 +736,7 @@
   function refresh() {
     if (view === "machines") load();
     if (view === "images") loadImages();
+    if (view === "library") loadLibrary();
     loadNetwork();
   }
 
@@ -658,6 +818,7 @@
     $("machines").hidden = true;
     $("network").hidden = true;
     $("images").hidden = true;
+    $("library").hidden = true;
     $("dhcp-alert").hidden = true;
     $("logout").hidden = true;
     $("login").hidden = false;
@@ -690,6 +851,8 @@
       renderCapacity();
       imgsJson = "";
       renderImages();
+      libJson = "";
+      if (view === "library") loadLibrary();
     });
     $("login-form").addEventListener("submit", login);
     $("logout").addEventListener("click", logout);
@@ -699,6 +862,8 @@
     $("net-form").addEventListener("input", () => { formDirty = true; $("net-saved").hidden = true; });
     $("net-download").addEventListener("click", downloadConfig);
     $("reimage-form").addEventListener("submit", startReimage);
+    $("lib-publish").addEventListener("submit", publishLibrary);
+    $("lib-label").addEventListener("input", () => { $("lib-label").dataset.auto = "0"; });
     $("reimage-cancel").addEventListener("click", () => $("reimage").close());
     window.addEventListener("hashchange", route);
     if (token) showApp(); else logout();
