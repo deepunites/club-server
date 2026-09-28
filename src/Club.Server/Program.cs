@@ -33,6 +33,7 @@ builder.Services.AddSingleton(keaOptions);
 builder.Services.AddSingleton(imagingOptions);
 builder.Services.AddSingleton<ImageRepository>();
 builder.Services.AddSingleton<ImageLibrary>();
+builder.Services.AddSingleton<BootFiles>();
 builder.Services.AddSingleton<ReimageService>();
 if (imagingOptions.Enabled && imagingOptions.RunWorker)
 {

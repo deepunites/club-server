@@ -7,7 +7,8 @@ namespace Club.Server.Imaging;
 
 /// <summary>
 /// Загрузка по сети для перезаливки (без авторизации: iPXE и WinPE ничего не знают о токенах).
-/// Цепочка: прошивка → Kea (только машинам с PXE-флагом) → ipxe.efi по TFTP → <c>/pxe/v1/boot.ipxe</c> →
+/// Цепочка: прошивка → Kea (только машинам с PXE-флагом) → ipxe-shim.efi (подписан Microsoft) → ipxe.efi (подписан
+/// iPXE) по TFTP → <c>/pxe/v1/boot.ipxe</c> →
 /// скрипт машины → wimboot + WinPE + скрипт заливки → <c>/deploy/v1</c>.
 /// </summary>
 public static class PxeEndpoints
@@ -39,7 +40,7 @@ public static class PxeEndpoints
 
             """.Replace("\r\n", "\n", StringComparison.Ordinal), "text/plain"));
 
-        pxe.MapGet("/machines/{mac}/boot.ipxe", async (string mac, ImageRepository images, Data.MachineRepository machines, ILoggerFactory logs) =>
+        pxe.MapGet("/machines/{mac}/boot.ipxe", async (string mac, ImageRepository images, Data.MachineRepository machines, ReimageService reimage, ILoggerFactory logs) =>
         {
             var normalized = ReimageService.NormalizeMac(mac);
             var job = normalized is null ? null : await images.ArmedJobForMacsAsync([normalized]);
@@ -51,12 +52,16 @@ public static class PxeEndpoints
 
             var machine = (await machines.FindAsync(job.MachineId))!;
             var image = await images.FindImageAsync(job.ImageId);
+            // Отозван PCA 2011 — загрузчик Windows с подписью CA 2023 вместо того, что внутри boot.wim.
+            var bootManager = reimage.UsesCa2023BootManager(machine)
+                ? "initrd /pxe/v1/files/boot/bootx64.efi bootx64.efi || goto failed\n"
+                : "";
             logs.CreateLogger("Club.Server.Pxe").LogInformation("PXE: {Machine} ({Mac}) boots WinPE for reinstall", machine.Name, normalized);
             return Results.Text($$"""
                 #!ipxe
                 echo Club server: reinstalling Windows on seat {{machine.Number}} with image {{image?.Label}}
                 kernel /pxe/v1/files/wimboot gui || goto failed
-                initrd /pxe/v1/files/boot/BCD BCD || goto failed
+                {{bootManager}}initrd /pxe/v1/files/boot/BCD BCD || goto failed
                 initrd /pxe/v1/files/boot/boot.sdi boot.sdi || goto failed
                 initrd /pxe/v1/winpe/winpeshl.ini winpeshl.ini || goto failed
                 initrd /pxe/v1/winpe/club-deploy.ps1 club-deploy.ps1 || goto failed

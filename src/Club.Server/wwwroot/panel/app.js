@@ -137,6 +137,14 @@
   function windowsCell(m) {
     const r = m.reimage;
     const parts = [m.imageVersion ? el("span", { class: "mono" }, m.imageVersion) : dash()];
+    const sb = m.secureBoot;
+    if (sb && sb.enabled !== null && sb.enabled !== undefined) {
+      const title = `db: CA 2011 ${sb.thirdPartyCa2011 ? "✓" : "✗"}, CA 2023 ${sb.windowsCa2023 ? "✓" : "✗"}; dbx: PCA 2011 ${sb.pca2011Revoked ? "✗" : "—"}`;
+      const sbBadges = [badge(sb.enabled ? "ok" : "idle", t(sb.enabled ? "sbOn" : "sbOff"), title)];
+      if (sb.enabled && sb.thirdPartyCa2011 === false) sbBadges.push(badge("bad", t("sbNoCa2011"), title));
+      if (sb.enabled && sb.pca2011Revoked) sbBadges.push(badge("info", t("sbRevoked"), title));
+      parts.push(el("div", { class: "badges" }, sbBadges));
+    }
     if (r) {
       let text = t(`rs_${r.state}`);
       if (r.state === "deploying" && r.step) text += ` · ${t(`st_${r.step}`)}${r.percent !== null && r.percent !== undefined ? ` ${r.percent}%` : ""}`;
@@ -472,6 +480,8 @@
         error);
     }));
 
+    renderBootFiles();
+
     $("img-empty").hidden = imgs.images.length > 0;
     $("img-rows").replaceChildren(...imgs.images.map((i) => {
       const badges = [badge(IMAGE_STATE[i.state] || "idle", t(`is_${i.state}`), i.lastError || "")];
@@ -498,6 +508,25 @@
         el("td", {}, size(i.sizeBytes)),
         el("td", { class: "mono", title: i.sha256 || "" }, i.sha256 ? `${i.sha256.slice(0, 12)}…` : dash()),
         el("td", {}, el("div", { class: "row-actions" }, actions)));
+    }));
+  }
+
+  const BOOT_FILE = { ok: "ok", missing: "bad", invalid: "bad", unsigned: "warn", badSignature: "bad", wrongSigner: "warn" };
+
+  function renderBootFiles() {
+    const report = imgs.bootFiles;
+    $("bf-no-tftp").hidden = !report || report.tftpChecked;
+    $("bf-rows").replaceChildren(...(report?.files ?? []).map((f) => {
+      const kind = f.status === "missing" && !f.required ? "idle" : BOOT_FILE[f.status] || "idle";
+      const status = [badge(kind, t(`bf_${f.status}`), f.expected.length && f.status !== "ok" ? t("bfNotSecure") : "")];
+      if (!f.required) status.push(el("span", { class: "muted small" }, ` ${t("bfOptional")}`));
+      return el("tr", {},
+        el("td", { class: "mono" }, f.name),
+        el("td", { class: "muted" }, f.location === "tftp" ? "TFTP" : "HTTP"),
+        el("td", {}, status),
+        el("td", { class: "small" }, f.signedBy.length ? f.signedBy.join(", ") : f.expected.length ? dash() : ""),
+        el("td", { class: "mono small" }, orDash(f.component, true)),
+        el("td", { class: "mono", title: f.sha256 || "" }, f.sha256 ? `${f.sha256.slice(0, 12)}…` : ""));
     }));
   }
 

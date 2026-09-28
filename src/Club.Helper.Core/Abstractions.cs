@@ -61,7 +61,13 @@ public interface IProcessInspector
 /// </summary>
 public sealed record MachineFacts(
     string Hwid, string Hostname, IReadOnlyList<string> MacAddresses, string OsVersion, DateTimeOffset BootTime, IReadOnlyList<string>? DhcpServers = null,
-    string? ImageVersion = null, SystemDiskFacts? SystemDisk = null);
+    string? ImageVersion = null, SystemDiskFacts? SystemDisk = null, SecureBootFacts? SecureBoot = null);
+
+/// <summary>
+/// Secure Boot на ПК (для перезаливки по сети): включён ли; доверяет ли прошивка стороннему Microsoft UEFI CA 2011
+/// (им подписан shim iPXE) и Windows UEFI CA 2023; отозван ли в dbx загрузчик Windows PCA 2011.
+/// </summary>
+public sealed record SecureBootFacts(bool? Enabled, bool? ThirdPartyCa2011, bool? WindowsCa2023, bool? Pca2011Revoked);
 
 /// <summary>Диск, с которого загружена Windows: по серийному номеру WinPE при перезаливке стирает именно его.</summary>
 public sealed record SystemDiskFacts(string? Serial, string? Model, long SizeBytes, string BusType);

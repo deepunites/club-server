@@ -166,6 +166,8 @@ button.danger-solid { background: var(--bad); border-color: var(--bad); color: #
 button.small { padding: 3px 8px; font-size: 12px; }
 .row-actions { display: flex; gap: 6px; }
 .incoming { padding: 14px; margin-bottom: 14px; }
+.boot-files { padding: 14px; margin-bottom: 14px; }
+.table-wrap.inner { border: 0; border-radius: 0; }
 .incoming-list { display: grid; gap: 10px; }
 .incoming-item { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
 .incoming-item .file { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }

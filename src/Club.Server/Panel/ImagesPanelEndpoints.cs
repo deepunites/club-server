@@ -11,7 +11,7 @@ public sealed record ImageView(
 
 public sealed record ImagesOverview(
     bool Enabled, string? Current, string? Rollback, IReadOnlyList<ImageView> Images, IReadOnlyList<IncomingFile> Incoming,
-    IReadOnlyList<StorageWarningView> Warnings);
+    IReadOnlyList<StorageWarningView> Warnings, BootChainReport? BootFiles);
 
 public sealed record ImportRequest(string? File, string? Label, int? Index);
 
@@ -22,7 +22,7 @@ public static class ImagesPanelEndpoints
     {
         var panel = app.MapGroup(PanelAuthMiddleware.Prefix + "/v1/images");
 
-        panel.MapGet("", async (ImagingOptions options, ImageRepository images, ImageLibrary library, LibraryRepository warnings) =>
+        panel.MapGet("", async (ImagingOptions options, ImageRepository images, ImageLibrary library, LibraryRepository warnings, BootFiles bootFiles) =>
         {
             var pointers = await images.PointersAsync();
             var views = (await images.ImagesAsync())
@@ -34,7 +34,8 @@ public static class ImagesPanelEndpoints
             return Results.Json(
                 new ImagesOverview(
                     options.Enabled, pointers.Current?.Label, pointers.Rollback?.Label, views, options.Enabled ? library.IncomingFiles() : [],
-                    (await warnings.ActiveWarningsAsync("imaging")).Select(w => new StorageWarningView(w.Kind, w.Subject, w.Message, w.FirstSeen, w.LastSeen)).ToList()),
+                    (await warnings.ActiveWarningsAsync("imaging")).Select(w => new StorageWarningView(w.Kind, w.Subject, w.Message, w.FirstSeen, w.LastSeen)).ToList(),
+                    options.Enabled ? bootFiles.Check() : null),
                 ApiJson.Options);
         });
 

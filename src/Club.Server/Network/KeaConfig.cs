@@ -9,7 +9,7 @@ namespace Club.Server.Network;
 /// поэтому пароля в файле нет. Ставит файл администратор (нужен root); сервер клуба только генерирует.
 /// [ГИПОТЕЗА: peer-доступ Kea к PostgreSQL через каталог сокета проверить на стенде.]
 /// </summary>
-/// <summary>Загрузка по сети для перезаливки: TFTP с ipxe.efi/undionly.kpxe и HTTP-скрипт iPXE этого сервера.</summary>
+/// <summary>Загрузка по сети для перезаливки: TFTP с ipxe-shim.efi/ipxe.efi/undionly.kpxe и HTTP-скрипт iPXE этого сервера.</summary>
 public sealed record PxeBoot(string TftpServer, string ScriptUrl);
 
 public static class KeaConfig
@@ -84,11 +84,12 @@ public static class KeaConfig
 
     /// <summary>
     /// PXE только для машин, поставленных на перезаливку: их резервация несёт класс <c>club-reimage</c>
-    /// (<see cref="KeaHostSync.ReimageClass"/>). Прошивка UEFI x64 (option 93 = 7 или 9) получает ipxe.efi по TFTP,
+    /// (<see cref="KeaHostSync.ReimageClass"/>). Прошивка UEFI x64 (option 93 = 7 или 9) получает по TFTP ipxe-shim.efi —
+    /// shim, подписанный Microsoft (UEFI CA 2011), который грузит подписанный iPXE ipxe.efi (и с Secure Boot, и без);
     /// BIOS (0) — undionly.kpxe, сам iPXE (user class «iPXE») — HTTP-скрипт. Классы из резервации видны только
     /// «дополнительным» классам (<c>only-in-additional-list</c>), поэтому они перечислены в подсети.
     /// Имя файла в самой резервации не годится: оно перекрывает класс, и iPXE грузил бы сам себя по кругу
-    /// (проверено на Kea 3.0.3, NetworkTests.Kea_gives_boot_files_only_to_armed_machines).
+    /// (проверено на Kea 3.0.3, ImagingTests.Kea_gives_boot_files_only_to_armed_machines).
     /// </summary>
     private static JsonArray PxeClasses(PxeBoot pxe) => new(
         new JsonObject { ["name"] = KeaHostSync.ReimageClass },
@@ -99,7 +100,7 @@ public static class KeaConfig
             ["test"] = $"member('{KeaHostSync.ReimageClass}') and not member('club-ipxe') and (option[93].hex == 0x0007 or option[93].hex == 0x0009)",
             ["only-in-additional-list"] = true,
             ["next-server"] = pxe.TftpServer,
-            ["boot-file-name"] = "ipxe.efi",
+            ["boot-file-name"] = Imaging.BootFiles.Shim,
         },
         new JsonObject
         {

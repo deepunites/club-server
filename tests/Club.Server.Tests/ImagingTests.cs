@@ -44,6 +44,8 @@ public sealed class ImagingTests : IAsyncLifetime
         _server.Settings["Imaging:Enabled"] = "true";
         _server.Settings["Imaging:Root"] = _root;
         _server.Settings["Imaging:PxeRoot"] = _pxeRoot;
+        _server.Settings["Imaging:TftpRoot"] = ""; // TFTP проверяется в SecureBootTests
+        TestEfi.PxeRoot(_pxeRoot, ImagingUnitTests.WimFixture);
         _server.Settings["Imaging:PublicBaseUrl"] = "http://192.168.77.1:5080";
         _server.Settings["Imaging:RunWorker"] = "false";
         await _server.InitializeAsync();
@@ -226,7 +228,6 @@ public sealed class ImagingTests : IAsyncLifetime
     {
         await PrepareAsync();
         var machine = await MachineAsync();
-        await File.WriteAllTextAsync(Path.Combine(_pxeRoot, "wimboot"), "wimboot-binary");
 
         // Без задания: Kea без класса, iPXE — локальная загрузка.
         Assert.Null(await KeaClassAsync());
@@ -251,7 +252,7 @@ public sealed class ImagingTests : IAsyncLifetime
         Assert.Equal("http://192.168.77.1:5080", config.GetProperty("server").GetString());
         var deployScript = await _server.CreateClient().GetByteArrayAsync("/pxe/v1/winpe/club-deploy.ps1");
         Assert.Equal(new byte[] { 0xEF, 0xBB, 0xBF }, deployScript[..3]); // PowerShell 5.1 читает UTF-8 только с BOM
-        Assert.Equal("wimboot-binary", await _server.CreateClient().GetStringAsync("/pxe/v1/files/wimboot"));
+        Assert.Equal(await File.ReadAllBytesAsync(Path.Combine(_pxeRoot, "wimboot")), await _server.CreateClient().GetByteArrayAsync("/pxe/v1/files/wimboot"));
         Assert.Equal(HttpStatusCode.NotFound, (await _server.CreateClient().GetAsync("/pxe/v1/files/..%2F..%2Fetc%2Fpasswd")).StatusCode);
 
         // WinPE: план — системный диск по серийному номеру (не флешка и не второй диск).
@@ -418,7 +419,7 @@ public sealed class ImagingTests : IAsyncLifetime
         var text = await Panel().GetStringAsync("/panel/api/v1/network/kea-dhcp4.conf");
         var dhcp4 = JsonDocument.Parse(text).RootElement.GetProperty("Dhcp4");
         var classes = dhcp4.GetProperty("client-classes").EnumerateArray().ToDictionary(c => c.GetProperty("name").GetString()!);
-        Assert.Equal("ipxe.efi", classes["club-reimage-uefi"].GetProperty("boot-file-name").GetString());
+        Assert.Equal("ipxe-shim.efi", classes["club-reimage-uefi"].GetProperty("boot-file-name").GetString()); // подписанный shim
         Assert.Equal("192.168.77.1", classes["club-reimage-uefi"].GetProperty("next-server").GetString());
         Assert.Equal("http://192.168.77.1:5080/pxe/v1/boot.ipxe", classes["club-reimage-ipxe"].GetProperty("boot-file-name").GetString());
         Assert.Equal(3, dhcp4.GetProperty("subnet4")[0].GetProperty("evaluate-additional-classes").GetArrayLength());
@@ -445,7 +446,7 @@ public sealed class ImagingTests : IAsyncLifetime
 
         var probes = new[] { $"{Mac},7", $"{Mac},7,iPXE", $"{Mac},0", "02:00:00:00:00:02,7", "02:00:00:00:00:09,7" };
         var offers = await ProbeKeaAsync(probes);
-        Assert.Equal(("192.168.77.101", "192.168.77.1", "ipxe.efi"), Offer(offers[0]));
+        Assert.Equal(("192.168.77.101", "192.168.77.1", "ipxe-shim.efi"), Offer(offers[0]));
         Assert.Equal(("192.168.77.101", "http://192.168.77.1:5080/pxe/v1/boot.ipxe"), (Offer(offers[1]).Ip, Offer(offers[1]).File));
         Assert.Equal("undionly.kpxe", Offer(offers[2]).File);
         Assert.Equal(("192.168.77.102", "0.0.0.0", ""), Offer(offers[3])); // без флага: адрес есть, загрузчика нет

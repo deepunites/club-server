@@ -19,8 +19,15 @@ for %%p in (WinPE-WMI WinPE-NetFX WinPE-Scripting WinPE-PowerShell WinPE-Storage
   dism /Image:"%WORK%\mount" /Add-Package /PackagePath:"%OC%\%%p.cab" || goto fail
   if exist "%OC%\en-us\%%p_en-us.cab" dism /Image:"%WORK%\mount" /Add-Package /PackagePath:"%OC%\en-us\%%p_en-us.cab" || goto fail
 )
-dism /Unmount-Image /MountDir:"%WORK%\mount" /Commit || exit /b 1
 mkdir "%OUT%\boot" "%OUT%\sources"
+rem Boot manager signed with Windows UEFI CA 2023 for PCs that revoked PCA 2011 (dbx). The server checks its
+rem signature (panel: Windows images -> network boot files). HYPOTHESIS: EFI_EX exists in current WinPE builds.
+if exist "%WORK%\mount\Windows\Boot\EFI_EX\bootmgfw_EX.efi" (
+  copy /y "%WORK%\mount\Windows\Boot\EFI_EX\bootmgfw_EX.efi" "%OUT%\boot\bootx64.efi" || goto fail
+) else (
+  echo NOTE: no Windows\Boot\EFI_EX\bootmgfw_EX.efi in WinPE: PCs with PCA 2011 revoked will not boot it.
+)
+dism /Unmount-Image /MountDir:"%WORK%\mount" /Commit || exit /b 1
 copy /y "%WORK%\media\Boot\BCD" "%OUT%\boot\BCD" || exit /b 1
 copy /y "%WORK%\media\Boot\boot.sdi" "%OUT%\boot\boot.sdi" || exit /b 1
 copy /y "%WORK%\media\sources\boot.wim" "%OUT%\sources\boot.wim" || exit /b 1

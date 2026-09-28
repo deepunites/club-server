@@ -13,7 +13,7 @@ public sealed record MountedVolume(string State, string? TargetIqn = null, strin
 
 public sealed record MachineStatus(
     string HelperVersion, DateTimeOffset? BootTime, MountedVolume Volume, IReadOnlyList<string>? DhcpServers = null,
-    string? ImageVersion = null, SystemDiskFacts? SystemDisk = null);
+    string? ImageVersion = null, SystemDiskFacts? SystemDisk = null, SecureBootFacts? SecureBoot = null);
 
 public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume);
 

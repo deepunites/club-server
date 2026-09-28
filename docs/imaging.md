@@ -8,9 +8,10 @@
 
 ```
 Панель «Перезалить» ─► задание (reimage_jobs, pxe_armed) ─► класс club-reimage в резервации Kea
-ПК перезагружается ─► прошивка UEFI: DHCP ─► Kea: ipxe.efi (TFTP)        ← только машине с флагом
+ПК перезагружается ─► прошивка UEFI: DHCP ─► Kea: ipxe-shim.efi (TFTP)   ← только машине с флагом
+                    ─► shim (подписан Microsoft) ─► ipxe.efi (подписан iPXE)
                     ─► iPXE: DHCP ─► Kea: http://сервер/pxe/v1/boot.ipxe
-                    ─► /pxe/v1/machines/<MAC>/boot.ipxe ─► wimboot + WinPE (boot.wim)
+                    ─► /pxe/v1/machines/<MAC>/boot.ipxe ─► wimboot (подписан Microsoft) + WinPE (boot.wim)
                        + club-deploy.ps1, winpeshl.ini, clubdeploy.json (подкладывает wimboot)
 WinPE ─► POST /deploy/v1/start (MAC, диски) ─► план сервера: какой диск, какой образ, имя ПК
       ─► разметка ─► скачивание WIM на временный раздел (докачка) ─► sha256 ─► dism /Apply-Image
@@ -31,6 +32,24 @@ Windows ─► помощник сообщает imageVersion ─► задан�
 Отменить перезаливку можно, только пока WinPE не тронул диск (`diskTouched`). Потом — только довести до конца
 или запустить заново (например, откатной версией): новое задание вытесняет упавшее и наследует `diskTouched`,
 так что флаг и после этого не снять отменой.
+
+### Secure Boot
+
+Вся цепочка подписана (подробно и с проверкой подписей — `docs/research/secure-boot-pxe.md`): shim iPXE — Microsoft
+UEFI CA 2011, `ipxe.efi` — iPXE Secure Boot CA (ему доверяет shim), wimboot — Microsoft (CA 2011 и 2023), WinPE —
+Microsoft. Работает и с выключенным Secure Boot. `ipxe.efi` из пакета Ubuntu **не подписан** — его не ставить.
+
+Помощник сообщает о Secure Boot на ПК (включён; есть ли в db сторонний CA 2011 и CA 2023; отозван ли в dbx PCA
+2011). Сервер отказывает заранее, если загрузка всё равно не пройдёт, с понятной причиной в панели:
+
+| Причина | Что сделать |
+|---|---|
+| `bootFilesMissing` | Установить файлы (ниже) |
+| `secureBootThirdPartyCa` | В настройках платы включить «Microsoft 3rd-party UEFI CA» (или выключить Secure Boot на время перезаливки) |
+| `bootFilesNotSigned` | Файлы на сервере без нужной подписи — поставить скриптом |
+| `needsCa2023BootManager` | ПК отозвал старый загрузчик Windows — положить `boot/bootx64.efi` с подписью Windows UEFI CA 2023 |
+
+ПК с отозванным PCA 2011 автоматически получают загрузчик CA 2023; остальные — загрузчик из boot.wim.
 
 Почему класс, а не имя файла в резервации: проверено на настоящей Kea 3.0.3 — имя файла из резервации
 перекрывает классы, и iPXE получал бы `ipxe.efi` снова, по кругу. Классы из резервации видят только
@@ -78,22 +97,30 @@ sysprep: настройки OOBE золотого образа сохраняю�
 `PublicBaseUrl` — адрес сервера для ПК по **HTTP** (iPXE и WinPE): сервер должен слушать этот адрес в сети клуба.
 `Root/incoming/` — сюда кладётся `install.wim` (scp или SMB); `Root` может быть смонтированным датасетом TrueNAS.
 
-TFTP и iPXE (пакеты Ubuntu; в `ipxe` — `/usr/lib/ipxe/ipxe.efi` и `undionly.kpxe`, проверено по пакету):
+TFTP и подписанная цепочка (iPXE v2.0.0 и wimboot v2.9.0 из официальных релизов, sha256 закреплены в скрипте):
 
 ```bash
-apt install -y tftpd-hpa ipxe
-cp /usr/lib/ipxe/ipxe.efi /usr/lib/ipxe/undionly.kpxe /srv/tftp/
+apt install -y tftpd-hpa
+sudo scripts/pxe/install-boot-files.sh
 ```
+
+Скрипт кладёт в `/srv/tftp` `ipxe-shim.efi`, `ipxe.efi` (подписанный, из `x86_64-sb`) и `undionly.kpxe`, в
+`/srv/club/pxe` — `wimboot` (каталоги меняются `TFTP_ROOT`/`PXE_ROOT`; `Imaging:TftpRoot` должен совпадать).
+Пакет Ubuntu `ipxe` не нужен: его `ipxe.efi` не подписан.
 
 WinPE: собрать на Windows-машине с ADK скриптом `scripts/winpe/build-winpe.cmd`, содержимое `out\pxe`
-скопировать в `PxeRoot`, туда же — `wimboot` (https://github.com/ipxe/wimboot/releases, в пакетах Ubuntu нет):
+скопировать в `PxeRoot`:
 
 ```
-/srv/club/pxe/wimboot
+/srv/club/pxe/wimboot            ← install-boot-files.sh
 /srv/club/pxe/boot/BCD
 /srv/club/pxe/boot/boot.sdi
+/srv/club/pxe/boot/bootx64.efi   ← загрузчик с подписью Windows UEFI CA 2023 (необязателен)
 /srv/club/pxe/sources/boot.wim
 ```
+
+Всё видно в панели: «Образы Windows» → «Файлы загрузки по сети» — есть ли файл, кем подписан, цела ли подпись,
+версия.
 
 Скрипт заливки, `winpeshl.ini` и `clubdeploy.json` (адрес сервера) в `boot.wim` не зашиваются — wimboot берёт их
 с сервера при каждой загрузке, поэтому обновление сервера обновляет и заливку.
@@ -126,11 +153,9 @@ Kea: после включения образов заново скачать `k
 
 ## Известные ограничения и открытые вопросы
 
-- **Secure Boot.** `ipxe.efi` из пакета Ubuntu не подписан для Secure Boot [ГИПОТЕЗА: проверить]. С включённым
-  Secure Boot прошивка откажется его грузить и уйдёт на диск — перезаливка не начнётся. При этом античиты
-  (Vanguard на Windows 11) требуют Secure Boot. Варианты: подписанная цепочка (shim + подписанный iPXE), загрузка
-  через подписанный Microsoft `bootmgfw.efi` по TFTP вместо iPXE, либо выключать Secure Boot на время перезаливки.
-  Нужно решение владельца и проверка на стенде.
+- **Secure Boot** — подписанная цепочка сделана, но на железе не проверялась; shim подписан только CA 2011,
+  поэтому ПК без стороннего CA Microsoft в db (часть ноутбуков и Secured-core) без изменения настроек платы не
+  загрузятся по сети — сервер скажет об этом заранее.
 - Образ скачивается по HTTP без авторизации: во время перезаливки его может скачать любой в сети клуба, подделав
   MAC. В образе — ключ клуба помощника (`helper.json`); с ним можно только зарегистрировать машину, которую потом
   одобряет администратор.
@@ -143,6 +168,8 @@ Kea: после включения образов заново скачать `k
 
 1. Собрать WinPE, положить файлы, включить `Imaging`, обновить конфиг Kea; `curl http://<сервер>/pxe/v1/boot.ipxe`.
 2. ПК с Secure Boot off, сеть первой: без флага — грузится с диска (засечь задержку).
+2a. ПК с Secure Boot **on**: перезаливка проходит (shim → iPXE → wimboot → WinPE); ПК с отключённым сторонним CA —
+    в панели отказ `secureBootThirdPartyCa`; ПК с применённым отзывом PCA 2011 — грузится загрузчиком CA 2023.
 3. «Перезалить» → перезагрузка → WinPE → заливка → Windows с именем места; в панели «перезалит».
 4. Выдернуть сеть во время скачивания → докачка после возврата. Выключить ПК во время dism → после включения
    снова WinPE, заливка с нуля.

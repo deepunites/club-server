@@ -14,6 +14,12 @@ public sealed class ImagingOptions
     /// <summary>Файлы загрузки WinPE для wimboot: <c>wimboot</c>, <c>boot/BCD</c>, <c>boot/boot.sdi</c>, <c>sources/boot.wim</c>.</summary>
     public string PxeRoot { get; set; } = "/srv/club/pxe";
 
+    /// <summary>
+    /// Каталог TFTP (tftpd-hpa) на этой машине: ipxe-shim.efi, ipxe.efi, undionly.kpxe. Пусто — сервер его не проверяет
+    /// (TFTP на другой машине).
+    /// </summary>
+    public string TftpRoot { get; set; } = "/srv/tftp";
+
     /// <summary>Адрес этого сервера для ПК по HTTP (iPXE и WinPE), например <c>http://192.168.77.1:5080</c>.</summary>
     public string PublicBaseUrl { get; set; } = "";
 

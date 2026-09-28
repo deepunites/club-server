@@ -8,6 +8,7 @@
     <PackageReference Include="FluentMigrator.Runner.Postgres" Version="8.0.1" />
     <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" Version="8.23.0" />
     <PackageReference Include="Npgsql" Version="10.0.3" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.12" />
   </ItemGroup>
 
   <ItemGroup>

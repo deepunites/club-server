@@ -436,6 +436,43 @@
      },
      "systemDisk": {
       "$ref": "#/components/schemas/SystemDisk"
+     },
+     "secureBoot": {
+      "$ref": "#/components/schemas/SecureBoot"
+     }
+    }
+   },
+   "SecureBoot": {
+    "type": "object",
+    "description": "Secure Boot на ПК — для перезаливки по сети. Проверки из руководства Microsoft по CVE-2023-24932: строки сертификатов в переменных db и dbx. null — неизвестно (Legacy BIOS или нет прав). По этим фактам сервер отказывает заранее, если подписанная цепочка не загрузится, и выбирает загрузчик Windows для WinPE.",
+    "properties": {
+     "enabled": {
+      "type": [
+       "boolean",
+       "null"
+      ],
+      "description": "Confirm-SecureBootUEFI."
+     },
+     "thirdPartyCa2011": {
+      "type": [
+       "boolean",
+       "null"
+      ],
+      "description": "В db есть «Microsoft Corporation UEFI CA 2011» — им подписан shim iPXE."
+     },
+     "windowsCa2023": {
+      "type": [
+       "boolean",
+       "null"
+      ],
+      "description": "В db есть «Windows UEFI CA 2023»."
+     },
+     "pca2011Revoked": {
+      "type": [
+       "boolean",
+       "null"
+      ],
+      "description": "В dbx «Microsoft Windows Production PCA 2011» — старые загрузчики Windows отозваны."
      }
     }
    },

@@ -14,7 +14,8 @@ public sealed record MachineVolumeView(string State, string? LibraryVersion, boo
 public sealed record MachineView(
     Guid Id, int Number, string Name, string Zone, string Status, string Hostname, string? IpAddress,
     IReadOnlyList<string> MacAddresses, string? HelperVersion, string? OsVersion, DateTimeOffset? LastSeenAt,
-    DateTimeOffset? BootTime, MachineVolumeView Volume, DateTimeOffset RegisteredAt, string? ImageVersion, ReimageView? Reimage);
+    DateTimeOffset? BootTime, MachineVolumeView Volume, DateTimeOffset RegisteredAt, string? ImageVersion, ReimageView? Reimage,
+    Diskless.SecureBootReport? SecureBoot = null);
 
 /// <summary>
 /// Перезаливка машины (последнее задание, если оно не закрыто или закрыто меньше суток назад). <c>state</c>:
@@ -147,7 +148,8 @@ public static class MachinesPanelEndpoints
             job is not null && (activeJob || job.FinishedAt is null || now - job.FinishedAt < TimeSpan.FromDays(1))
                 ? new ReimageView(job.State, labels.GetValueOrDefault(job.ImageId, "?"), job.Step, job.Percent, job.Message, job.Failure,
                     job.DiskTouched, job.PxeArmed, job.Attempts, job.UpdatedAt)
-                : null);
+                : null,
+            Imaging.ReimageService.SecureBoot(m));
     }
 
     /// <summary>

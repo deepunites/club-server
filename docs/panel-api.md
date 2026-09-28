@@ -79,10 +79,12 @@ bootTime, volume { state, libraryVersion, readOnlyVerified, outdated, error }, r
 | `POST /images/{label}/publish` | Сделать текущей; прежняя — откатная, более старая удаляется | 204; 404; 409 (`imageNotReady`) |
 | `POST /images/rollback` | Поменять текущую и откатную местами | 204; 409 (`noRollback`) |
 | `DELETE /images/{label}` | Удалить неопубликованную версию | 204; 409 (`inUse`) |
-| `POST /machines/{id}/reimage` `{ image?, allowNewDisk? }` | Перезалить (по умолчанию текущей версией) | 202; 409 (`noImage`, `imageNotReady`, `noReservation`, `alreadyRequested`, `keaDisabled`, `imagingDisabled`, `notApproved`) |
+| `POST /machines/{id}/reimage` `{ image?, allowNewDisk? }` | Перезалить (по умолчанию текущей версией) | 202; 409 (`noImage`, `imageNotReady`, `noReservation`, `alreadyRequested`, `keaDisabled`, `imagingDisabled`, `notApproved`, `bootFilesMissing`, `secureBootThirdPartyCa`, `bootFilesNotSigned`, `needsCa2023BootManager`) |
 | `POST /machines/{id}/reimage/cancel` | Отменить, пока диск не тронут | 204; 404; 409 (`diskTouched`) |
 
-В `GET /machines` у машины `imageVersion` и `reimage { state, image, step, percent, message, failure, diskTouched,
+`GET /images` также отдаёт `bootFiles { tftpChecked, files [{ name, location (tftp|pxe), required, status (ok|missing|invalid|unsigned|badSignature|wrongSigner), sizeBytes, sha256, component, signedBy, expected }] }` — цепочка загрузки и подписи.
+
+В `GET /machines` у машины `secureBoot { enabled, thirdPartyCa2011, windowsCa2023, pca2011Revoked }` (по отчёту помощника), `imageVersion` и `reimage { state, image, step, percent, message, failure, diskTouched,
 pxeArmed, attempts, updatedAt }`, статус `reimaging`, в обзоре `currentImageVersion` и `reimaging`.
 `failure` — шаг или причина: `systemDiskNotFound`, `ambiguousDisks`, `diskTooSmall`, `noInternalDisk`,
 `biosNotSupported`, `imageUnavailable`, `notGeneralized`, `partition`, `download`, `verify`, `apply`, `identity`, `bcdboot`.

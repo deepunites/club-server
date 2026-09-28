@@ -87,7 +87,20 @@ public sealed class MachineIdentity : IMachineIdentity
             $board = Get-CimInstance -ClassName Win32_BaseBoard
             $os = Get-CimInstance -ClassName Win32_OperatingSystem
             $disk = Get-Partition -DriveLetter $env:SystemDrive.Substring(0, 1) | Get-Disk
+            # Secure Boot — проверки из руководства Microsoft по CVE-2023-24932 (строки сертификатов в db/dbx).
+            $sb = $null
+            try {
+                $db = [Text.Encoding]::ASCII.GetString((Get-SecureBootUEFI db).bytes)
+                $dbx = [Text.Encoding]::ASCII.GetString((Get-SecureBootUEFI dbx).bytes)
+                $sb = [pscustomobject]@{
+                    enabled = [bool](Confirm-SecureBootUEFI)
+                    thirdPartyCa2011 = $db -match 'Microsoft Corporation UEFI CA 2011'
+                    windowsCa2023 = $db -match 'Windows UEFI CA 2023'
+                    pca2011Revoked = $dbx -match 'Microsoft Windows Production PCA 2011'
+                }
+            } catch { }
             [pscustomobject]@{
+                secureBoot = $sb
                 uuid = [string]$product.UUID; board = [string]$board.SerialNumber; os = "$($os.Caption) $($os.Version)"
                 diskSerial = ([string]$disk.SerialNumber).Trim(); diskModel = [string]$disk.FriendlyName; diskSize = [long]$disk.Size; diskBus = [string]$disk.BusType
             } | ConvertTo-Json -Compress
@@ -109,9 +122,15 @@ public sealed class MachineIdentity : IMachineIdentity
         var systemDisk = root.TryGetProperty("diskSize", out var size) && size.TryGetInt64(out var bytes) && bytes > 0
             ? new SystemDiskFacts(root.GetProperty("diskSerial").GetString(), root.GetProperty("diskModel").GetString(), bytes, root.GetProperty("diskBus").GetString() ?? "")
             : null;
-        _cached = new MachineFacts(hwid, Environment.MachineName, macs, root.GetProperty("os").GetString() ?? "", BootTime(), SystemDisk: systemDisk);
+        var secureBoot = root.TryGetProperty("secureBoot", out var sb) && sb.ValueKind == JsonValueKind.Object
+            ? new SecureBootFacts(Flag(sb, "enabled"), Flag(sb, "thirdPartyCa2011"), Flag(sb, "windowsCa2023"), Flag(sb, "pca2011Revoked"))
+            : null;
+        _cached = new MachineFacts(hwid, Environment.MachineName, macs, root.GetProperty("os").GetString() ?? "", BootTime(), SystemDisk: systemDisk, SecureBoot: secureBoot);
         return _cached with { DhcpServers = DhcpServers(), ImageVersion = ImageVersion() };
     }
+
+    private static bool? Flag(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False ? value.GetBoolean() : null;
 
     /// <summary>Версия образа, которую записал WinPE при заливке (<c>image.json</c> в папке состояния помощника).</summary>
     private static string? ImageVersion()

@@ -21,9 +21,12 @@ public sealed record MountedVolume(string State, string? TargetIqn, string? Libr
 
 public sealed record SystemDiskReport(string? Serial, string? Model, long SizeBytes, string BusType);
 
+/// <summary>Secure Boot на ПК: включён; в db — Microsoft UEFI CA 2011 (сторонний) и Windows UEFI CA 2023; в dbx — отозван PCA 2011.</summary>
+public sealed record SecureBootReport(bool? Enabled, bool? ThirdPartyCa2011, bool? WindowsCa2023, bool? Pca2011Revoked);
+
 public sealed record MachineStatus(
     string HelperVersion, DateTimeOffset? BootTime, MountedVolume Volume, IReadOnlyList<string>? DhcpServers,
-    string? ImageVersion = null, SystemDiskReport? SystemDisk = null);
+    string? ImageVersion = null, SystemDiskReport? SystemDisk = null, SecureBootReport? SecureBoot = null);
 
 public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume);
 
@@ -146,7 +149,8 @@ public static partial class DisklessEndpoints
         await machines.RecordStatusAsync(
             machineId, request.HelperVersion, ClientIp(context), request.BootTime,
             new VolumeReport(v.State, v.TargetIqn, v.LibraryVersion, v.ReadOnlyVerified, Truncate(v.Error, 2000)), dhcp, clock.GetUtcNow(),
-            ImageVersionOrNull(request.ImageVersion), SystemDiskJson(request.SystemDisk));
+            ImageVersionOrNull(request.ImageVersion), SystemDiskJson(request.SystemDisk),
+            request.SecureBoot is { } sb ? System.Text.Json.JsonSerializer.Serialize(sb, System.Text.Json.JsonSerializerOptions.Web) : null);
         if (ImageVersionOrNull(request.ImageVersion) is { } imageVersion)
         {
             // Windows после перезаливки вышла на связь с нужной версией образа — задание перезаливки выполнено.

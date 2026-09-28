@@ -17,6 +17,7 @@ public sealed class ReimageService(
     MachineRepository machines,
     NetworkRepository network,
     KeaHostSync keaSync,
+    BootFiles bootFiles,
     TimeProvider clock,
     ILogger<ReimageService> logger)
 {
@@ -59,12 +60,59 @@ public sealed class ReimageService(
             throw Conflict("noReservation", "Machine has no DHCP reservation (see the Network screen)");
         }
 
+        CheckBootChain(machine);
+
         var job = await images.CreateJobAsync(machineId, image.Id, allowNewDisk, requestedBy, clock.GetUtcNow())
             ?? throw Conflict("alreadyRequested", "This machine is already being reinstalled");
         logger.LogInformation("Reimage of {Machine} with {Image} requested by {By}", machine.Name, image.Label, requestedBy);
         await TrySyncAsync(ct);
         return job;
     }
+
+    public static Diskless.SecureBootReport? SecureBoot(MachineRow machine) =>
+        machine.SecureBootJson is null ? null : JsonSerializer.Deserialize<Diskless.SecureBootReport>(machine.SecureBootJson, JsonSerializerOptions.Web);
+
+    /// <summary>
+    /// Заранее отказываем там, где загрузка по сети всё равно не пройдёт: иначе ПК молча загрузится с диска, а задание
+    /// повиснет в «ждёт загрузки по сети». Сведения о Secure Boot — из последнего отчёта помощника (обновляются при
+    /// каждой загрузке Windows); нет отчёта — проверяются только файлы.
+    /// </summary>
+    private void CheckBootChain(MachineRow machine)
+    {
+        var chain = bootFiles.Check();
+        if (chain.Missing.Count > 0)
+        {
+            throw Conflict("bootFilesMissing", $"PXE boot files are missing or broken: {string.Join(", ", chain.Missing)}");
+        }
+
+        if (SecureBoot(machine) is not { Enabled: true } sb)
+        {
+            return;
+        }
+
+        if (sb.ThirdPartyCa2011 == false)
+        {
+            // shim iPXE подписан только сторонним CA Microsoft 2011; без него в db прошивка откажется его запускать.
+            throw Conflict("secureBootThirdPartyCa",
+                "Secure Boot is on, but this PC does not trust the Microsoft UEFI CA 2011 (third-party): the iPXE shim will not start. "
+                + "Enable \"Microsoft 3rd-party UEFI CA\" in the firmware settings or turn Secure Boot off for the reinstall.");
+        }
+
+        if (chain.NotSecureBootReady.Count > 0)
+        {
+            throw Conflict("bootFilesNotSigned", $"Secure Boot is on, but these boot files are not properly signed: {string.Join(", ", chain.NotSecureBootReady)}");
+        }
+
+        if (sb.Pca2011Revoked == true && chain.File(BootFiles.BootManager2023)?.Status != "ok")
+        {
+            throw Conflict("needsCa2023BootManager",
+                "This PC has the Windows Production PCA 2011 revoked (dbx): WinPE needs a boot manager signed with Windows UEFI CA 2023 (boot/bootx64.efi, see docs/imaging.md).");
+        }
+    }
+
+    /// <summary>Загрузчик Windows с подписью CA 2023 — только ПК, где старый (PCA 2011) отозван; остальным — из boot.wim.</summary>
+    public bool UsesCa2023BootManager(MachineRow machine) =>
+        SecureBoot(machine)?.Pca2011Revoked == true && bootFiles.Check().File(BootFiles.BootManager2023)?.Status == "ok";
 
     public async Task CancelAsync(Guid machineId, CancellationToken ct)
     {

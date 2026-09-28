@@ -87,6 +87,27 @@
         <ul id="img-warning-list"></ul>
       </div>
 
+      <div class="card boot-files">
+        <h2 data-i18n="bfTitle">Файлы загрузки по сети</h2>
+        <p class="muted small" data-i18n="bfHint"></p>
+        <p id="bf-no-tftp" class="muted small" data-i18n="bfNoTftp" hidden></p>
+        <div class="table-wrap inner">
+          <table>
+            <thead>
+              <tr>
+                <th data-i18n="bfFile">Файл</th>
+                <th data-i18n="bfWhere">Где</th>
+                <th data-i18n="colStatus">Статус</th>
+                <th data-i18n="bfSignedBy">Подпись</th>
+                <th data-i18n="bfVersion">Версия</th>
+                <th data-i18n="colSha">sha256</th>
+              </tr>
+            </thead>
+            <tbody id="bf-rows"></tbody>
+          </table>
+        </div>
+      </div>
+
       <div class="card incoming">
         <h2 data-i18n="imgIncoming">Новые файлы</h2>
         <p id="img-incoming-empty" class="muted" data-i18n="imgIncomingEmpty" hidden></p>

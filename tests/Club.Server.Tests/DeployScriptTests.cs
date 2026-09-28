@@ -37,6 +37,8 @@ public sealed class DeployScriptTests : IAsyncLifetime
         _server.Settings["Imaging:Enabled"] = "true";
         _server.Settings["Imaging:Root"] = Path.Combine(_root, "images");
         _server.Settings["Imaging:PxeRoot"] = _root;
+        _server.Settings["Imaging:TftpRoot"] = "";
+        TestEfi.PxeRoot(_root, ImagingUnitTests.WimFixture);
         _server.Settings["Imaging:PublicBaseUrl"] = _baseUrl;
         _server.Settings["Imaging:RunWorker"] = "false";
         _server.UseKestrel(port);

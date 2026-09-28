@@ -125,6 +125,18 @@ public sealed class HelperEndToEndTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Helper_reports_secure_boot_state()
+    {
+        var helper = Helper();
+        _identity!.SecureBoot = new SecureBootFacts(true, true, true, false);
+        await helper.TickAsync(CancellationToken.None);
+        var reported = System.Text.Json.JsonDocument.Parse((await MachineAsync()).SecureBootJson!).RootElement;
+        Assert.True(reported.GetProperty("enabled").GetBoolean());
+        Assert.True(reported.GetProperty("thirdPartyCa2011").GetBoolean());
+        Assert.False(reported.GetProperty("pca2011Revoked").GetBoolean());
+    }
+
+    [Fact]
     public async Task Server_down_at_boot_mounts_the_last_known_version()
     {
         await PublishAsync("v1");
