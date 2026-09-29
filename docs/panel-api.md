@@ -21,6 +21,16 @@ camelCase, enum строками, время `2026-09-27T10:15:30.123Z`, оши�
 | `GET /library/operations/{id}` | Одна операция | 200; 404 |
 | `POST /library/operations/{id}/retry` | Повторить упавшую операцию (после исправления причины) | 202; 404; 409 (`notFailed`) |
 | `GET /storage/warnings` | Активные предупреждения сверки намерений с TrueNAS | 200 |
+| `POST /library/master/open` `{ machineId }` | Открыть мастер-том на запись этому ПК (суперклиент, `docs/master-editing.md`) | 202; 409 (`noInitiator`, `notApproved`, `publishPending`, `masterBusy`) |
+| `POST /library/master/close` `{ force? }` | Закончить правку (ждёт отключения ПК) или отключить принудительно | 202; 409 (`masterClosed`) |
+
+`POST /library/versions` принимает `allowDirtyMaster` и отвечает 409 `masterOpen` (мастер-том открыт) или
+`masterDirty` (отключён принудительно, нужна явная публикация с `allowDirtyMaster: true`).
+
+В обзоре `master { state (closed|opening|open|closing|failed), machineId, machineName, machineState, dirty, forceClose,
+openedAt, closeRequestedAt, closedAt, lastError, driveLetter }` и `masterCandidates [{ id, number, name, online }]` —
+одобренные ПК, чей помощник сообщил IQN инициатора. Операции `masterOpen` (шаги auth, initiator, extent, target) и
+`masterClose` (target, extent, initiator, auth) — в общем журнале.
 
 Версия: `id, label, state (publishing|published|retiring|retired|failed), role (current|rollback|null), targetIqn,
 createdAt, publishedAt, retiredAt, lastError, mountedOn, contents, contentsAt`. `mountedOn` — сколько ПК на связи

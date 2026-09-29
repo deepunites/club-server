@@ -26,11 +26,18 @@ public sealed record SystemDiskReport(string? Serial, string? Model, long SizeBy
 /// <summary>Secure Boot на ПК: включён; в db — Microsoft UEFI CA 2011 (сторонний) и Windows UEFI CA 2023; в dbx — отозван PCA 2011.</summary>
 public sealed record SecureBootReport(bool? Enabled, bool? ThirdPartyCa2011, bool? WindowsCa2023, bool? Pca2011Revoked);
 
+/// <summary>Мастер-том на ПК суперклиента: <c>none</c> | <c>mounting</c> | <c>mounted</c> | <c>failed</c>.</summary>
+public sealed record MasterReport(string State, string? TargetIqn, string? DriveLetter, string? Error);
+
+/// <summary>Мастер-том на запись — только ПК, которому администратор открыл правку. CHAP-секрет новый на каждое открытие.</summary>
+public sealed record MasterAssignment(string TargetIqn, string Portal, string ChapUser, string ChapSecret, string DriveLetter);
+
 public sealed record MachineStatus(
     string HelperVersion, DateTimeOffset? BootTime, MountedVolume Volume, IReadOnlyList<string>? DhcpServers,
-    string? ImageVersion = null, SystemDiskReport? SystemDisk = null, SecureBootReport? SecureBoot = null);
+    string? ImageVersion = null, SystemDiskReport? SystemDisk = null, SecureBootReport? SecureBoot = null,
+    string? InitiatorIqn = null, MasterReport? Master = null);
 
-public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume);
+public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume, MasterAssignment? Master = null);
 
 /// <summary>
 /// API бездиска для помощника на ПК (docs/diskless-api.yaml). Не зависит от шелла: только машины и том библиотеки.
@@ -39,6 +46,10 @@ public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment?
 public static partial class DisklessEndpoints
 {
     private static readonly HashSet<string> VolumeStates = ["none", "mounting", "mounted", "switchPending", "failed"];
+    private static readonly HashSet<string> MasterStates = ["none", "mounting", "mounted", "failed"];
+
+    [GeneratedRegex(@"^iqn\.\d{4}-\d{2}\.[a-z0-9][a-z0-9.\-]*(:[\x21-\x7e]+)?$")]
+    private static partial Regex IqnPattern();
 
     [GeneratedRegex("^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")]
     private static partial Regex MacPattern();
@@ -137,7 +148,7 @@ public static partial class DisklessEndpoints
         return Results.Json(new RefreshResponse(access, refresh, expiresAt), ApiJson.Options);
     }
 
-    private static async Task<IResult> StatusAsync(Guid machineId, MachineStatus request, HttpContext context, MachineRepository machines, LibraryRepository library, LibraryOptions options, Imaging.ImageRepository images, TimeProvider clock)
+    private static async Task<IResult> StatusAsync(Guid machineId, MachineStatus request, HttpContext context, MachineRepository machines, LibraryRepository library, LibraryOptions options, Imaging.ImageRepository images, MasterRepository master, TimeProvider clock)
     {
         RequireSelf(context, machineId);
         Require(request.HelperVersion, "helperVersion");
@@ -164,7 +175,20 @@ public static partial class DisklessEndpoints
             await images.CompleteBootedAsync(machineId, imageVersion, clock.GetUtcNow());
         }
 
-        return Results.Json(new StatusAccepted(clock.GetUtcNow(), await AssignmentAsync(library, options)), ApiJson.Options);
+        var iqn = request.InitiatorIqn?.Trim().ToLowerInvariant() is { Length: <= 223 } candidate && IqnPattern().IsMatch(candidate) ? candidate : null;
+        var masterReport = request.Master is { } m && MasterStates.Contains(m.State) ? m : null;
+        await machines.RecordMasterAsync(machineId, iqn, masterReport?.State, Truncate(masterReport?.Error, 2000));
+
+        return Results.Json(new StatusAccepted(clock.GetUtcNow(), await AssignmentAsync(library, options), await MasterAssignmentAsync(machineId, master, options)), ApiJson.Options);
+    }
+
+    /// <summary>Мастер-том на запись — только этой машине и только в состоянии «открыт». Закрытие — перестаём отдавать.</summary>
+    public static async Task<MasterAssignment?> MasterAssignmentAsync(Guid machineId, MasterRepository master, LibraryOptions options)
+    {
+        var state = await master.GetAsync();
+        return options.Enabled && state is { State: "open", TargetIqn: { } iqn, ChapUser: { } user, ChapSecret: { } secret } && state.MachineId == machineId
+            ? new MasterAssignment(iqn, options.PortalAddress, user, secret, options.MasterDriveLetter)
+            : null;
     }
 
     private static async Task<string> IssueRefreshTokenAsync(MachineRepository machines, MachineRow machine, AuthOptions options, TimeProvider clock)

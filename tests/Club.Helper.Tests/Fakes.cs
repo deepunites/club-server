@@ -92,6 +92,44 @@ public sealed class FakeWindowsStorage : IWindowsStorage
         return Task.CompletedTask;
     }
 
+    /// <summary>Вход с CHAP: какие учётные данные передал помощник (секрет проверяет «таргет» — поле ExpectedChap).</summary>
+    public (string User, string Secret)? ExpectedChap { get; set; }
+
+    public List<(string Iqn, string User, string Secret)> ChapLogins { get; } = [];
+
+    public async Task ConnectChapAsync(string targetIqn, string portalHost, int portalPort, string chapUser, string chapSecret, CancellationToken ct)
+    {
+        ChapLogins.Add((targetIqn, chapUser, chapSecret));
+        if (ExpectedChap is { } expected && (expected.User != chapUser || expected.Secret != chapSecret))
+        {
+            throw new InvalidOperationException("CHAP authentication failed");
+        }
+
+        await ConnectAsync(targetIqn, portalHost, portalPort, ct);
+    }
+
+    public Task SetDiskWritableAsync(int diskNumber, CancellationToken ct)
+    {
+        Log.Add($"writable {diskNumber}");
+        Disk(diskNumber).ReadOnly = false;
+        return Task.CompletedTask;
+    }
+
+    public Task FlushAndOfflineAsync(int diskNumber, char? driveLetter, CancellationToken ct)
+    {
+        Log.Add($"flush+offline {diskNumber} {driveLetter}");
+        if (FailOffline)
+        {
+            throw new InvalidOperationException("The disk is in use");
+        }
+
+        Disk(diskNumber).Offline = true;
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Сбой отключения диска (файлы на томе открыты).</summary>
+    public bool FailOffline { get; set; }
+
     /// <summary>Папки на томе по букве (состав версии).</summary>
     public Dictionary<char, List<string>> Folders { get; } = new();
 
@@ -138,6 +176,8 @@ public sealed class FakeIdentity(string hwid) : IMachineIdentity
 
     public SecureBootFacts? SecureBoot { get; set; }
 
+    public string? InitiatorIqn { get; set; } = "iqn.1991-05.com.microsoft:pc-test";
+
     public Task<MachineFacts> ReadAsync(CancellationToken ct) =>
-        Task.FromResult(new MachineFacts(hwid, "PC-TEST", ["aa:bb:cc:dd:ee:01"], "Windows 11 Pro 24H2", DateTimeOffset.UtcNow.AddMinutes(-3), [.. DhcpServers], SecureBoot: SecureBoot));
+        Task.FromResult(new MachineFacts(hwid, "PC-TEST", ["aa:bb:cc:dd:ee:01"], "Windows 11 Pro 24H2", DateTimeOffset.UtcNow.AddMinutes(-3), [.. DhcpServers], SecureBoot: SecureBoot, InitiatorIqn: InitiatorIqn));
 }

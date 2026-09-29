@@ -49,6 +49,8 @@ if (builder.Configuration.GetValue("Network:RunWorker", true))
 builder.Services.AddSingleton<LibraryRepository>();
 builder.Services.AddSingleton<TrueNasClient>();
 builder.Services.AddSingleton<TrueNasStorage>();
+builder.Services.AddSingleton<MasterRepository>();
+builder.Services.AddSingleton<MasterEditor>();
 builder.Services.AddSingleton<LibraryPublisher>();
 if (libraryOptions.Enabled && libraryOptions.RunWorker)
 {

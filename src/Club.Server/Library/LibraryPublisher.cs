@@ -15,6 +15,8 @@ public sealed class LibraryRequestException(string reason, string message) : Exc
 /// </summary>
 public sealed partial class LibraryPublisher(
     LibraryRepository repository,
+    MasterRepository master,
+    MasterEditor masterEditor,
     TrueNasStorage storage,
     LibraryOptions options,
     TimeProvider clock,
@@ -30,11 +32,23 @@ public sealed partial class LibraryPublisher(
     // ---- запросы администратора ------------------------------------------------------------------------------
 
     /// <summary>Ставит публикацию версии в очередь. Повторный запрос той же версии возвращает существующую операцию.</summary>
-    public async Task<Guid> RequestPublishAsync(string label, string? requestedBy)
+    public async Task<Guid> RequestPublishAsync(string label, string? requestedBy, bool allowDirtyMaster = false)
     {
         if (!LabelPattern().IsMatch(label))
         {
             throw new LibraryRequestException("label", "Version label must match ^[a-z0-9][a-z0-9-]{0,39}$");
+        }
+
+        // Снапшот мастер-тома, открытого на запись, — снимок посреди правки (NTFS может быть недописана).
+        var masterState = await master.GetAsync();
+        if (masterState.State != "closed")
+        {
+            throw new LibraryRequestException("masterOpen", "The master volume is open for editing; close it before publishing");
+        }
+
+        if (masterState.Dirty && !allowDirtyMaster)
+        {
+            throw new LibraryRequestException("masterDirty", "The master volume was force-closed and may be inconsistent; open and close it cleanly, or confirm publishing anyway");
         }
 
         if (await repository.FindVersionAsync(label) is { } existing)
@@ -95,11 +109,22 @@ public sealed partial class LibraryPublisher(
                 case "rollback":
                     await RollbackAsync(operation);
                     break;
+                case "masterOpen":
+                    await masterEditor.OpenAsync(step => Step(operation, step), ct);
+                    break;
+                case "masterClose":
+                    await masterEditor.CloseAsync(step => Step(operation, step), ct);
+                    break;
                 default:
                     throw new InvalidOperationException($"unknown operation kind {operation.Kind}");
             }
 
             await repository.MarkOperationAsync(operation.Id, "done", "done", null, countAttempt: false, clock.GetUtcNow());
+        }
+        catch (StorageWaitException ex)
+        {
+            // Мастер-том ещё подключён на ПК суперклиента — ждём, попытки не тратятся.
+            await repository.MarkOperationAsync(operation.Id, "pending", null, ex.Message, countAttempt: false, clock.GetUtcNow());
         }
         catch (TrueNasUnavailableException ex)
         {
@@ -117,6 +142,12 @@ public sealed partial class LibraryPublisher(
             {
                 // Частично созданные объекты не удаляются автоматически: их увидит сверка, решение за администратором.
                 await repository.SetVersionStateAsync(versionId, "failed", ex.Message, clock.GetUtcNow());
+            }
+
+            if (failed && operation.Kind == "masterOpen")
+            {
+                // Созданное открытием разберёт закрытие (кнопка «Закрыть» в панели).
+                await masterEditor.OpenFailedAsync(ex.Message);
             }
         }
     }

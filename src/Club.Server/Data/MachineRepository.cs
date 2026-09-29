@@ -29,6 +29,9 @@ public sealed class MachineRow
     public string? ImageVersion { get; init; }
     public string? SystemDiskJson { get; init; }
     public string? SecureBootJson { get; init; }
+    public string? InitiatorIqn { get; init; }
+    public string? MasterState { get; init; }
+    public string? MasterError { get; init; }
     public int CredentialsVersion { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
 }
@@ -51,7 +54,7 @@ public sealed class MachineRepository(NpgsqlDataSource db)
         id, number, name, zone_id AS ZoneId, hwid, hostname, mac_addresses AS MacAddresses, ip_address AS IpAddress,
         approved, maintenance, helper_version AS HelperVersion, os_version AS OsVersion, last_seen_at AS LastSeenAt,
         boot_time AS BootTime, volume_state AS VolumeState, volume_iqn AS VolumeIqn, volume_version AS VolumeVersion,
-        volume_ro_verified AS VolumeRoVerified, volume_error AS VolumeError, dhcp_servers AS DhcpServers, image_version AS ImageVersion, system_disk::text AS SystemDiskJson, secure_boot::text AS SecureBootJson, credentials_version AS CredentialsVersion,
+        volume_ro_verified AS VolumeRoVerified, volume_error AS VolumeError, dhcp_servers AS DhcpServers, image_version AS ImageVersion, system_disk::text AS SystemDiskJson, secure_boot::text AS SecureBootJson, initiator_iqn AS InitiatorIqn, master_state AS MasterState, master_error AS MasterError, credentials_version AS CredentialsVersion,
         created_at AS CreatedAt
         """;
 
@@ -212,6 +215,19 @@ public sealed class MachineRepository(NpgsqlDataSource db)
     {
         await using var c = await db.OpenConnectionAsync();
         return (await c.QueryAsync<(string, string)>("SELECT id, name FROM zones ORDER BY name")).ToList();
+    }
+
+    /// <summary>IQN инициатора iSCSI и мастер-том на ПК суперклиента (по отчёту помощника).</summary>
+    public async Task RecordMasterAsync(Guid id, string? initiatorIqn, string? masterState, string? masterError)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        await c.ExecuteAsync(
+            """
+            UPDATE machines SET initiator_iqn = COALESCE(@initiatorIqn, initiator_iqn),
+                   master_state = COALESCE(@masterState, master_state), master_error = @masterError
+            WHERE id = @id
+            """,
+            new { id, initiatorIqn, masterState, masterError });
     }
 
     /// <summary>Отчёт помощника: факты о томе на ПК и отметка «машина на связи» (считается для подписки).</summary>

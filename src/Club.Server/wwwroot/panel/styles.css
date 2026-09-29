@@ -169,6 +169,10 @@ button.small { padding: 3px 8px; font-size: 12px; }
 .boot-files { padding: 14px; margin-bottom: 14px; }
 .lib-grid { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); margin-bottom: 14px; }
 .lib-card { padding: 14px; }
+.spaced-card { margin-bottom: 14px; }
+.lib-master.open { border-color: var(--warn); }
+.master-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 8px; }
+.master-row select { min-width: 200px; }
 .publish-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
 .publish-row label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
 .publish-row input { width: 180px; }

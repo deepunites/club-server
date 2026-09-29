@@ -140,6 +140,9 @@
   function windowsCell(m) {
     const r = m.reimage;
     const parts = [m.imageVersion ? el("span", { class: "mono" }, m.imageVersion) : dash()];
+    if (m.masterState) {
+      parts.push(el("div", {}, badge(m.masterState === "failed" ? "bad" : "warn", t("masterBadge", { letter: "M" }), t(`mm_${m.masterState}`))));
+    }
     const sb = m.secureBoot;
     if (sb && sb.enabled !== null && sb.enabled !== undefined) {
       const title = `db: CA 2011 ${sb.thirdPartyCa2011 ? "✓" : "✗"}, CA 2023 ${sb.windowsCa2023 ? "✓" : "✗"}; dbx: PCA 2011 ${sb.pca2011Revoked ? "✗" : "—"}`;
@@ -436,6 +439,8 @@
   const LIB_STATE = { publishing: "info", published: "ok", retiring: "idle", retired: "idle", failed: "bad" };
   const OP_STATUS = { pending: "idle", running: "info", done: "ok", failed: "bad" };
   const PUBLISH_STEPS = ["snapshot", "clone", "extent", "target", "promote"];
+  const MASTER_OPEN_STEPS = ["auth", "initiator", "extent", "target"];
+  const MASTER_CLOSE_STEPS = ["target", "extent", "initiator", "auth"];
 
   function suggestLabel() {
     const d = new Date();
@@ -461,7 +466,7 @@
   }
 
   function renderOperation(op) {
-    const steps = op.kind === "publish" ? PUBLISH_STEPS : ["promote"];
+    const steps = { publish: PUBLISH_STEPS, masterOpen: MASTER_OPEN_STEPS, masterClose: MASTER_CLOSE_STEPS }[op.kind] ?? ["promote"];
     const at = op.status === "done" ? steps.length : Math.max(0, steps.indexOf(op.step ?? steps[0]));
     return el("div", { class: "op" },
       el("div", { class: "op-head" },
@@ -472,6 +477,52 @@
         class: `step ${i < at ? "done" : i === at ? (op.status === "failed" ? "failed" : "active") : ""}`,
       }, t(`step_${step}`)))),
       op.lastError ? el("div", { class: "error small" }, op.lastError) : null);
+  }
+
+  const MASTER_STATE = { closed: "idle", opening: "info", open: "warn", closing: "info", failed: "bad" };
+  const MASTER_MACHINE = { mounted: "ok", mounting: "info", failed: "bad", none: "idle" };
+
+  function renderMaster() {
+    const m = lib.master;
+    const box = $("lib-master");
+    box.parentElement.classList.toggle("open", !!m && m.state !== "closed");
+    if (!m) { box.replaceChildren(); return; }
+    const parts = [];
+    const head = [badge(MASTER_STATE[m.state] || "idle", t(`ms_${m.state}`))];
+    if (m.machineName && m.state !== "closed") head.push(el("span", {}, " ", t("masterOnPc", { name: m.machineName, letter: m.driveLetter })));
+    if (m.state === "open") {
+      head.push(" ", badge(MASTER_MACHINE[m.machineState ?? "none"] || "idle", t(`mm_${m.machineState ?? "none"}`)));
+      if (m.openedAt) head.push(el("span", { class: "muted small" }, ` · ${t("masterSince")} `, ago(m.openedAt)));
+    }
+    parts.push(el("div", { class: "master-row" }, head));
+    if (m.state === "closing") parts.push(el("div", { class: "muted small" }, t("masterWaiting")));
+    if (m.lastError && m.state !== "open") parts.push(el("div", { class: "error small" }, m.lastError));
+    if (m.dirty && m.state === "closed") parts.push(el("p", { class: "notice small" }, t("masterDirty")));
+
+    const actions = [];
+    if (m.state === "closed") {
+      const candidates = lib.masterCandidates ?? [];
+      if (candidates.length === 0) {
+        parts.push(el("p", { class: "muted small" }, t("masterNoCandidates")));
+      } else {
+        const select = el("select", { "aria-label": t("masterPc") }, candidates.map((c) =>
+          el("option", { value: c.id }, `${c.name}${c.online ? ` · ${t("online")}` : ""}`)));
+        actions.push(select, el("button", { onclick: () => libAct("/library/master/open", { machineId: select.value }) }, t("masterOpen")));
+      }
+    }
+    if (m.state === "open") actions.push(el("button", { onclick: () => libAct("/library/master/close", {}) }, t("masterFinish")));
+    if (m.state === "failed") actions.push(el("button", { onclick: () => libAct("/library/master/close", {}) }, t("masterCleanup")));
+    if ((m.state === "open" || m.state === "closing") && !m.forceClose) {
+      actions.push(el("button", { class: "danger", onclick: () => {
+        if (confirm(t("masterForceConfirm"))) libAct("/library/master/close", { force: true });
+      } }, t("masterForce")));
+    }
+    if (actions.length) parts.push(el("div", { class: "master-row" }, actions));
+    box.replaceChildren(...parts);
+
+    const blocked = m.state !== "closed";
+    $("lib-publish-button").disabled = blocked;
+    $("lib-publish-button").title = blocked ? t("masterBlocksPublish") : "";
   }
 
   function contentsCell(v) {
@@ -503,6 +554,7 @@
     $("lib-warning-list").replaceChildren(...lib.warnings.map((w) => el("li", { title: w.message }, warningText(w), " · ", ago(w.lastSeen))));
 
     renderAdoption();
+    renderMaster();
     if (!$("lib-label").value || $("lib-label").dataset.auto === "1") {
       $("lib-label").value = suggestLabel();
       $("lib-label").dataset.auto = "1";
@@ -554,9 +606,9 @@
     }
   }
 
-  async function libAct(path) {
+  async function libAct(path, body) {
     try {
-      await api(path, { method: "POST" });
+      await api(path, { method: "POST", ...(body ? { body: JSON.stringify(body) } : {}) });
     } catch (error) {
       alert(problemText(error));
     }
@@ -568,10 +620,11 @@
     event.preventDefault();
     const label = $("lib-label").value.trim();
     $("lib-publish-error").hidden = true;
-    if (!confirm(t("libPublishConfirm", { label }))) return;
+    const dirty = lib?.master?.dirty === true;
+    if (!confirm(t(dirty ? "libPublishDirtyConfirm" : "libPublishConfirm", { label }))) return;
     $("lib-publish-button").disabled = true;
     try {
-      await api("/library/versions", { method: "POST", body: JSON.stringify({ label }) });
+      await api("/library/versions", { method: "POST", body: JSON.stringify({ label, allowDirtyMaster: dirty }) });
       $("lib-label").value = "";
       $("lib-label").dataset.auto = "1";
       libJson = "";

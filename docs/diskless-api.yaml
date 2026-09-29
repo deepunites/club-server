@@ -290,6 +290,50 @@ components:
           $ref: '#/components/schemas/SystemDisk'
         secureBoot:
           $ref: '#/components/schemas/SecureBoot'
+        initiatorIqn:
+          type: string
+          maxLength: 223
+          description: >-
+            Имя iSCSI-инициатора Windows (Get-InitiatorPort). По нему сервер пускает к мастер-тому только ПК
+            суперклиента (вместе с CHAP).
+        master:
+          $ref: '#/components/schemas/MasterReport'
+    MasterReport:
+      type: object
+      description: Мастер-том на ПК суперклиента — факт с ПК.
+      required: [state]
+      properties:
+        state:
+          type: string
+          enum: [none, mounting, mounted, failed]
+        targetIqn:
+          type: string
+        driveLetter:
+          type: string
+        error:
+          type: string
+    MasterAssignment:
+      type: object
+      description: >-
+        Мастер-том библиотеки на запись. Приходит только ПК, которому администратор открыл правку, и только пока
+        правка открыта. Секрет CHAP новый на каждое открытие. Назначение пропало — помощник сбрасывает кэш тома на
+        диск, переводит диск offline и отключает таргет; сервер закрывает доступ только после отключения.
+      required: [targetIqn, portal, chapUser, chapSecret, driveLetter]
+      properties:
+        targetIqn:
+          type: string
+        portal:
+          type: string
+          description: host:port
+        chapUser:
+          type: string
+        chapSecret:
+          type: string
+          minLength: 12
+          maxLength: 16
+        driveLetter:
+          type: string
+          pattern: '^[A-Z]$'
     SecureBoot:
       type: object
       description: >-
@@ -337,6 +381,8 @@ components:
           format: date-time
         volume:
           $ref: '#/components/schemas/VolumeAssignment'
+        master:
+          $ref: '#/components/schemas/MasterAssignment'
     ErrorEnvelope:
       type: object
       required: [error]

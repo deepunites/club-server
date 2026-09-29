@@ -70,7 +70,8 @@ public sealed class HelperEndToEndTests : IAsyncLifetime
         var identity = _identity ??= new FakeIdentity(_hwid);
         var api = new DisklessApiClient(http ?? _server.CreateClient(), options, _credentials, identity);
         var volumes = new VolumeManager(_windows, _processes, options, TimeProvider.System, NullLogger<VolumeManager>.Instance);
-        return new HelperLoop(api, volumes, _cache, identity, options, NullLogger<HelperLoop>.Instance);
+        var masters = new MasterManager(_windows, options, TimeProvider.System, NullLogger<MasterManager>.Instance);
+        return new HelperLoop(api, volumes, _cache, identity, options, NullLogger<HelperLoop>.Instance, masters);
     }
 
     private async Task PublishAsync(string label)
@@ -152,6 +153,44 @@ public sealed class HelperEndToEndTests : IAsyncLifetime
         await PublishAsync("v2");
         await helper.TickAsync(CancellationToken.None);
         Assert.Equal(["Counter-Strike 2", "Dota 2", "VALORANT"], (await library.FindVersionAsync("v2"))!.Contents);
+    }
+
+    [Fact]
+    public async Task Superclient_edits_the_master_volume_and_closes_it_cleanly()
+    {
+        var helper = Helper();
+        await helper.TickAsync(CancellationToken.None); // регистрация, IQN инициатора
+        var machine = await MachineAsync();
+        Assert.Equal("iqn.1991-05.com.microsoft:pc-test", machine.InitiatorIqn);
+
+        var editor = _server.Services.GetRequiredService<MasterEditor>();
+        await editor.RequestOpenAsync(machine.Id, "test");
+        await StorageWorker.RunOnceAsync(_publisher, _library, reconcile: false, TimeProvider.System, CancellationToken.None);
+        var masterIqn = "iqn.2005-10.org.freenas.ctl:club-master";
+
+        // Помощник получает CHAP от сервера; «таргет» принимает только секрет, записанный в TrueNAS.
+        var secret = _nas.Find("auth", a => a["user"]!.GetValue<string>() == "clubsrv-master")!["secret"]!.GetValue<string>();
+        _windows.ExpectedChap = ("clubsrv-master", secret);
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(new MasterReport("mounted", masterIqn, "M"), helper.LastMasterReport);
+        Assert.True(_windows.Sessions[masterIqn] is { ReadOnly: false, Offline: false, Letter: 'M' });
+        Assert.Equal("mounted", (await MachineAsync()).MasterState);
+        _nas.AddSession("iqn.1991-05.com.microsoft:pc-test", "club-master");
+
+        // Закрытие: помощник сбрасывает кэш и отключается, только потом сервер убирает доступ.
+        await editor.RequestCloseAsync(force: false, "test");
+        await StorageWorker.RunOnceAsync(_publisher, _library, reconcile: false, TimeProvider.System, CancellationToken.None);
+        Assert.Equal("closing", (await _server.Services.GetRequiredService<MasterRepository>().GetAsync()).State);
+
+        await helper.TickAsync(CancellationToken.None);
+        Assert.False(_windows.Sessions.ContainsKey(masterIqn));
+        Assert.Contains(_windows.Log, l => l.StartsWith("flush+offline", StringComparison.Ordinal));
+        Assert.Equal("none", (await MachineAsync()).MasterState);
+        _nas.ClearSessions(); // сессия iSCSI закончилась вместе с отключением
+
+        await StorageWorker.RunOnceAsync(_publisher, _library, reconcile: false, TimeProvider.System, CancellationToken.None);
+        var closed = await _server.Services.GetRequiredService<MasterRepository>().GetAsync();
+        Assert.Equal(("closed", false), (closed.State, closed.Dirty));
     }
 
     [Fact]

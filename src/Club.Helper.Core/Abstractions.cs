@@ -50,6 +50,15 @@ public interface IWindowsStorage
 
     /// <summary>Папки верхнего уровня тома (без скрытых и системных) — «состав» версии библиотеки для панели.</summary>
     Task<IReadOnlyList<string>> ListFoldersAsync(char driveLetter, CancellationToken ct);
+
+    /// <summary>Вход в таргет с односторонним CHAP (мастер-том суперклиента).</summary>
+    Task ConnectChapAsync(string targetIqn, string portalHost, int portalPort, string chapUser, string chapSecret, CancellationToken ct);
+
+    /// <summary>Снять read-only с диска — только для мастер-тома, который администратор открыл на запись.</summary>
+    Task SetDiskWritableAsync(int diskNumber, CancellationToken ct);
+
+    /// <summary>Сбросить кэш тома на диск и перевести диск offline (перед отключением таргета).</summary>
+    Task FlushAndOfflineAsync(int diskNumber, char? driveLetter, CancellationToken ct);
 }
 
 /// <summary>Процессы, запущенные с тома (исполняемый файл на букве тома).</summary>
@@ -64,7 +73,7 @@ public interface IProcessInspector
 /// </summary>
 public sealed record MachineFacts(
     string Hwid, string Hostname, IReadOnlyList<string> MacAddresses, string OsVersion, DateTimeOffset BootTime, IReadOnlyList<string>? DhcpServers = null,
-    string? ImageVersion = null, SystemDiskFacts? SystemDisk = null, SecureBootFacts? SecureBoot = null);
+    string? ImageVersion = null, SystemDiskFacts? SystemDisk = null, SecureBootFacts? SecureBoot = null, string? InitiatorIqn = null);
 
 /// <summary>
 /// Secure Boot на ПК (для перезаливки по сети): включён ли; доверяет ли прошивка стороннему Microsoft UEFI CA 2011

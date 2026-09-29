@@ -9,6 +9,21 @@ public sealed record LibraryVersionView(
     DateTimeOffset? PublishedAt, DateTimeOffset? RetiredAt, string? LastError,
     int MountedOn = 0, IReadOnlyList<string>? Contents = null, DateTimeOffset? ContentsAt = null);
 
+/// <summary>
+/// Мастер-том для суперклиента. <c>state</c>: closed | opening | open | closing | failed; <c>mounted</c> — по отчёту
+/// помощника на ПК суперклиента; <c>dirty</c> — закрыт принудительно, публикация требует подтверждения.
+/// </summary>
+public sealed record MasterView(
+    string State, Guid? MachineId, string? MachineName, string? MachineState, bool Dirty, bool ForceClose,
+    DateTimeOffset? OpenedAt, DateTimeOffset? CloseRequestedAt, DateTimeOffset? ClosedAt, string? LastError, string DriveLetter);
+
+/// <summary>ПК, на котором можно открыть мастер-том: одобрен и сообщил IQN инициатора.</summary>
+public sealed record MasterCandidate(Guid Id, int Number, string Name, bool Online);
+
+public sealed record MasterOpenRequest(Guid MachineId);
+
+public sealed record MasterCloseRequest(bool? Force);
+
 /// <summary>ПК на связи (одобренные, отчёт не старше 90 с) по отношению к текущей версии.</summary>
 public sealed record LibraryAdoption(int Online, int OnCurrent, int OnOlder, int SwitchPending, int Failed, int NotMounted);
 
@@ -25,9 +40,11 @@ public sealed record LibraryOverview(
     IReadOnlyList<LibraryVersionView> Versions,
     IReadOnlyList<StorageOperationView> OpenOperations,
     IReadOnlyList<StorageWarningView> Warnings,
-    LibraryAdoption? Machines = null);
+    LibraryAdoption? Machines = null,
+    MasterView? Master = null,
+    IReadOnlyList<MasterCandidate>? MasterCandidates = null);
 
-public sealed record PublishRequest(string Label);
+public sealed record PublishRequest(string Label, bool? AllowDirtyMaster);
 
 public sealed record OperationAccepted(Guid OperationId);
 
@@ -41,13 +58,22 @@ public static class LibraryPanelEndpoints
     {
         var panel = app.MapGroup(PanelAuthMiddleware.Prefix + "/v1");
 
-        panel.MapGet("/library", async (LibraryRepository repository, LibraryOptions options, Data.MachineRepository machines, TimeProvider clock) =>
+        panel.MapGet("/library", async (LibraryRepository repository, LibraryOptions options, Data.MachineRepository machines, MasterRepository master, TimeProvider clock) =>
         {
             var pointers = await repository.PointersAsync();
             var versions = await repository.AllVersionsAsync();
             var labels = versions.ToDictionary(v => v.Id, v => v.Label);
             var now = clock.GetUtcNow();
-            var online = (await machines.AllAsync())
+            var registry = await machines.AllAsync();
+            bool IsOnline(Data.MachineRow m) => m.LastSeenAt is { } seen && seen <= now.AddMinutes(5) && now - seen <= MachinesPanelEndpoints.OnlineWindow;
+            var masterState = await master.GetAsync();
+            var masterMachine = registry.FirstOrDefault(m => m.Id == masterState.MachineId);
+            var masterView = new MasterView(
+                masterState.State, masterState.MachineId, masterMachine?.Name, masterMachine?.MasterState, masterState.Dirty, masterState.ForceClose,
+                masterState.OpenedAt, masterState.CloseRequestedAt, masterState.ClosedAt, masterState.LastError, options.MasterDriveLetter);
+            var candidates = registry.Where(m => m.Approved && !string.IsNullOrEmpty(m.InitiatorIqn))
+                .Select(m => new MasterCandidate(m.Id, m.Number, m.Name, IsOnline(m))).ToList();
+            var online = registry
                 .Where(m => m.Approved && m.LastSeenAt is { } seen && seen <= now.AddMinutes(5) && now - seen <= MachinesPanelEndpoints.OnlineWindow)
                 .ToList();
             var mounted = online.Where(m => m.VolumeState is "mounted" or "switchPending" && m.VolumeVersion is not null)
@@ -69,13 +95,27 @@ public static class LibraryPanelEndpoints
                     versions.Select(v => View(v, pointers, mounted)).ToList(),
                     (await repository.OpenOperationsAsync()).Select(o => View(o, labels)).ToList(),
                     (await repository.ActiveWarningsAsync()).Select(View).ToList(),
-                    adoption),
+                    adoption,
+                    masterView,
+                    candidates),
                 ApiJson.Options);
         });
 
         panel.MapPost("/library/versions", async (PublishRequest request, LibraryPublisher publisher) =>
         {
-            var operationId = await Guard(() => publisher.RequestPublishAsync(request.Label?.Trim() ?? "", "panel"));
+            var operationId = await Guard(() => publisher.RequestPublishAsync(request.Label?.Trim() ?? "", "panel", request.AllowDirtyMaster ?? false));
+            return Results.Json(new OperationAccepted(operationId), ApiJson.Options, statusCode: StatusCodes.Status202Accepted);
+        });
+
+        panel.MapPost("/library/master/open", async (MasterOpenRequest request, MasterEditor editor) =>
+        {
+            var operationId = await Guard(() => editor.RequestOpenAsync(request.MachineId, "panel"));
+            return Results.Json(new OperationAccepted(operationId), ApiJson.Options, statusCode: StatusCodes.Status202Accepted);
+        });
+
+        panel.MapPost("/library/master/close", async (MasterCloseRequest? request, MasterEditor editor) =>
+        {
+            var operationId = await Guard(() => editor.RequestCloseAsync(request?.Force ?? false, "panel"));
             return Results.Json(new OperationAccepted(operationId), ApiJson.Options, statusCode: StatusCodes.Status202Accepted);
         });
 

@@ -34,6 +34,8 @@ public sealed class FakeTrueNas : IAsyncDisposable
     private readonly Dictionary<int, JsonObject> _extents = new();
     private readonly Dictionary<int, JsonObject> _targets = new();
     private readonly Dictionary<int, JsonObject> _targetExtents = new();
+    private readonly Dictionary<int, JsonObject> _auths = new();
+    private readonly Dictionary<int, JsonObject> _initiators = new();
     private readonly List<(string Initiator, string Target)> _sessions = [];
     private readonly ConcurrentDictionary<string, int> _dropAfterExecute = new();
     private int _nextId = 1;
@@ -43,6 +45,20 @@ public sealed class FakeTrueNas : IAsyncDisposable
     public string[] OfferedVersions { get; set; } = ["v25.10.4", "v25.10.5", "v26.0.0"];
     public string Release { get; set; } = "25.10.7";
     public ConcurrentBag<string> Calls { get; } = [];
+
+    private readonly List<string> _callLog = [];
+
+    /// <summary>Вызовы по порядку — для проверок последовательности (например, таргет удалён раньше группы инициаторов).</summary>
+    public IReadOnlyList<string> CallLog
+    {
+        get
+        {
+            lock (_callLog)
+            {
+                return _callLog.ToList();
+            }
+        }
+    }
 
     /// <summary>TrueNAS «лежит»: открытые соединения рвутся, новые и /api/versions отклоняются.</summary>
     public bool Down { get; set; }
@@ -114,6 +130,8 @@ public sealed class FakeTrueNas : IAsyncDisposable
                 "extent" => _extents.Count,
                 "target" => _targets.Count,
                 "targetextent" => _targetExtents.Count,
+                "auth" => _auths.Count,
+                "initiator" => _initiators.Count,
                 _ => throw new ArgumentException(kind),
             };
         }
@@ -184,6 +202,10 @@ public sealed class FakeTrueNas : IAsyncDisposable
             var method = request["method"]!.GetValue<string>();
             var args = request["params"] as JsonArray ?? [];
             Calls.Add(method);
+            lock (_callLog)
+            {
+                _callLog.Add(method);
+            }
 
             JsonObject response;
             try
@@ -272,6 +294,23 @@ public sealed class FakeTrueNas : IAsyncDisposable
                     return Query(_targetExtents.Values, args);
                 case "iscsi.targetextent.create":
                     return CreateTargetExtent(args[0]!.AsObject());
+                case "iscsi.auth.query":
+                    return Query(_auths.Values.Select(a => new JsonObject { ["id"] = a["id"]!.DeepClone(), ["tag"] = a["tag"]!.DeepClone(), ["user"] = a["user"]!.DeepClone(), ["secret"] = a["secret"]!.DeepClone() }), args);
+                case "iscsi.auth.create":
+                    return CreateAuth(args[0]!.AsObject());
+                case "iscsi.auth.update":
+                    return UpdateAuth(args[0]!.GetValue<int>(), args[1]!.AsObject());
+                case "iscsi.auth.delete":
+                    return DeleteAuth(args[0]!.GetValue<int>());
+                case "iscsi.initiator.query":
+                    return Query(_initiators.Values, args);
+                case "iscsi.initiator.create":
+                    return CreateInitiator(args[0]!.AsObject());
+                case "iscsi.initiator.update":
+                    _initiators[args[0]!.GetValue<int>()]["initiators"] = args[1]!["initiators"]!.DeepClone();
+                    return _initiators[args[0]!.GetValue<int>()].DeepClone();
+                case "iscsi.initiator.delete":
+                    return DeleteInitiator(args[0]!.GetValue<int>());
                 default:
                     throw new RpcError(new JsonObject { ["code"] = -32601, ["message"] = "Method does not exist" });
             }
@@ -478,12 +517,116 @@ public sealed class FakeTrueNas : IAsyncDisposable
         return extent["id"]!.DeepClone();
     }
 
+    /// <summary>Секрет CHAP 12..16 символов; уникальность tag не проверяется — как в TrueNAS.</summary>
+    private JsonNode CreateAuth(JsonObject data)
+    {
+        var secret = data["secret"]!.GetValue<string>();
+        if (secret.Length is < 12 or > 16)
+        {
+            throw Validation("iscsi_auth_create.secret", "Secret must be between 12 and 16 characters.", 22);
+        }
+
+        var id = _nextId++;
+        _auths[id] = new JsonObject { ["id"] = id, ["tag"] = data["tag"]!.GetValue<int>(), ["user"] = data["user"]!.GetValue<string>(), ["secret"] = secret, ["peeruser"] = "", ["peersecret"] = "" };
+        return _auths[id].DeepClone();
+    }
+
+    private JsonNode UpdateAuth(int id, JsonObject data)
+    {
+        var auth = _auths.GetValueOrDefault(id) ?? throw NotFound(id.ToString());
+        if (data["secret"]?.GetValue<string>() is { } secret)
+        {
+            if (secret.Length is < 12 or > 16)
+            {
+                throw Validation("iscsi_auth_update.secret", "Secret must be between 12 and 16 characters.", 22);
+            }
+
+            auth["secret"] = secret;
+        }
+
+        return auth.DeepClone();
+    }
+
+    /// <summary>Последнюю запись tag, на который ссылается таргет, удалить нельзя.</summary>
+    private JsonNode DeleteAuth(int id)
+    {
+        var auth = _auths.GetValueOrDefault(id) ?? throw NotFound(id.ToString());
+        var tag = auth["tag"]!.GetValue<int>();
+        var lastOfTag = _auths.Values.Count(a => a["tag"]!.GetValue<int>() == tag) == 1;
+        if (lastOfTag && _targets.Values.Any(t => Groups(t).Any(g => g["auth"]?.GetValue<int>() == tag)))
+        {
+            throw CallError(22, "EINVAL", $"Authorized access of {tag} is being used by following target(s)");
+        }
+
+        _auths.Remove(id);
+        return true;
+    }
+
+    private JsonNode CreateInitiator(JsonObject data)
+    {
+        var id = _nextId++;
+        _initiators[id] = new JsonObject { ["id"] = id, ["initiators"] = data["initiators"]?.DeepClone() ?? new JsonArray(), ["comment"] = data["comment"]?.GetValue<string>() ?? "" };
+        return _initiators[id].DeepClone();
+    }
+
+    /// <summary>Как в TrueNAS (FK ondelete SET NULL): ссылки таргетов на удалённую группу обнуляются — таргет открыт всем.</summary>
+    private JsonNode DeleteInitiator(int id)
+    {
+        _ = _initiators.GetValueOrDefault(id) ?? throw NotFound(id.ToString());
+        foreach (var group in _targets.Values.SelectMany(Groups).Where(g => g["initiator"]?.GetValue<int>() == id))
+        {
+            group["initiator"] = null;
+        }
+
+        _initiators.Remove(id);
+        return true;
+    }
+
+    private static IEnumerable<JsonObject> Groups(JsonObject target) =>
+        target["groups"] is JsonArray groups ? groups.OfType<JsonObject>() : [];
+
+    /// <summary>Таргет, открытый всем: группа без инициаторов или с пустым списком (так TrueNAS пишет INITIATOR *).</summary>
+    public bool IsOpenToEveryone(string targetName)
+    {
+        lock (_lock)
+        {
+            var target = _targets.Values.FirstOrDefault(t => t["name"]!.GetValue<string>() == targetName);
+            return target is not null && Groups(target).Any(g =>
+                g["initiator"] is null || (_initiators.GetValueOrDefault(g["initiator"]!.GetValue<int>())?["initiators"] as JsonArray)?.Count is null or 0);
+        }
+    }
+
+    /// <summary>Снимок объекта для проверок в тестах.</summary>
+    public JsonObject? Find(string kind, Func<JsonObject, bool> predicate)
+    {
+        lock (_lock)
+        {
+            var rows = kind switch
+            {
+                "extent" => _extents.Values,
+                "target" => _targets.Values,
+                "auth" => _auths.Values,
+                "initiator" => _initiators.Values,
+                _ => throw new ArgumentException(kind),
+            };
+            return rows.FirstOrDefault(predicate)?.DeepClone().AsObject();
+        }
+    }
+
     private JsonNode CreateTarget(JsonObject data)
     {
         var name = data["name"]!.GetValue<string>();
         if (_targets.Values.Any(t => t["name"]!.GetValue<string>() == name))
         {
             throw Validation("iscsi_target_create.name", "Target name already exists", 22);
+        }
+
+        foreach (var group in data["groups"] is JsonArray g ? g.OfType<JsonObject>() : [])
+        {
+            if (group["authmethod"]?.GetValue<string>() is "CHAP" && !_auths.Values.Any(a => a["tag"]!.GetValue<int>() == group["auth"]?.GetValue<int>()))
+            {
+                throw Validation("iscsi_target_create.groups.0.auth", "Authentication group does not exist", 22);
+            }
         }
 
         var id = _nextId++;

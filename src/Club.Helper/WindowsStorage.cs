@@ -48,6 +48,49 @@ public sealed class WindowsStorage : IWindowsStorage
             },
             ct);
 
+    public Task ConnectChapAsync(string targetIqn, string portalHost, int portalPort, string chapUser, string chapSecret, CancellationToken ct) =>
+        PowerShell.RunAsync(
+            """
+            Set-Service -Name MSiSCSI -StartupType Automatic
+            Start-Service -Name MSiSCSI
+            $port = [int]$env:CLUB_PORTAL_PORT
+            $portal = Get-IscsiTargetPortal -ErrorAction SilentlyContinue |
+                Where-Object { $_.TargetPortalAddress -eq $env:CLUB_PORTAL_HOST -and $_.TargetPortalPortNumber -eq $port }
+            if (-not $portal) {
+                New-IscsiTargetPortal -TargetPortalAddress $env:CLUB_PORTAL_HOST -TargetPortalPortNumber $port | Out-Null
+            } else {
+                Update-IscsiTargetPortal -TargetPortalAddress $env:CLUB_PORTAL_HOST -TargetPortalPortNumber $port | Out-Null
+            }
+            # Секрет CHAP — через окружение процесса, не в командной строке.
+            Connect-IscsiTarget -NodeAddress $env:CLUB_IQN -TargetPortalAddress $env:CLUB_PORTAL_HOST -TargetPortalPortNumber $port `
+                -AuthenticationType ONEWAYCHAP -ChapUsername $env:CLUB_CHAP_USER -ChapSecret $env:CLUB_CHAP_SECRET -IsPersistent $false | Out-Null
+            """,
+            new Dictionary<string, string>
+            {
+                ["CLUB_IQN"] = targetIqn,
+                ["CLUB_PORTAL_HOST"] = portalHost,
+                ["CLUB_PORTAL_PORT"] = portalPort.ToString(CultureInfo.InvariantCulture),
+                ["CLUB_CHAP_USER"] = chapUser,
+                ["CLUB_CHAP_SECRET"] = chapSecret,
+            },
+            ct);
+
+    public Task SetDiskWritableAsync(int diskNumber, CancellationToken ct) =>
+        PowerShell.RunAsync("Set-Disk -Number ([int]$env:CLUB_DISK) -IsReadOnly $false", Disk(diskNumber), ct);
+
+    public Task FlushAndOfflineAsync(int diskNumber, char? driveLetter, CancellationToken ct) =>
+        PowerShell.RunAsync(
+            """
+            if ($env:CLUB_LETTER) { Write-VolumeCache -DriveLetter $env:CLUB_LETTER }
+            Set-Disk -Number ([int]$env:CLUB_DISK) -IsOffline $true
+            """,
+            new Dictionary<string, string>
+            {
+                ["CLUB_DISK"] = diskNumber.ToString(CultureInfo.InvariantCulture),
+                ["CLUB_LETTER"] = driveLetter?.ToString() ?? "",
+            },
+            ct);
+
     public Task DisconnectAsync(string targetIqn, CancellationToken ct) =>
         PowerShell.RunAsync(
             """

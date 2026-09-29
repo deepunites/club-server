@@ -27,6 +27,7 @@ builder.Services.AddSingleton(_ => new HttpClient(ServerHandler(options))
 });
 builder.Services.AddSingleton<DisklessApiClient>();
 builder.Services.AddSingleton<VolumeManager>();
+builder.Services.AddSingleton<MasterManager>();
 builder.Services.AddSingleton<HelperLoop>();
 builder.Services.AddHostedService<HelperService>();
 

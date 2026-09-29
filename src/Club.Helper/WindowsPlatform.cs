@@ -99,8 +99,12 @@ public sealed class MachineIdentity : IMachineIdentity
                     pca2011Revoked = $dbx -match 'Microsoft Windows Production PCA 2011'
                 }
             } catch { }
+            # IQN инициатора iSCSI: по нему сервер пускает к мастер-тому только этот ПК (режим суперклиента).
+            $iqn = $null
+            try { $iqn = (Get-InitiatorPort -ErrorAction Stop | Where-Object { $_.ConnectionType -eq 'iSCSI' } | Select-Object -First 1).NodeAddress } catch { }
             [pscustomobject]@{
                 secureBoot = $sb
+                initiatorIqn = $iqn
                 uuid = [string]$product.UUID; board = [string]$board.SerialNumber; os = "$($os.Caption) $($os.Version)"
                 diskSerial = ([string]$disk.SerialNumber).Trim(); diskModel = [string]$disk.FriendlyName; diskSize = [long]$disk.Size; diskBus = [string]$disk.BusType
             } | ConvertTo-Json -Compress
@@ -125,7 +129,10 @@ public sealed class MachineIdentity : IMachineIdentity
         var secureBoot = root.TryGetProperty("secureBoot", out var sb) && sb.ValueKind == JsonValueKind.Object
             ? new SecureBootFacts(Flag(sb, "enabled"), Flag(sb, "thirdPartyCa2011"), Flag(sb, "windowsCa2023"), Flag(sb, "pca2011Revoked"))
             : null;
-        _cached = new MachineFacts(hwid, Environment.MachineName, macs, root.GetProperty("os").GetString() ?? "", BootTime(), SystemDisk: systemDisk, SecureBoot: secureBoot);
+        var initiatorIqn = root.TryGetProperty("initiatorIqn", out var iqn) && iqn.ValueKind == JsonValueKind.String ? iqn.GetString() : null;
+        _cached = new MachineFacts(
+            hwid, Environment.MachineName, macs, root.GetProperty("os").GetString() ?? "", BootTime(), SystemDisk: systemDisk, SecureBoot: secureBoot,
+            InitiatorIqn: initiatorIqn);
         return _cached with { DhcpServers = DhcpServers(), ImageVersion = ImageVersion() };
     }
 

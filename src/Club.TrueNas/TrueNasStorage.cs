@@ -14,6 +14,12 @@ public sealed record IscsiTargetExtent(int Id, int Target, int Extent, int LunId
 
 public sealed record IscsiSession(string Initiator, string InitiatorAddress, string Target);
 
+/// <summary>Учётные данные CHAP (iscsi.auth). Таргет ссылается на них по <c>tag</c>, не по id.</summary>
+public sealed record IscsiAuth(int Id, int Tag, string User);
+
+/// <summary>Группа инициаторов (iscsi.initiator). Пустой список initiators в TrueNAS = доступ всем.</summary>
+public sealed record IscsiInitiatorGroup(int Id, IReadOnlyList<string> Initiators, string Comment);
+
 public enum DeleteOutcome
 {
     Deleted,
@@ -319,8 +325,208 @@ public sealed class TrueNasStorage(TrueNasClient client)
         return await GetTargetExtentAsync(targetId, extentId, ct) ?? throw new InvalidOperationException($"LUN for target {targetId} was not created", failure);
     }
 
+    /// <summary>
+    /// Экстент мастер-тома на запись (для суперклиента). Существующий экстент с тем же именем, но read-only или на другом
+    /// томе — ошибка, не правим.
+    /// </summary>
+    public async Task<IscsiExtent> EnsureWritableExtentAsync(string name, string zvol, string comment, CancellationToken ct = default)
+    {
+        var existing = await GetExtentAsync(name, ct);
+        if (existing is null)
+        {
+            TrueNasRpcException? failure = null;
+            try
+            {
+                await client.CallAsync("iscsi.extent.create", [new { name, type = "DISK", disk = "zvol/" + zvol, ro = false, comment }], ct);
+            }
+            catch (TrueNasRpcException ex)
+            {
+                failure = ex;
+            }
+
+            existing = await GetExtentAsync(name, ct) ?? throw new InvalidOperationException($"extent {name} was not created", failure);
+        }
+
+        if (existing.Disk != "zvol/" + zvol || existing.ReadOnly)
+        {
+            throw new InvalidOperationException($"extent {name} exists with disk '{existing.Disk}', ro={existing.ReadOnly}; expected zvol/{zvol}, ro=false");
+        }
+
+        return existing;
+    }
+
+    public async Task<IReadOnlyList<IscsiAuth>> ListAuthAsync(CancellationToken ct = default)
+    {
+        var rows = await client.CallAsync("iscsi.auth.query", [], ct);
+        return rows.EnumerateArray().Select(a => new IscsiAuth(a.GetProperty("id").GetInt32(), a.GetProperty("tag").GetInt32(), Str(a, "user"))).ToList();
+    }
+
+    /// <summary>
+    /// Учётные данные CHAP для таргета: запись с этим <paramref name="user"/> и <paramref name="tag"/>; секрет обновляется
+    /// (он новый на каждое открытие). Секрет — 12..16 символов (ограничение TrueNAS и Windows).
+    /// </summary>
+    public async Task<IscsiAuth> EnsureChapAsync(int tag, string user, string secret, CancellationToken ct = default)
+    {
+        if (secret.Length is < 12 or > 16)
+        {
+            throw new ArgumentException("CHAP secret must be 12..16 characters", nameof(secret));
+        }
+
+        var existing = (await ListAuthAsync(ct)).FirstOrDefault(a => a.User == user && a.Tag == tag);
+        if (existing is null)
+        {
+            TrueNasRpcException? failure = null;
+            try
+            {
+                await client.CallAsync("iscsi.auth.create", [new { tag, user, secret }], ct);
+            }
+            catch (TrueNasRpcException ex)
+            {
+                failure = ex;
+            }
+
+            return (await ListAuthAsync(ct)).FirstOrDefault(a => a.User == user && a.Tag == tag)
+                ?? throw new InvalidOperationException($"CHAP credential {user} was not created", failure);
+        }
+
+        await client.CallAsync("iscsi.auth.update", [existing.Id, new { secret }], ct);
+        return existing;
+    }
+
+    public async Task<DeleteResult> DeleteAuthAsync(int tag, string user, CancellationToken ct = default)
+    {
+        var existing = (await ListAuthAsync(ct)).FirstOrDefault(a => a.User == user && a.Tag == tag);
+        if (existing is null)
+        {
+            return new DeleteResult(DeleteOutcome.AlreadyAbsent);
+        }
+
+        try
+        {
+            await client.CallAsync("iscsi.auth.delete", [existing.Id], ct);
+        }
+        catch (TrueNasRpcException ex)
+        {
+            return new DeleteResult(DeleteOutcome.Blocked, ex.Reason ?? ex.Message);
+        }
+
+        return new DeleteResult(DeleteOutcome.Deleted);
+    }
+
+    public async Task<IscsiInitiatorGroup?> GetInitiatorGroupAsync(string comment, CancellationToken ct = default)
+    {
+        var rows = await client.CallAsync("iscsi.initiator.query", [new object[] { new object[] { "comment", "=", comment } }], ct);
+        return rows.EnumerateArray().Select(g => new IscsiInitiatorGroup(
+            g.GetProperty("id").GetInt32(),
+            g.GetProperty("initiators").EnumerateArray().Select(i => i.GetString() ?? "").ToList(),
+            Str(g, "comment"))).FirstOrDefault();
+    }
+
+    /// <summary>
+    /// Группа инициаторов из одного IQN. Пустой список в TrueNAS открывает таргет всем, поэтому IQN обязателен;
+    /// существующая группа с другим IQN обновляется.
+    /// </summary>
+    public async Task<IscsiInitiatorGroup> EnsureInitiatorGroupAsync(string comment, string initiatorIqn, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(initiatorIqn))
+        {
+            throw new ArgumentException("initiator IQN is required: an empty group grants access to everyone", nameof(initiatorIqn));
+        }
+
+        var existing = await GetInitiatorGroupAsync(comment, ct);
+        if (existing is null)
+        {
+            TrueNasRpcException? failure = null;
+            try
+            {
+                await client.CallAsync("iscsi.initiator.create", [new { initiators = new[] { initiatorIqn }, comment }], ct);
+            }
+            catch (TrueNasRpcException ex)
+            {
+                failure = ex;
+            }
+
+            return await GetInitiatorGroupAsync(comment, ct) ?? throw new InvalidOperationException($"initiator group {comment} was not created", failure);
+        }
+
+        if (existing.Initiators.Count != 1 || existing.Initiators[0] != initiatorIqn)
+        {
+            await client.CallAsync("iscsi.initiator.update", [existing.Id, new { initiators = new[] { initiatorIqn } }], ct);
+        }
+
+        return await GetInitiatorGroupAsync(comment, ct) ?? throw new InvalidOperationException($"initiator group {comment} disappeared");
+    }
+
+    /// <summary>Удаление группы — только когда на неё не ссылается таргет: иначе TrueNAS обнулит ссылку и откроет таргет всем.</summary>
+    public async Task<DeleteResult> DeleteInitiatorGroupAsync(string comment, CancellationToken ct = default)
+    {
+        var existing = await GetInitiatorGroupAsync(comment, ct);
+        if (existing is null)
+        {
+            return new DeleteResult(DeleteOutcome.AlreadyAbsent);
+        }
+
+        await client.CallAsync("iscsi.initiator.delete", [existing.Id], ct);
+        return new DeleteResult(DeleteOutcome.Deleted);
+    }
+
+    /// <summary>Таргет с доступом по CHAP и группе из одного инициатора (мастер-том для суперклиента).</summary>
+    public async Task<IscsiTarget> EnsureChapTargetAsync(string name, string alias, int portalId, int initiatorGroupId, int authTag, CancellationToken ct = default)
+    {
+        if (await GetTargetAsync(name, ct) is { } existing)
+        {
+            var groups = await TargetGroupsAsync(existing.Id, ct);
+            if (groups.Count != 1 || groups[0] != (portalId, initiatorGroupId, "CHAP", authTag))
+            {
+                throw new InvalidOperationException($"target {name} exists with other access groups; expected CHAP via initiator group {initiatorGroupId}");
+            }
+
+            return existing;
+        }
+
+        TrueNasRpcException? failure = null;
+        try
+        {
+            await client.CallAsync("iscsi.target.create", [new
+            {
+                name,
+                alias,
+                mode = "ISCSI",
+                groups = new[] { new { portal = portalId, initiator = initiatorGroupId, authmethod = "CHAP", auth = authTag } },
+            }], ct);
+        }
+        catch (TrueNasRpcException ex)
+        {
+            failure = ex;
+        }
+
+        return await GetTargetAsync(name, ct) ?? throw new InvalidOperationException($"target {name} was not created", failure);
+    }
+
+    public async Task<IReadOnlyList<(int Portal, int? Initiator, string AuthMethod, int? Auth)>> TargetGroupsAsync(int targetId, CancellationToken ct = default)
+    {
+        var rows = await client.CallAsync("iscsi.target.query", [new object[] { new object[] { "id", "=", targetId } }], ct);
+        var target = rows.EnumerateArray().FirstOrDefault();
+        if (target.ValueKind != JsonValueKind.Object || !target.TryGetProperty("groups", out var groups) || groups.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        return groups.EnumerateArray().Select(g => (
+            g.GetProperty("portal").GetInt32(),
+            g.TryGetProperty("initiator", out var i) && i.ValueKind == JsonValueKind.Number ? i.GetInt32() : (int?)null,
+            Str(g, "authmethod"),
+            g.TryGetProperty("auth", out var a) && a.ValueKind == JsonValueKind.Number ? a.GetInt32() : (int?)null)).ToList();
+    }
+
     /// <summary>Удаление таргета без force: пока есть сессии, middleware отказывает — это предохранитель, а не авария.</summary>
-    public async Task<DeleteResult> DeleteTargetAsync(string name, CancellationToken ct = default)
+    public Task<DeleteResult> DeleteTargetAsync(string name, CancellationToken ct = default) => DeleteTargetAsync(name, force: false, ct);
+
+    /// <summary>
+    /// С <paramref name="force"/> TrueNAS рвёт сессии — только для принудительного закрытия мастер-тома, когда ПК
+    /// суперклиента недоступен; библиотечные таргеты так не удаляются никогда.
+    /// </summary>
+    public async Task<DeleteResult> DeleteTargetAsync(string name, bool force, CancellationToken ct = default)
     {
         var target = await GetTargetAsync(name, ct);
         if (target is null)
@@ -330,7 +536,7 @@ public sealed class TrueNasStorage(TrueNasClient client)
 
         try
         {
-            await client.CallAsync("iscsi.target.delete", [target.Id, false, false], ct);
+            await client.CallAsync("iscsi.target.delete", [target.Id, force, false], ct);
         }
         catch (TrueNasRpcException ex)
         {

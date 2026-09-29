@@ -15,9 +15,14 @@ public sealed record MountedVolume(
 
 public sealed record MachineStatus(
     string HelperVersion, DateTimeOffset? BootTime, MountedVolume Volume, IReadOnlyList<string>? DhcpServers = null,
-    string? ImageVersion = null, SystemDiskFacts? SystemDisk = null, SecureBootFacts? SecureBoot = null);
+    string? ImageVersion = null, SystemDiskFacts? SystemDisk = null, SecureBootFacts? SecureBoot = null,
+    string? InitiatorIqn = null, MasterReport? Master = null);
 
-public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume);
+public sealed record MasterAssignment(string TargetIqn, string Portal, string ChapUser, string ChapSecret, string DriveLetter);
+
+public sealed record MasterReport(string State, string? TargetIqn = null, string? DriveLetter = null, string? Error = null);
+
+public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume, MasterAssignment? Master = null);
 
 internal sealed record RegisterRequest(string Hwid, string Hostname, IReadOnlyList<string> MacAddresses, string HelperVersion, string? OsVersion);
 

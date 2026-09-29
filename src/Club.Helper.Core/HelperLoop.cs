@@ -30,10 +30,14 @@ public sealed class InMemoryAssignmentCache : IAssignmentCache
 /// Один такт помощника: привести том к назначению → сообщить факты серверу → в ответе узнать актуальное назначение.
 /// Сервер недоступен — действует последнее известное назначение (из памяти или с диска), том не отключается.
 /// </summary>
-public sealed class HelperLoop(DisklessApiClient api, VolumeManager volumes, IAssignmentCache cache, IMachineIdentity identity, HelperOptions options, ILogger<HelperLoop> logger)
+public sealed class HelperLoop(
+    DisklessApiClient api, VolumeManager volumes, IAssignmentCache cache, IMachineIdentity identity, HelperOptions options, ILogger<HelperLoop> logger,
+    MasterManager? masters = null)
 {
     private VolumeAssignment? _desired;
     private bool _known;
+    private MasterAssignment? _master;
+    private bool _masterKnown;
     private string? _contentsReportedFor;
 
     public MountedVolume? LastReport { get; private set; }
@@ -46,8 +50,15 @@ public sealed class HelperLoop(DisklessApiClient api, VolumeManager volumes, IAs
         }
 
         var report = await ApplyAsync(ct);
-        var reply = await ReportAsync(report, ct);
-        if (reply is not null && !Equals(reply.Volume, _desired))
+        var master = await ApplyMasterAsync(ct);
+        var reply = await ReportAsync(report, master, ct);
+        if (reply is null)
+        {
+            return;
+        }
+
+        var changed = false;
+        if (!Equals(reply.Volume, _desired))
         {
             // Новая версия или откат: применяем сразу, не дожидаясь следующего такта.
             logger.LogInformation("Assignment changed: {Old} -> {New}", _desired?.LibraryVersion, reply.Volume?.LibraryVersion);
@@ -55,9 +66,29 @@ public sealed class HelperLoop(DisklessApiClient api, VolumeManager volumes, IAs
             _known = true;
             await cache.SaveAsync(_desired, ct);
             report = await ApplyAsync(ct);
-            await ReportAsync(report, ct);
+            changed = true;
+        }
+
+        var masterKnownBefore = _masterKnown;
+        _masterKnown = true;
+        if (!Equals(reply.Master, _master) || !masterKnownBefore)
+        {
+            // Администратор открыл или закрыл правку мастер-тома.
+            _master = reply.Master;
+            master = await ApplyMasterAsync(ct);
+            changed = true;
+        }
+
+        if (changed)
+        {
+            await ReportAsync(report, master, ct);
         }
     }
+
+    public MasterReport? LastMasterReport { get; private set; }
+
+    private async Task<MasterReport?> ApplyMasterAsync(CancellationToken ct) =>
+        LastMasterReport = masters is null ? null : await masters.ApplyAsync(_master, _masterKnown, ct);
 
     private async Task LearnAssignmentAsync(CancellationToken ct)
     {
@@ -87,7 +118,7 @@ public sealed class HelperLoop(DisklessApiClient api, VolumeManager volumes, IAs
         return LastReport = await volumes.ApplyAsync(_desired, ct);
     }
 
-    private async Task<StatusAccepted?> ReportAsync(MountedVolume report, CancellationToken ct)
+    private async Task<StatusAccepted?> ReportAsync(MountedVolume report, MasterReport? master, CancellationToken ct)
     {
         try
         {
@@ -98,7 +129,10 @@ public sealed class HelperLoop(DisklessApiClient api, VolumeManager volumes, IAs
             }
 
             var facts = await identity.ReadAsync(ct);
-            var reply = await api.ReportStatusAsync(new MachineStatus(options.HelperVersion, facts.BootTime, report, facts.DhcpServers, facts.ImageVersion, facts.SystemDisk, facts.SecureBoot), ct);
+            var reply = await api.ReportStatusAsync(
+                new MachineStatus(options.HelperVersion, facts.BootTime, report, facts.DhcpServers, facts.ImageVersion, facts.SystemDisk, facts.SecureBoot,
+                    facts.InitiatorIqn, master),
+                ct);
             if (report.Contents is not null)
             {
                 _contentsReportedFor = report.LibraryVersion;

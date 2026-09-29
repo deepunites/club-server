@@ -36,4 +36,12 @@ public sealed class LibraryOptions
     public int WorkerIntervalSec { get; set; } = 15;
 
     public int ReconcileIntervalSec { get; set; } = 300;
+
+    /// <summary>Таргет мастер-тома для суперклиента. Без «games-» в имени: помощники не принимают его за версию библиотеки.</summary>
+    public string MasterTargetName { get; set; } = "club-master";
+
+    public string MasterExtentName { get; set; } = "clubsrv-master";
+
+    /// <summary>Буква мастер-тома на ПК суперклиента (библиотека остаётся на своей букве, только для чтения).</summary>
+    public string MasterDriveLetter { get; set; } = "M";
 }
