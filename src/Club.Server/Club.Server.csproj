@@ -16,6 +16,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Настройки разработки (тестовый ключ клуба) в поставку не попадают. -->
+    <Content Update="appsettings.Development.json" CopyToPublishDirectory="Never" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Файлы, которые wimboot подкладывает в WinPE (docs/imaging.md). -->
     <EmbeddedResource Include="Imaging\WinPE\*" LogicalName="WinPE.%(Filename)%(Extension)" />
   </ItemGroup>

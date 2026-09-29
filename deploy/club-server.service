@@ -1,0 +1,27 @@
+# Сервер клуба (бездиск): /etc/systemd/system/club-server.service
+[Unit]
+Description=Club diskless server
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=clubsrv
+Group=clubsrv
+# Корень контента — здесь лежит wwwroot панели.
+WorkingDirectory=/opt/club-server
+ExecStart=/opt/club-server/Club.Server
+EnvironmentFile=/etc/club-server/club-server.env
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=DOTNET_gcServer=0
+Restart=always
+RestartSec=5
+# Ключ подписи JWT и прочее состояние.
+StateDirectory=club-server
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -18,6 +18,8 @@ docs/panel-api.md    API панели администратора
 docs/network.md      Kea DHCP: адресный план, установка, резервации, чужой DHCP
 docs/imaging.md      образы Windows и перезаливка по PXE (iPXE, wimboot, WinPE)
 docs/master-editing.md  правка игр на мастер-томе (суперклиент)
+docs/install/stand.md  установка стенда по этапам (Ubuntu, TrueNAS, помощник, библиотека, Kea)
+deploy/              unit systemd и пример настроек сервера; scripts/server/make-club-ca.sh — CA клуба
 scripts/winpe/       сборка WinPE (Windows ADK)
 docs/research/       исследование API TrueNAS и стека .NET (источники и статусы проверки)
 tests/               интеграционные тесты: временная база PostgreSQL, поддельный TrueNAS с TLS
