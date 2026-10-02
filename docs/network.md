@@ -36,6 +36,7 @@ DHCP в клубе раздаёт **Kea 3.0** (пакет Ubuntu `kea-dhcp4-serv
 ## Установка (Ubuntu 26.04, от root)
 
 ```bash
+systemctl mask kea-dhcp4-server     # до установки: Kea не стартует сам, пока в сети работает DHCP роутера
 apt install -y kea-dhcp4-server kea-admin
 ```
 
@@ -44,11 +45,13 @@ apt install -y kea-dhcp4-server kea-admin
 ```bash
 sudo -u postgres createuser _kea
 sudo -u postgres createdb -O _kea kea
-sudo -u _kea kea-admin db-init pgsql -n kea
+sudo -u _kea kea-admin db-init pgsql -h /var/run/postgresql -u _kea -n kea
 ```
 
-`kea-admin` без `-u/-p` подключается через сокет как текущий пользователь (peer). Схема после `db-init` — `29.0`
-(Kea 3.0.x); с другой мажорной версией сервер клуба в `hosts` не пишет (предупреждение `keaSchema`).
+Без `-h`/`-u` `kea-admin` 3.0.3 подключается к `localhost` как `keatest` с паролем `1234` (умолчания
+`/usr/share/kea/scripts/admin-utils.sh`) и падает на `password authentication failed for user "keatest"`; с каталогом
+сокета и ролью `_kea` — peer-аутентификация, пароль не нужен. Схема после `db-init` — `29.0` (Kea 3.0.x); с другой
+мажорной версией сервер клуба в `hosts` не пишет (предупреждение `keaSchema`).
 
 Права серверу клуба на таблицу резерваций (`clubsrv` — роль, под которой работает сервер клуба):
 
@@ -61,8 +64,8 @@ GRANT USAGE ON SEQUENCE hosts_host_id_seq TO clubsrv;
 SQL
 ```
 
-[ГИПОТЕЗА: список прав собран по коду синхронизации (`SELECT … FOR UPDATE` требует `UPDATE`), на отдельной роли не
-проверен — на dev-машине нет права создавать роли. Проверить на стенде: одна синхронизация без ошибок `permission denied`.]
+Проверено на стенде (Ubuntu 26.04, Kea 3.0.3, PostgreSQL 18, 2026-10-02): под отдельной ролью `clubsrv` синхронизация
+записала резервацию (`Kea reservations synced: +1`) без `permission denied`.
 
 Настройки сервера клуба (`appsettings.json` или переменные окружения `Kea__Enabled`, `Kea__ConnectionString`):
 
@@ -78,9 +81,18 @@ SQL
 ```bash
 install -m 640 -o root -g _kea kea-dhcp4.conf /etc/kea/kea-dhcp4.conf
 kea-dhcp4 -t /etc/kea/kea-dhcp4.conf
-systemctl restart kea-dhcp4-server
-systemctl status kea-dhcp4-server
+echo '/run/postgresql/.s.PGSQL.* rw,' >> /etc/apparmor.d/local/usr.sbin.kea-dhcp4   # один раз, см. ниже
+apparmor_parser -r /etc/apparmor.d/usr.sbin.kea-dhcp4
+systemctl unmask kea-dhcp4-server
+systemctl enable --now kea-dhcp4-server
+journalctl -u kea-dhcp4-server -n 20 --no-pager      # DHCP4_STARTED, без ERROR
 ```
+
+**AppArmor.** Профиль `kea-dhcp4` из пакета Ubuntu включает `abstractions/mysql`, но не разрешает сокет PostgreSQL:
+без правила выше Kea не стартует — `DHCP4_CONFIG_LOAD_FAIL … Unable to open database: connection to server on socket
+"/var/run/postgresql/.s.PGSQL.5432" failed: Permission denied`, в `journalctl -k` — `apparmor="DENIED"
+operation="connect" profile="kea-dhcp4"`. `kea-dhcp4 -t` к базе не подключается и этого не ловит. Правило лежит в
+`local/` — обновление пакета его не затирает.
 
 `kea-dhcp4 -t` проверяет интерфейс: в поле «Интерфейс сервера» должно быть имя карты этой машины, смотрящей в сеть
 клуба (подсказки в поле — интерфейсы машины сервера). Конфиг перегенерировать и поставить заново нужно только при
@@ -90,9 +102,9 @@ systemctl status kea-dhcp4-server
 через сокет (пароля в файле нет); хук `libdhcp_pgsql.so`; резервации по `hw-address` только внутри подсети;
 `authoritative: true`; аренды — в memfile.
 
-[ГИПОТЕЗА: подключение Kea к PostgreSQL через каталог сокета по peer-аутентификации (`host: /var/run/postgresql`,
-без пароля) проверено только `kea-dhcp4 -t`, который к базе не подключается. На стенде: после `systemctl restart`
-в журнале `journalctl -u kea-dhcp4-server` нет ошибок `hosts-database`, и ПК с резервацией получает свой IP.]
+Проверено на стенде (2026-10-02): Kea с правилом AppArmor открывает базу резерваций по сокету без пароля
+(`PGSQL_HB_DB … DHCP4_STARTED`), ПК с резервацией места 19 получил свой IP, повторно — после `ipconfig /release` и
+`/renew`; помощник сообщил DHCP-сервер `192.168.1.51`, чужого DHCP нет.
 
 ## Резервации и ручные строки
 

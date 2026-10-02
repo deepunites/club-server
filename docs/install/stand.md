@@ -173,7 +173,10 @@ curl -s --cacert /etc/club-server/tls/club-ca.crt https://192.168.77.2:5443/heal
 6. **iSCSI**: Shares → iSCSI (без мастера настройки):
    - Portals → Add → IP `0.0.0.0`, порт `3260`. Запомните его **ID** (обычно 1).
    - Initiators Groups → Add → «Allow all initiators». Запомните **ID** (обычно 1). Опубликованные тома — только для
-     чтения; сузить доступ можно позже.
+     чтения, поэтому группа открыта всем. Если позже сузите её списком IQN ПК — добавьте в список и имя, от которого
+     сервер клуба проверяет публикацию: `iqn.2026-10.local.clubsrv:probe` (или своё из `Library__ProbeInitiatorIqn`).
+     TrueNAS применяет список инициаторов и к discovery: без этого имени сервер не увидит таргет новой версии, и
+     публикация остановится на шаге «проверка доступа» с ошибкой `does not include the server's probe name`.
    - Target Global Configuration — базовое имя не менять.
    - System → Services → iSCSI → Start и **Start Automatically**.
 7. **Сертификат** (чтобы сервер клуба проверял, что говорит именно с этим TrueNAS). На сервере клуба показать
@@ -217,9 +220,18 @@ sudo nano /etc/club-server/club-server.env
 #   TrueNas__ApiKey=<ключ из этапа 3>
 #   Library__Enabled=true
 #   Library__PortalId / Library__InitiatorGroupId — ID из этапа 3, если не 1
+#   Library__PortalAddress — портал iSCSI для ПК (192.168.77.3:3260)
 sudo systemctl restart club-server
 sudo journalctl -u club-server -n 50 --no-pager | grep -i -E "truenas|library|error"
+nc -zv 192.168.77.3 3260                          # «succeeded»: портал iSCSI доступен серверу клуба
 ```
+
+Серверу клуба, как и ПК, нужен доступ к порталу iSCSI (TCP 3260): перед тем как сделать версию текущей, он сам
+спрашивает портал (iSCSI SendTargets), виден ли её таргет. Если с сервера портал доступен по другому адресу, чем с
+ПК, — `Library__DiscoveryAddress=host:port`; пусто — тот же `Library__PortalAddress`. Пустой `Library__PortalAddress`
+или порт не из 1..65535 — сервер не запустится (причина в журнале). Если портал с сервера недоступен (нет связи,
+отказ в соединении, discovery с CHAP), версии всё равно публикуются, но без проверки: сервер повторно применяет
+конфигурацию iSCSI вслепую, а сверка (раз в 5 минут) показывает в панели «Сервер не может проверить iSCSI-портал».
 
 **Этап пройден, если** в панели на вкладке «Библиотека игр» нет плашки «Хранилище выключено», а в журнале нет
 ошибок подключения к TrueNAS. Через 5 минут (сверка) предупреждений о TrueNAS нет.
@@ -249,7 +261,7 @@ New-Service -Name ClubDisklessHelper -BinaryPathName '"C:\Program Files\ClubDisk
 Start-Service ClubDisklessHelper
 ```
 
-В панели → «Рабочие станции» → «Ждут одобрения» → **Одобрить**. Через ~30 с ПК «В сети», версия помощника 1.4.0.
+В панели → «Рабочие станции» → «Ждут одобрения» → **Одобрить**. Через ~30 с ПК «В сети», версия помощника 1.4.1.
 
 **Этап пройден, если** ПК в панели «В сети», и в его строке есть значок Secure Boot (помощник прислал данные о ПК).
 
@@ -268,8 +280,10 @@ Start-Service ClubDisklessHelper
 3. Положить на `M:` игру (для стенда — любая папка с файлами или небольшая игра через её лаунчер, путь установки —
    `M:\...`).
 4. Панель → **Закончить правку**. Помощник сбросит данные и отключит `M:`; через 30–60 с — «закрыт».
-5. Панель → «Новая версия» → **Опубликовать** (метка — сегодняшняя дата). Шаги: снапшот → клон → extent → таргет →
-   переключение; итог — «опубликована, текущая».
+5. Панель → «Новая версия» → **Опубликовать** (метка — сегодняшняя дата). Шаги: снапшот → клон → таргет → extent →
+   LUN → проверка доступа (сервер сам спрашивает портал iSCSI, виден ли таргет, и при необходимости заново применяет
+   конфигурацию iSCSI; если портал с сервера недоступен — переключение без проверки, см. этап 4) → переключение; итог —
+   «опубликована, текущая».
 6. Через ~30 с на ПК появляется диск `G:` с игрой.
 
 **Этап пройден, если:**
@@ -278,7 +292,12 @@ Start-Service ClubDisklessHelper
 - в PowerShell: `Get-Disk | ? BusType -eq iSCSI | fl Number,IsReadOnly,IsOffline` → `IsReadOnly : True`;
 - в панели «ПК на связи: на текущей 1», в строке версии — «Состав: N папок» с вашей игрой.
 
-**Если не получилось:** ошибка `drive letter M is in use` — буква `M:` на ПК уже занята (флешка, сетевой диск):
+**Если не получилось:** публикация упала на шаге «проверка доступа» с `not visible to PCs` — TrueNAS не включила таргет
+даже после повторного применения конфигурации. Если в тексте ошибки есть `admits only listed initiators` — сначала
+проверить, что в списке группы есть `iqn.2026-10.local.clubsrv:probe` (или своё `Library__ProbeInitiatorIqn`), добавить
+и «Повторить». Если имя в списке есть или группа открыта всем: System → Services → iSCSI → Stop → Start (рвёт сессии
+всех ПК), затем в журнале операций «Повторить». С `does not include the server's probe name` — группа инициаторов сужена без имени проверки сервера
+(этап 3, п. 6): добавить его в группу и «Повторить»; службу iSCSI перезапускать не нужно. Ошибка `drive letter M is in use` — буква `M:` на ПК уже занята (флешка, сетевой диск):
 освободить её. `no data partition on the library disk` после разметки — том создан не NTFS или не «простой». Иначе —
 снимок панели (карточка мастер-тома и «Выполняется»), журнал сервера
 (`journalctl -u club-server -n 200`), на ПК — журнал «Приложение» и вывод `Get-IscsiSession; Get-Disk`.
@@ -290,10 +309,13 @@ Start-Service ClubDisklessHelper
 До этого шага ничего не меняйте на роутере. Подробности — `docs/network.md`.
 
 ```bash
+sudo systemctl mask kea-dhcp4-server            # не дать Kea стартовать рядом с DHCP роутера
 sudo apt install -y kea-dhcp4-server kea-admin
+cd /tmp
 sudo -u postgres createuser _kea
 sudo -u postgres createdb -O _kea kea
-sudo -u _kea kea-admin db-init pgsql -n kea
+# без -h/-u kea-admin идёт на localhost как keatest (умолчания пакета) — указать сокет и роль явно
+sudo -u _kea kea-admin db-init pgsql -h /var/run/postgresql -u _kea -n kea     # «Schema version … 29.0»
 sudo -u _kea psql -d kea <<'SQL'
 GRANT CONNECT ON DATABASE kea TO clubsrv;
 GRANT SELECT ON schema_version TO clubsrv;
@@ -312,16 +334,25 @@ kea-dhcp4.conf» и скопировать на сервер:
 ```bash
 sudo install -m 640 -o root -g _kea ~/kea-dhcp4.conf /etc/kea/kea-dhcp4.conf
 sudo kea-dhcp4 -t /etc/kea/kea-dhcp4.conf        # должно пройти без ошибок
-sudo systemctl restart kea-dhcp4-server
-systemctl status kea-dhcp4-server --no-pager
+# профиль AppArmor kea-dhcp4 в Ubuntu пускает только к MySQL: разрешить сокет PostgreSQL
+echo '/run/postgresql/.s.PGSQL.* rw,' | sudo tee -a /etc/apparmor.d/local/usr.sbin.kea-dhcp4
+sudo apparmor_parser -r /etc/apparmor.d/usr.sbin.kea-dhcp4
+sudo systemctl unmask kea-dhcp4-server
+sudo systemctl enable --now kea-dhcp4-server
+sudo journalctl -u kea-dhcp4-server -n 20 --no-pager | grep -E "ERROR|DHCP4_STARTED"   # только DHCP4_STARTED
 ```
+
+`kea-dhcp4 -t` к базе не подключается, поэтому ошибку AppArmor не ловит: без правила Kea падает при старте с
+`Unable to open database … .s.PGSQL.5432 failed: Permission denied`, в `journalctl -k` — `apparmor="DENIED"
+profile="kea-dhcp4"`.
 
 **Только теперь** выключить DHCP на роутере. На ПК: `ipconfig /release` и `ipconfig /renew`.
 
 **Этап пройден, если** ПК получил адрес `192.168.77.101` (место №1), в панели «Сеть» — резервация ПК и нет красной
 плашки «Чужой DHCP».
 
-**Если не получилось — сразу вернуть сеть:** включить DHCP на роутере и `sudo systemctl stop kea-dhcp4-server`.
+**Если не получилось — сразу вернуть сеть:** включить DHCP на роутере и `sudo systemctl disable --now kea-dhcp4-server`.
+Так же — после пробного переключения, если Kea пока не должен оставаться DHCP сети (конфиг и база остаются).
 Пришлите `sudo journalctl -u kea-dhcp4-server -n 100 --no-pager`.
 
 ---
