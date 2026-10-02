@@ -51,6 +51,9 @@ public static partial class DisklessEndpoints
     [GeneratedRegex(@"^iqn\.\d{4}-\d{2}\.[a-z0-9][a-z0-9.\-]*(:[\x21-\x7e]+)?$")]
     private static partial Regex IqnPattern();
 
+    /// <summary>Имя инициатора в том виде, в каком его принимает сервер: <c>iqn.yyyy-mm.domain[:name]</c>, нижний регистр.</summary>
+    public static bool IsInitiatorIqn(string? value) => value is { Length: <= 223 } && IqnPattern().IsMatch(value);
+
     [GeneratedRegex("^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")]
     private static partial Regex MacPattern();
 
@@ -175,9 +178,25 @@ public static partial class DisklessEndpoints
             await images.CompleteBootedAsync(machineId, imageVersion, clock.GetUtcNow());
         }
 
-        var iqn = request.InitiatorIqn?.Trim().ToLowerInvariant() is { Length: <= 223 } candidate && IqnPattern().IsMatch(candidate) ? candidate : null;
-        var masterReport = request.Master is { } m && MasterStates.Contains(m.State) ? m : null;
-        await machines.RecordMasterAsync(machineId, iqn, masterReport?.State, Truncate(masterReport?.Error, 2000));
+        var iqn = request.InitiatorIqn?.Trim().ToLowerInvariant() is { } candidate && IsInitiatorIqn(candidate) ? candidate : null;
+
+        // Отчёт без master — мастер-том на ПК не подключён и не назначен: помощник 1.4+ молчит именно тогда, а старые
+        // помощники мастер-том не подключают вовсе. Поэтому прежнее состояние сбрасывается, а не сохраняется: «none»
+        // помощник шлёт один раз, в такте, где сам отключил том, — если этот отчёт потерялся или сессию оборвали без
+        // помощника (принудительное закрытие, перезагрузка ПК), в панели навсегда остался бы «mounted» (стенд 2026-10-02).
+        // Незнакомое состояние (более новый помощник) не меняет ничего.
+        if (request.Master is not { } m)
+        {
+            await machines.RecordMasterAsync(machineId, iqn, null, null);
+        }
+        else if (MasterStates.Contains(m.State))
+        {
+            await machines.RecordMasterAsync(machineId, iqn, m.State, Truncate(m.Error, 2000));
+        }
+        else
+        {
+            await machines.RecordMasterAsync(machineId, iqn, null, null, keepMaster: true);
+        }
 
         return Results.Json(new StatusAccepted(clock.GetUtcNow(), await AssignmentAsync(library, options), await MasterAssignmentAsync(machineId, master, options)), ApiJson.Options);
     }

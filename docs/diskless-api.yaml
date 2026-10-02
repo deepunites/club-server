@@ -115,6 +115,54 @@ paths:
           $ref: '#/components/responses/Error'
         '403':
           $ref: '#/components/responses/Error'
+webhooks:
+  machinesSnapshot:
+    post:
+      operationId: machinesSnapshot
+      summary: Список ПК → внешняя система (шелл, касса); отправляет сервер клуба
+      description: |
+        Сервер клуба сам отправляет POST на адрес из настройки `MachineFeed:Url` (подробно — docs/machine-feed.md).
+        Работает через NAT: получатель может быть в облаке.
+
+        - Всегда **полный** список одобренных ПК. ПК, которого нет в снимке, удалён или ещё не одобрен.
+        - Отправка при изменении (не позже `MachineFeed:IntervalSec`, 10 с) и повтор неизменного списка раз в
+          `MachineFeed:ResendMinutes` (10 мин).
+        - Ответ 2xx — принято. Любой другой ответ, таймаут 15 с или обрыв — повтор через 10 с, 20 с, 40 с … 5 мин.
+          Редиректы не выполняются.
+        - Подпись: `X-Club-Signature: v1=` + hex(HMAC-SHA256(секрет, `{X-Club-Timestamp}.{тело запроса как есть}`)).
+          Получатель проверяет подпись по сырым байтам тела, отклоняет метку времени старше 5 минут и снимки с
+          `generatedAt` раньше уже применённого.
+        - Новые поля могут появиться в любой версии `club-server.machines/1`: неизвестные поля нужно пропускать.
+      parameters:
+        - name: X-Club-Timestamp
+          in: header
+          required: true
+          description: Unix-время отправки в секундах.
+          schema:
+            type: string
+            pattern: '^[0-9]{1,12}$'
+        - name: X-Club-Signature
+          in: header
+          required: true
+          schema:
+            type: string
+            pattern: '^v1=[0-9a-f]{64}$'
+        - name: X-Club-Event
+          in: header
+          required: true
+          schema:
+            const: machines.snapshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MachinesSnapshot'
+      responses:
+        '2XX':
+          description: Снимок принят (тело ответа не читается).
+        default:
+          description: Не принят — сервер клуба повторит позже.
 components:
   securitySchemes:
     clubKey:
@@ -155,11 +203,12 @@ components:
         macAddresses:
           type: array
           minItems: 1
-          description: MAC Ethernet-карт; первым — основная карта (с IPv4-шлюзом), по нему сервер резервирует IP места в DHCP.
+          description: |
+            MAC Ethernet-карт в нижнем регистре; первым — основная карта (с IPv4-шлюзом), по нему сервер резервирует IP
+            места в DHCP. Нужны для DHCP/PXE и перезаливки.
           items:
             type: string
             pattern: '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$'
-          description: MAC сетевых карт в нижнем регистре; нужны для DHCP/PXE и перезаливки.
         helperVersion:
           type: string
         osVersion:
@@ -300,7 +349,10 @@ components:
           $ref: '#/components/schemas/MasterReport'
     MasterReport:
       type: object
-      description: Мастер-том на ПК суперклиента — факт с ПК.
+      description: >-
+        Мастер-том на ПК суперклиента — факт с ПК. Помощник присылает его, только когда мастер-том назначен ПК или
+        подключён на нём (none — в такте, где помощник его отключил). Отчёт без master означает «мастер-том не
+        подключён»: сервер сбрасывает прежнее состояние. Незнакомое state сервер пропускает, прежнее не меняет.
       required: [state]
       properties:
         state:
@@ -383,6 +435,53 @@ components:
           $ref: '#/components/schemas/VolumeAssignment'
         master:
           $ref: '#/components/schemas/MasterAssignment'
+    MachinesSnapshot:
+      type: object
+      required: [schema, generatedAt, contentHash, machines]
+      properties:
+        schema:
+          const: club-server.machines/1
+        generatedAt:
+          type: string
+          format: date-time
+          description: Когда снят список; более ранний снимок, пришедший позже, получатель пропускает.
+        contentHash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: sha256 списка машин; совпадает — список не изменился.
+        machines:
+          type: array
+          description: Одобренные ПК по возрастанию номера места.
+          items:
+            $ref: '#/components/schemas/MachineFeedEntry'
+    MachineFeedEntry:
+      type: object
+      required: [id, number, name, hostname, macAddresses]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Идентификатор машины в сервере клуба; не меняется, пока машина в реестре.
+        number:
+          type: integer
+          minimum: 1
+          maximum: 9999
+          description: Номер места; сервер клуба главный для номера и имени (от номера зависят IP и имя ПК в DHCP).
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Имя места в панели (`PC-01`).
+        hostname:
+          type: string
+          description: Имя Windows, которое сообщил помощник бездиска.
+        macAddresses:
+          type: array
+          minItems: 1
+          description: MAC сетевых карт в нижнем регистре с двоеточиями, по возрастанию — ключ связи с реестром получателя.
+          items:
+            type: string
+            pattern: '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$'
     ErrorEnvelope:
       type: object
       required: [error]

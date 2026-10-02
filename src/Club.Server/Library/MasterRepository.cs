@@ -105,12 +105,13 @@ public sealed class MasterRepository(NpgsqlDataSource db)
         await c.ExecuteAsync("UPDATE library_master SET auth_tag = @tag", new { tag });
     }
 
-    public async Task MarkOpenAsync(string targetIqn, DateTimeOffset now)
+    /// <summary>Открыто; <paramref name="warning"/> — открыто, но с оговоркой (панель показывает её при открытом томе).</summary>
+    public async Task MarkOpenAsync(string targetIqn, DateTimeOffset now, string? warning = null)
     {
         await using var c = await db.OpenConnectionAsync();
         await c.ExecuteAsync(
-            "UPDATE library_master SET state = 'open', target_iqn = @targetIqn, opened_at = @now, last_error = NULL, updated_at = @now WHERE state = 'opening'",
-            new { targetIqn, now });
+            "UPDATE library_master SET state = 'open', target_iqn = @targetIqn, opened_at = @now, last_error = @warning, updated_at = @now WHERE state = 'opening'",
+            new { targetIqn, now, warning });
     }
 
     public async Task MarkOpenFailedAsync(string error, DateTimeOffset now)
@@ -119,15 +120,22 @@ public sealed class MasterRepository(NpgsqlDataSource db)
         await c.ExecuteAsync("UPDATE library_master SET state = 'failed', last_error = @error, updated_at = @now WHERE state = 'opening'", new { error, now });
     }
 
-    /// <summary>Закрыто. Принудительное закрытие оставляет NTFS мастер-тома, возможно, недописанной — пометка dirty.</summary>
+    /// <summary>
+    /// Закрыто. Принудительное закрытие оставляет NTFS мастер-тома, возможно, недописанной — пометка dirty. Таргета
+    /// больше нет, поэтому и отметки «мастер-том на ПК» сбрасываются сразу, не дожидаясь отчётов (ПК может быть выключен).
+    /// </summary>
     public async Task MarkClosedAsync(DateTimeOffset now)
     {
         await using var c = await db.OpenConnectionAsync();
         await c.ExecuteAsync(
             """
-            UPDATE library_master SET state = 'closed', dirty = force_close, machine_id = NULL, chap_secret = NULL, target_iqn = NULL,
-                   closed_at = @now, last_error = NULL, updated_at = @now
-            WHERE state = 'closing'
+            WITH closed AS (
+                UPDATE library_master SET state = 'closed', dirty = force_close, machine_id = NULL, chap_secret = NULL, target_iqn = NULL,
+                       closed_at = @now, last_error = NULL, updated_at = @now
+                WHERE state = 'closing'
+                RETURNING 1)
+            UPDATE machines SET master_state = NULL, master_error = NULL
+            WHERE master_state IS NOT NULL AND EXISTS (SELECT 1 FROM closed)
             """,
             new { now });
     }

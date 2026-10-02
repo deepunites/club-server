@@ -17,7 +17,8 @@ builder.Services.AddSingleton(options);
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IWindowsStorage, WindowsStorage>();
 builder.Services.AddSingleton<IProcessInspector, ProcessInspector>();
-builder.Services.AddSingleton<IMachineIdentity, MachineIdentity>();
+builder.Services.AddSingleton<IMachineFactsSource, WindowsMachineFacts>();
+builder.Services.AddSingleton<IMachineIdentity, CachedMachineIdentity>();
 builder.Services.AddSingleton<ICredentialStore, DpapiCredentialStore>();
 builder.Services.AddSingleton<IAssignmentCache, FileAssignmentCache>();
 builder.Services.AddSingleton(_ => new HttpClient(ServerHandler(options))

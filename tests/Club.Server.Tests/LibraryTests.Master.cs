@@ -184,4 +184,40 @@ public sealed partial class LibraryTests
         Assert.Null(_nas.Find("target", t => t["name"]!.GetValue<string>() == "club-master"));
         Assert.Equal((HttpStatusCode.Conflict, "masterClosed"), await PanelPostAsync("/panel/api/v1/library/master/close", new { }));
     }
+
+    [Fact]
+    public async Task Mounted_mark_on_the_pc_does_not_outlive_the_master_volume()
+    {
+        // Стенд 2026-10-02: мастер-том закрыт, таргета club-master нет, а у ПК суперклиента в панели всё ещё «M: mounted».
+        var a = await OpenMasterAsync();
+        await StatusReplyAsync(a, new { state = "mounted", targetIqn = $"{Basename}:club-master", driveLetter = "M" });
+        Assert.Equal("mounted", await MachineMasterStateAsync(a));
+
+        // Незнакомое состояние (более новый помощник) отметку не меняет.
+        await StatusReplyAsync(a, new { state = "flushing" });
+        Assert.Equal("mounted", await MachineMasterStateAsync(a));
+
+        // Закрытие; «none» помощник так и не прислал (отчёт потерялся или сессию оборвали без него).
+        Assert.Equal((HttpStatusCode.Accepted, null), await PanelPostAsync("/panel/api/v1/library/master/close", new { }));
+        await PassAsync();
+        Assert.Equal("closed", (await MasterAsync()).GetProperty("state").GetString());
+        Assert.Null(await MachineMasterStateAsync(a)); // таргета больше нет — отметка снята сразу, ПК может быть выключен
+
+        // Запоздавший отчёт «mounted» (отправлен ещё до отключения), а дальше — обычные отчёты помощника: без master.
+        await StatusReplyAsync(a, new { state = "mounted", targetIqn = $"{Basename}:club-master", driveLetter = "M" });
+        Assert.Equal("mounted", await MachineMasterStateAsync(a));
+        await StatusReplyAsync(a);
+        Assert.Null(await MachineMasterStateAsync(a));
+        await StatusReplyAsync(a);
+        Assert.Null(await MachineMasterStateAsync(a));
+        Assert.False((await MasterAsync()).TryGetProperty("machineState", out _));
+    }
+
+    /// <summary>Отметка «мастер-том на ПК» в списке рабочих станций панели.</summary>
+    private async Task<string?> MachineMasterStateAsync(TestMachine machine)
+    {
+        var overview = await Panel().GetFromJsonAsync<JsonElement>("/panel/api/v1/machines");
+        var row = overview.GetProperty("machines").EnumerateArray().Single(m => m.GetProperty("id").GetGuid() == machine.MachineId);
+        return row.TryGetProperty("masterState", out var state) && state.ValueKind == JsonValueKind.String ? state.GetString() : null;
+    }
 }

@@ -229,10 +229,11 @@ public sealed class TrueNasStorage(TrueNasClient client)
     public async Task<IscsiExtent?> GetExtentAsync(string name, CancellationToken ct = default)
     {
         var rows = await client.CallAsync("iscsi.extent.query", [new object[] { new object[] { "name", "=", name } }], ct);
-        return rows.EnumerateArray().Select(e => new IscsiExtent(
-            e.GetProperty("id").GetInt32(), e.GetProperty("name").GetString()!, e.GetProperty("disk").GetString() ?? "",
-            e.GetProperty("ro").GetBoolean(), e.GetProperty("enabled").GetBoolean())).FirstOrDefault();
+        return rows.EnumerateArray().Select(ParseExtent).FirstOrDefault();
     }
+
+    public async Task<IReadOnlyList<IscsiExtent>> ListExtentsAsync(CancellationToken ct = default) =>
+        (await client.CallAsync("iscsi.extent.query", [], ct)).EnumerateArray().Select(ParseExtent).ToList();
 
     /// <summary>Экстент тома, сразу read-only. Сразу после clone узел /dev/zvol может ещё не появиться — вызывающий повторяет.</summary>
     public async Task<IscsiExtent> EnsureReadOnlyExtentAsync(string name, string zvol, string comment, CancellationToken ct = default)
@@ -416,10 +417,14 @@ public sealed class TrueNasStorage(TrueNasClient client)
     public async Task<IscsiInitiatorGroup?> GetInitiatorGroupAsync(string comment, CancellationToken ct = default)
     {
         var rows = await client.CallAsync("iscsi.initiator.query", [new object[] { new object[] { "comment", "=", comment } }], ct);
-        return rows.EnumerateArray().Select(g => new IscsiInitiatorGroup(
-            g.GetProperty("id").GetInt32(),
-            g.GetProperty("initiators").EnumerateArray().Select(i => i.GetString() ?? "").ToList(),
-            Str(g, "comment"))).FirstOrDefault();
+        return rows.EnumerateArray().Select(ParseInitiatorGroup).FirstOrDefault();
+    }
+
+    /// <summary>Группа инициаторов по id (из <see cref="TargetGroupsAsync"/>); пустой список инициаторов — доступ всем.</summary>
+    public async Task<IscsiInitiatorGroup?> GetInitiatorGroupByIdAsync(int id, CancellationToken ct = default)
+    {
+        var rows = await client.CallAsync("iscsi.initiator.query", [new object[] { new object[] { "id", "=", id } }], ct);
+        return rows.EnumerateArray().Select(ParseInitiatorGroup).FirstOrDefault();
     }
 
     /// <summary>
@@ -501,6 +506,21 @@ public sealed class TrueNasStorage(TrueNasClient client)
         }
 
         return await GetTargetAsync(name, ct) ?? throw new InvalidOperationException($"target {name} was not created", failure);
+    }
+
+    /// <summary>
+    /// Ещё раз применить конфигурацию iSCSI: <c>iscsi.target.update</c> без изменений перегенерирует scst.conf и запускает
+    /// <c>scstadmin -force -config</c> (тот же reload, что после любого create; группы таргета не пересохраняются). Нужен,
+    /// потому что middleware не проверяет код возврата scstadmin: сорвавшийся reload выглядит успехом
+    /// (docs/research/truenas-api.md §8.4). Сессии других таргетов по замыслу <c>-force</c> не затрагиваются, но это
+    /// не проверено: у LUN read-only устройств атрибут <c>read_only</c> помечен [key], и scstadmin может счесть их
+    /// «configured differently» и переназначить (ПК получат UA REPORTED LUNS DATA HAS CHANGED) — гипотеза §8.4, поэтому
+    /// лишних вызовов не делать. Роль — <c>SHARING_ISCSI_TARGET_WRITE</c> (входит в <c>SHARING_ISCSI_WRITE</c>).
+    /// </summary>
+    public async Task ReloadIscsiAsync(string targetName, CancellationToken ct = default)
+    {
+        var target = await GetTargetAsync(targetName, ct) ?? throw new InvalidOperationException($"target {targetName} not found");
+        await client.CallAsync("iscsi.target.update", [target.Id, new { }], ct);
     }
 
     public async Task<IReadOnlyList<(int Portal, int? Initiator, string AuthMethod, int? Auth)>> TargetGroupsAsync(int targetId, CancellationToken ct = default)
@@ -609,6 +629,15 @@ public sealed class TrueNasStorage(TrueNasClient client)
             d.TryGetProperty("origin", out var origin) ? NullIfEmpty(RawValue(origin)) : null,
             labels);
     }
+
+    private static IscsiInitiatorGroup ParseInitiatorGroup(JsonElement g) => new(
+        g.GetProperty("id").GetInt32(),
+        g.GetProperty("initiators").EnumerateArray().Select(i => i.GetString() ?? "").ToList(),
+        Str(g, "comment"));
+
+    private static IscsiExtent ParseExtent(JsonElement e) => new(
+        e.GetProperty("id").GetInt32(), e.GetProperty("name").GetString()!, e.GetProperty("disk").GetString() ?? "",
+        e.GetProperty("ro").GetBoolean(), e.GetProperty("enabled").GetBoolean());
 
     private static ZfsSnapshot ParseSnapshot(JsonElement s)
     {

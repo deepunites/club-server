@@ -40,6 +40,8 @@ public sealed class HelperEndToEndTests : IAsyncLifetime
             ["Library:MasterZvol"] = Master,
             ["Library:PublishedParent"] = Published,
             ["Library:PortalAddress"] = "192.168.77.10:3260",
+            ["Library:DiscoveryAddress"] = _nas.IscsiPortal,
+            ["Library:VerifyDelayMs"] = "0",
             ["TrueNas:Host"] = nas.Host,
             ["TrueNas:Port"] = nas.Port.ToString(),
             ["TrueNas:Username"] = nas.Username,
@@ -64,10 +66,10 @@ public sealed class HelperEndToEndTests : IAsyncLifetime
 
     private FakeIdentity? _identity;
 
-    private HelperLoop Helper(HttpClient? http = null)
+    private HelperLoop Helper(HttpClient? http = null, IMachineIdentity? identity = null)
     {
         var options = new HelperOptions { ClubKey = ServerFixture.ClubKey, DiskWaitSec = 1 };
-        var identity = _identity ??= new FakeIdentity(_hwid);
+        identity ??= _identity ??= new FakeIdentity(_hwid);
         var api = new DisklessApiClient(http ?? _server.CreateClient(), options, _credentials, identity);
         var volumes = new VolumeManager(_windows, _processes, options, TimeProvider.System, NullLogger<VolumeManager>.Instance);
         var masters = new MasterManager(_windows, options, TimeProvider.System, NullLogger<MasterManager>.Instance);
@@ -191,6 +193,29 @@ public sealed class HelperEndToEndTests : IAsyncLifetime
         await StorageWorker.RunOnceAsync(_publisher, _library, reconcile: false, TimeProvider.System, CancellationToken.None);
         var closed = await _server.Services.GetRequiredService<MasterRepository>().GetAsync();
         Assert.Equal(("closed", false), (closed.State, closed.Dirty));
+    }
+
+    [Fact]
+    public async Task Initiator_iqn_that_appears_later_makes_the_pc_eligible_without_helper_restart()
+    {
+        // Стенд 2026-10-02, помощник 1.4.0: MSiSCSI остановлена при старте службы — IQN нет, ПК нельзя открыть мастер-том.
+        var source = new FakeFactsSource(_hwid);
+        var clock = new ManualClock();
+        var options = new HelperOptions();
+        var helper = Helper(identity: new CachedMachineIdentity(source, options, clock, NullLogger<CachedMachineIdentity>.Instance));
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal((1, 0), (source.FullReads, source.IqnReads)); // регистрация и отчёты первого такта не ждут MSiSCSI
+        var editor = _server.Services.GetRequiredService<MasterEditor>();
+        var machine = await MachineAsync();
+        Assert.Equal("noInitiator", (await Assert.ThrowsAsync<LibraryRequestException>(() => editor.RequestOpenAsync(machine.Id, "test"))).Reason);
+
+        source.InitiatorIqn = "iqn.1991-05.com.microsoft:pc-test"; // служба инициатора запущена
+        clock.Advance(TimeSpan.FromSeconds(options.PollIntervalSec)); // следующий такт
+        await helper.TickAsync(CancellationToken.None);
+
+        Assert.Equal("iqn.1991-05.com.microsoft:pc-test", (await MachineAsync()).InitiatorIqn);
+        await editor.RequestOpenAsync(machine.Id, "test");
+        Assert.Equal((1, 1), (source.FullReads, source.IqnReads));
     }
 
     [Fact]

@@ -1,8 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk.Worker">
 
   <PropertyGroup>
-    <!-- 1.4: IQN инициатора и мастер-том (суперклиент), состав версии, Secure Boot, системный диск, DHCP. -->
-    <Version>1.4.0</Version>
+    <!-- 1.4: IQN инициатора и мастер-том (суперклиент), состав версии, Secure Boot, системный диск, DHCP.
+         1.4.1: IQN — отдельным коротким опросом со следующего такта (регистрация и отчёты первого такта его не ждут),
+         перед ним служба MSiSCSI запускается (ожидание до 10 с); пустой IQN перечитывается не чаще раза за такт с паузой
+         до 10 мин; таймаут PowerShell — TimeoutException, не отмена. -->
+    <Version>1.4.1</Version>
     <TargetFramework>net10.0-windows</TargetFramework>
     <!-- Сборка на Linux (CI, разработка); запуск — только на Windows. -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>

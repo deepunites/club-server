@@ -9,15 +9,29 @@ public sealed class LibraryRequestException(string reason, string message) : Exc
 }
 
 /// <summary>
+/// Сбой, который повтор операции не лечит: таргет так и не стал виден после reload-ов или группа инициаторов не пускает
+/// проверку. Операция и версия падают на той попытке, где это случилось, — <see cref="LibraryOptions.MaxAttempts"/> к
+/// нему не применяется: повтор через такт воркера прогнал бы ту же лестницу reload-ов (или упёрся бы в ту же группу) и
+/// упал бы так же. Ошибка видна в панели; повтор — кнопкой «Повторить» после исправления причины.
+/// </summary>
+public sealed class TerminalStorageException(string message) : Exception(message);
+
+/// <summary>
 /// Публикация версий библиотеки игр. Каждый шаг — ensure по детерминированному имени, поэтому операцию можно
 /// выполнять заново после падения на любом шаге. БД хранит намерения; факт перечитывается из TrueNAS перед
-/// каждым шагом (<see cref="TrueNasStorage"/>). Сверка только сообщает о расхождениях и ничего не чинит.
+/// каждым шагом (<see cref="TrueNasStorage"/>). Перед переключением таргет новой версии проверяется по сети
+/// (<see cref="TargetVerifier"/>): виден — версия становится текущей; портал отвечает, но таргета не видно и после
+/// reload-ов, или группа инициаторов не пускает проверку — публикация падает сразу, без повторов
+/// (<see cref="TerminalStorageException"/>). Если же портал проверить нельзя (нет
+/// связи, discovery с CHAP), версия становится текущей без проверки, после reload-ов вслепую; об этом сообщает
+/// сверка (<c>discoveryUnavailable</c>). Сверка только сообщает о расхождениях и ничего не чинит.
 /// </summary>
 public sealed partial class LibraryPublisher(
     LibraryRepository repository,
     MasterRepository master,
     MasterEditor masterEditor,
     TrueNasStorage storage,
+    TargetVerifier verifier,
     LibraryOptions options,
     TimeProvider clock,
     ILogger<LibraryPublisher> logger)
@@ -132,16 +146,17 @@ public sealed partial class LibraryPublisher(
             logger.LogWarning(ex, "Storage operation {Id} postponed: TrueNAS unavailable", operation.Id);
             await repository.MarkOperationAsync(operation.Id, "pending", null, ex.Message, countAttempt: false, clock.GetUtcNow());
         }
-        catch (Exception ex) when (ex is TrueNasRpcException or InvalidOperationException)
+        catch (Exception ex) when (ex is TrueNasRpcException or InvalidOperationException or TerminalStorageException)
         {
             var attempts = operation.Attempts + 1;
-            var failed = attempts >= options.MaxAttempts;
+            var failed = ex is TerminalStorageException || attempts >= options.MaxAttempts;
             logger.LogError(ex, "Storage operation {Id} failed (attempt {Attempt})", operation.Id, attempts);
             await repository.MarkOperationAsync(operation.Id, failed ? "failed" : "pending", null, ex.Message, countAttempt: true, clock.GetUtcNow());
             if (failed && operation.VersionId is { } versionId && operation.Kind == "publish")
             {
                 // Частично созданные объекты не удаляются автоматически: их увидит сверка, решение за администратором.
-                await repository.SetVersionStateAsync(versionId, "failed", ex.Message, clock.GetUtcNow());
+                // Только версию в publishing: уже переключённую (сбой после PromoteAsync) ПК, возможно, уже подключают.
+                await repository.FailPublishingVersionAsync(versionId, ex.Message);
             }
 
             if (failed && operation.Kind == "masterOpen")
@@ -156,6 +171,14 @@ public sealed partial class LibraryPublisher(
     {
         var version = await repository.FindVersionAsync(operation.VersionId!.Value)
             ?? throw new InvalidOperationException($"version {operation.VersionId} not found");
+        if (version.State == "published")
+        {
+            // Сервер остановился между PromoteAsync и отметкой «done»: версия уже текущая, и ПК, возможно, уже на ней.
+            // Проверять её заново незачем, а провал проверки пометил бы failed работающую версию.
+            logger.LogInformation("Library {Label} is already published; completing its publish operation", version.Label);
+            return;
+        }
+
         await Step(operation, "snapshot");
         var snapshotName = version.SnapshotId[(version.SnapshotId.IndexOf('@') + 1)..];
         var snapshot = await storage.EnsureSnapshotAsync(options.MasterZvol, snapshotName, Labels(version, operation.Id, "snapshot"), ct);
@@ -163,18 +186,56 @@ public sealed partial class LibraryPublisher(
         await Step(operation, "clone");
         var clone = await storage.EnsureReadOnlyCloneAsync(snapshot.Id, version.CloneId, Labels(version, operation.Id, "published"), ct);
 
+        // Таргет раньше экстента: тогда новое read-only устройство впервые открывает тот же reload (от targetextent),
+        // который даёт ему LUN и включает таргет. При порядке «экстент → таргет» его открывал reload от target.create,
+        // SCST сам добавлял устройство в copy_manager_tgt, и следующий scstadmin -force срывался на нём (25.10.7) —
+        // таргет оставался enabled 0 без LUN (стенд 2026-10-02). Пустой таргет до LUN никому не виден.
+        await Step(operation, "target");
+        var target = await storage.EnsureTargetAsync(version.TargetName, $"games {version.Label}", options.PortalId, options.InitiatorGroupId, ct);
+
         await Step(operation, "extent");
         var extent = await EnsureExtentWithRetryAsync(version, clone.Id, ct);
 
-        await Step(operation, "target");
-        var target = await storage.EnsureTargetAsync(version.TargetName, $"games {version.Label}", options.PortalId, options.InitiatorGroupId, ct);
+        await Step(operation, "lun");
         await storage.EnsureLunAsync(target.Id, extent.Id, ct);
         var basename = await storage.GetIscsiBasenameAsync(ct);
-        await repository.SetVersionIqnAsync(version.Id, $"{basename}:{version.TargetName}");
+        var iqn = $"{basename}:{version.TargetName}";
+        await repository.SetVersionIqnAsync(version.Id, iqn);
+
+        // Не ensure: выполняется на каждом проходе, в том числе после рестарта сервера посреди публикации. Провал —
+        // сразу, без повторов: следующая попытка повторила бы те же reload-ы (или тот же отказ группы).
+        await Step(operation, "verify");
+        switch (await verifier.EnsureVisibleAsync(version.TargetName, verifier.ProbeInitiator, ct))
+        {
+            case TargetCheck.Hidden:
+                throw new TerminalStorageException(await HiddenTargetErrorAsync(version, iqn, ct));
+            case TargetCheck.ProbeDenied:
+                // Перезапуск службы тут не поможет (и порвёт сессии всех ПК) — подсказка про группу, а не про iSCSI.
+                throw new TerminalStorageException(
+                    $"iSCSI target {iqn} cannot be checked: its initiator group does not include the server's probe name {verifier.ProbeInitiator} " +
+                    "(Library:ProbeInitiatorIqn); add it to that group in TrueNAS (Shares → iSCSI → Initiators) or allow all initiators, then retry the publish");
+        }
 
         await Step(operation, "promote");
         var retiring = await repository.PromoteAsync(version.Id, clock.GetUtcNow());
         logger.LogInformation("Library {Label} published as current; retiring {Retiring}", version.Label, retiring);
+    }
+
+    /// <summary>
+    /// Ошибка «таргет так и не виден». Если таргет открыт только по списку инициаторов (имя проверки пускает конкретная
+    /// строка, <see cref="InitiatorAccess.Listed"/>), первая подсказка — проверить в списке имя проверки: строку, которую
+    /// SCST понимает иначе, чем сервер (<see cref="ScstWildcard"/>), не отличить отсюда от сорвавшегося reload, а
+    /// перезапуск службы iSCSI рвёт сессии всех ПК и тогда не поможет. Пускает <c>*</c> или строка с <c>!</c> — список ни
+    /// при чём (<see cref="InitiatorAccess.Open"/>), подсказка — только перезапуск.
+    /// </summary>
+    private async Task<string> HiddenTargetErrorAsync(LibraryVersion version, string iqn, CancellationToken ct)
+    {
+        var hidden = $"iSCSI target {iqn} is not visible to PCs (SendTargets at {verifier.Portal}) even after re-applying the iSCSI configuration; ";
+        return await verifier.InitiatorAccessAsync(version.TargetName, verifier.ProbeInitiator, ct) is (InitiatorAccess.Listed or InitiatorAccess.Excluded, var group)
+            ? hidden + $"its initiator group {group} admits only listed initiators: first make sure the list includes the server's probe name " +
+                $"{verifier.ProbeInitiator} (Library:ProbeInitiatorIqn) and add it if not (TrueNAS → Shares → iSCSI → Initiators); if it is there, " +
+                "restart the iSCSI service in TrueNAS (System → Services → iSCSI; this drops every PC's session), then retry the publish"
+            : hidden + "restart the iSCSI service in TrueNAS (System → Services → iSCSI; this drops every PC's session) and retry the publish";
     }
 
     private async Task<IscsiExtent> EnsureExtentWithRetryAsync(LibraryVersion version, string zvol, CancellationToken ct)
@@ -187,7 +248,8 @@ public sealed partial class LibraryPublisher(
             }
             catch (InvalidOperationException ex) when (ex.InnerException is TrueNasRpcException && attempt < options.ExtentAttempts)
             {
-                // Узел /dev/zvol после clone появляется асинхронно (udev); разбирать текст ошибки не нужно — просто повтор.
+                // Узел /dev/zvol после clone появляется асинхронно (udev), extent.create без него отказывает; разбирать
+                // текст ошибки не нужно — просто повтор. Обычно узел уже есть: перед экстентом идёт reload от target.create.
                 logger.LogInformation("Extent {Name} not created yet (attempt {Attempt}), retrying", version.ExtentName, attempt);
                 await Task.Delay(TimeSpan.FromMilliseconds(options.ExtentRetryDelayMs), clock, ct);
             }
@@ -257,7 +319,16 @@ public sealed partial class LibraryPublisher(
     {
         var warnings = new List<(string Kind, string Subject, string Message)>();
         var pointers = await repository.PointersAsync();
-        foreach (var version in new[] { pointers.Current, pointers.Rollback }.OfType<LibraryVersion>())
+        var versions = new[] { pointers.Current, pointers.Rollback }.OfType<LibraryVersion>().ToList();
+
+        // Видят ли ПК таргеты версий: конфиг в TrueNAS может быть верным, а рантайм SCST — нет (сорвавшийся reload).
+        IReadOnlyList<string>? discovered = versions.Count == 0 ? [] : await verifier.DiscoverAsync(verifier.ProbeInitiator, ct);
+        if (discovered is null)
+        {
+            warnings.Add(("discoveryUnavailable", verifier.Portal, $"Сервер не может проверить iSCSI-портал {verifier.Portal}: таргеты версий не проверяются"));
+        }
+
+        foreach (var version in versions)
         {
             var role = version.Id == pointers.Current?.Id ? "current" : "rollback";
             var snapshot = await storage.GetSnapshotAsync(version.SnapshotId, ct);
@@ -302,6 +373,27 @@ public sealed partial class LibraryPublisher(
             else if (extent is not null && await storage.GetTargetExtentAsync(target.Id, extent.Id, ct) is null)
             {
                 warnings.Add(("missingLun", version.TargetName, $"У таргета {version.TargetName} нет LUN с экстентом {version.ExtentName}"));
+            }
+            else if (discovered is not null && version.TargetIqn is { } iqn && !discovered.Contains(iqn, StringComparer.Ordinal))
+            {
+                // Группу сузили без имени проверки — сервер таргета и не увидит; советовать перезапуск службы нельзя.
+                // Таргет только по списку, и имя в нём вроде бы есть — свой вид предупреждения: сначала всё равно
+                // проверить список (Library:ProbeInitiatorIqn), перезапуск службы рвёт сессии всех ПК.
+                var (access, group) = await verifier.InitiatorAccessAsync(version.TargetName, verifier.ProbeInitiator, ct);
+                warnings.Add(access switch
+                {
+                    InitiatorAccess.Excluded => ("probeDenied", version.TargetName,
+                        $"Группа инициаторов {group} таргета {version.TargetName} не включает имя проверки сервера {verifier.ProbeInitiator}: " +
+                        "сервер не может проверить таргет; добавьте имя в группу (или разрешите всех инициаторов)"),
+                    InitiatorAccess.Listed => ("targetNotDiscoveredListed", version.TargetName,
+                        $"Таргет {role}-версии {version.Label} не виден в iSCSI discovery от имени проверки сервера {verifier.ProbeInitiator}; " +
+                        $"таргет открыт только по списку инициаторов (группа {group}): сначала проверьте, что список пускает это имя " +
+                        "(Library:ProbeInitiatorIqn), и добавьте его, если нет; если пускает — TrueNAS не применила конфигурацию, " +
+                        "перезапустите службу iSCSI (это разорвёт сессии всех ПК)"),
+                    _ => ("targetNotDiscovered", version.TargetName,
+                        $"Таргет {role}-версии {version.Label} не виден ПК в iSCSI discovery: TrueNAS не применила конфигурацию; " +
+                        "перезапустите службу iSCSI (это разорвёт сессии всех ПК)"),
+                });
             }
         }
 

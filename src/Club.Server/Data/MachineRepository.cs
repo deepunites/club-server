@@ -217,17 +217,21 @@ public sealed class MachineRepository(NpgsqlDataSource db)
         return (await c.QueryAsync<(string, string)>("SELECT id, name FROM zones ORDER BY name")).ToList();
     }
 
-    /// <summary>IQN инициатора iSCSI и мастер-том на ПК суперклиента (по отчёту помощника).</summary>
-    public async Task RecordMasterAsync(Guid id, string? initiatorIqn, string? masterState, string? masterError)
+    /// <summary>
+    /// IQN инициатора iSCSI и мастер-том на ПК суперклиента (по отчёту помощника). <paramref name="masterState"/> null —
+    /// мастер-том не подключён; <paramref name="keepMaster"/> — прежнее состояние мастер-тома не трогать.
+    /// </summary>
+    public async Task RecordMasterAsync(Guid id, string? initiatorIqn, string? masterState, string? masterError, bool keepMaster = false)
     {
         await using var c = await db.OpenConnectionAsync();
         await c.ExecuteAsync(
             """
             UPDATE machines SET initiator_iqn = COALESCE(@initiatorIqn, initiator_iqn),
-                   master_state = COALESCE(@masterState, master_state), master_error = @masterError
+                   master_state = CASE WHEN @keepMaster THEN master_state ELSE @masterState END,
+                   master_error = CASE WHEN @keepMaster THEN master_error ELSE @masterError END
             WHERE id = @id
             """,
-            new { id, initiatorIqn, masterState, masterError });
+            new { id, initiatorIqn, masterState, masterError, keepMaster });
     }
 
     /// <summary>Отчёт помощника: факты о томе на ПК и отметка «машина на связи» (считается для подписки).</summary>

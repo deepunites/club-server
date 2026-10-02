@@ -212,6 +212,18 @@ public sealed class LibraryRepository(NpgsqlDataSource db)
     }
 
     /// <summary>
+    /// Публикация упала: версия — failed, но только пока она publishing. Уже переключённую (сервер остановился между
+    /// <see cref="PromoteAsync"/> и отметкой операции «done») не трогает. <c>false</c> — версия была не в publishing.
+    /// </summary>
+    public async Task<bool> FailPublishingVersionAsync(Guid id, string error)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        return await c.ExecuteAsync(
+            "UPDATE library_versions SET state = 'failed', last_error = @error WHERE id = @id AND state = 'publishing'",
+            new { id, error }) > 0;
+    }
+
+    /// <summary>
     /// Новая версия становится текущей, прежняя текущая — откатной, прежняя откатная уходит на разборку.
     /// Помощники бездиска получат новый targetIqn в ответе на следующий отчёт о состоянии.
     /// </summary>

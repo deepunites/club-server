@@ -29,8 +29,13 @@ camelCase, enum строками, время `2026-09-27T10:15:30.123Z`, оши�
 
 В обзоре `master { state (closed|opening|open|closing|failed), machineId, machineName, machineState, dirty, forceClose,
 openedAt, closeRequestedAt, closedAt, lastError, driveLetter }` и `masterCandidates [{ id, number, name, online }]` —
-одобренные ПК, чей помощник сообщил IQN инициатора. Операции `masterOpen` (шаги auth, initiator, extent, target) и
-`masterClose` (target, extent, initiator, auth) — в общем журнале.
+одобренные ПК, чей помощник сообщил IQN инициатора. `lastError` у открытого тома — оговорка открытия шага verify, а
+не ошибка: либо таргет мастер-тома так и не стал виден ПК суперклиента и после повторных применений конфигурации iSCSI
+(`The master target is not visible to the superclient PC …`, подсказка — перезапуск службы iSCSI, если `M:` не
+появится), либо группа инициаторов мастер-тома не включает IQN этого ПК (`The initiator group of the master target
+does not include the superclient PC …`, подсказка — закрыть и открыть том заново). `machineState` — последний отчёт помощника о мастер-томе
+(`mounted|mounting|failed|none`); отчёт без мастер-тома и закрытие тома его сбрасывают. Операции `masterOpen` (шаги auth, initiator, extent, target,
+verify) и `masterClose` (target, extent, initiator, auth) — в общем журнале.
 
 Версия: `id, label, state (publishing|published|retiring|retired|failed), role (current|rollback|null), targetIqn,
 createdAt, publishedAt, retiredAt, lastError, mountedOn, contents, contentsAt`. `mountedOn` — сколько ПК на связи
@@ -44,11 +49,30 @@ createdAt, publishedAt, retiredAt, lastError, mountedOn, contents, contentsAt`. 
 (метка по умолчанию — сегодняшняя дата), шаги выполняющихся операций, распределение ПК по версиям, состав версии,
 журнал операций с повтором упавших, предупреждения сверки.
 
-Операция: `id, kind (publish|rollback), versionLabel, status (pending|running|done|failed), step (snapshot|clone|extent|
-target|promote|done), attempts, lastError, requestedBy, createdAt, updatedAt`.
+Операция: `id, kind (publish|rollback), versionLabel, status (pending|running|done|failed), step (snapshot|clone|target|
+extent|lun|verify|promote|done), attempts, lastError, requestedBy, createdAt, updatedAt`. `verify` — таргет виден ПК
+(iSCSI SendTargets с сервера к `Library:DiscoveryAddress`, по умолчанию `Library:PortalAddress`, от имени
+`Library:ProbeInitiatorIqn`; таймаут `Library:DiscoveryTimeoutMs`, пауза перед проверкой `Library:VerifyDelayMs`);
+если нет, сервер заново применяет конфигурацию iSCSI в TrueNAS, а если и это не помогло — операция падает с
+подсказкой перезапустить службу iSCSI (версия не становится текущей); если таргет открыт только по списку
+инициаторов (имя проверки пускает конкретная строка, а не `*` и не строка с ведущим `!`), подсказка сначала — проверить,
+что в списке есть имя проверки. Портал, ответивший хоть раз, потом замолчал — проверка продолжается и кончается тем же
+провалом. Группа инициаторов таргета не пускает имя проверки (строки сравниваются как в SCST: `*`, `?`, ведущий `!`,
+без учёта регистра) — операция падает без reload-ов с подсказкой добавить его в группу. Оба провала завершают
+операцию на той попытке, где случились (`Library:MaxAttempts` на них не действует: повтор прогнал бы те же reload-ы
+и упал бы так же; `attempts` учитывает и прежние неудачные попытки); версия — `failed`, повтор — `retry` после
+исправления причины. Портал проверить нельзя (не ответил ни разу) — версия становится текущей без проверки (после
+повторных применений конфигурации вслепую), сверка пишет `discoveryUnavailable`. Сервер остановился между
+переключением версии и отметкой операции — после рестарта операция завершается без повторной проверки: версия уже
+текущая.
 
 Предупреждение: `kind, subject, message, firstSeen, lastSeen`. Виды: `missingSnapshot`, `missingClone`, `cloneWritable`,
-`cloneOrigin`, `missingExtent`, `extentMismatch`, `missingTarget`, `missingLun`, `orphanClone`, `retireBlocked`.
+`cloneOrigin`, `missingExtent`, `extentMismatch`, `missingTarget`, `missingLun`, `targetNotDiscovered` (таргет
+текущей/откатной версии есть в конфиге TrueNAS, но ПК его не видят; группа инициаторов открыта всем, или имя проверки
+пускает `*` либо строка с `!`, — подсказка перезапустить службу iSCSI, это рвёт сессии всех ПК), `targetNotDiscoveredListed` (то же, но таргет открыт только по списку
+инициаторов: подсказка сначала проверить, что список включает имя проверки `Library:ProbeInitiatorIqn`, и добавить
+его, если нет), `discoveryUnavailable` (сервер не может проверить портал: `subject` — адрес), `probeDenied` (группа
+инициаторов таргета версии не включает имя проверки сервера — проверить таргет нельзя), `orphanClone`, `retireBlocked`.
 Сервер ничего не исправляет сам — решение за администратором.
 
 ## Рабочие станции
@@ -105,6 +129,10 @@ bootTime, volume { state, libraryVersion, readOnlyVerified, outdated, error }, r
 
 В `GET /machines` у машины `secureBoot { enabled, thirdPartyCa2011, windowsCa2023, pca2011Revoked }` (по отчёту помощника), `imageVersion` и `reimage { state, image, step, percent, message, failure, diskTouched,
 pxeArmed, attempts, updatedAt }`, статус `reimaging`, в обзоре `currentImageVersion` и `reimaging`.
+
+В обзоре `GET /machines` — `machineFeed { state, target, lastDeliveredAt, lastAttemptAt, machines, error, failures }`,
+если включена отправка списка ПК (`docs/machine-feed.md`): `state` — `pending` (ещё не отправлялся) | `ok` | `failing`,
+`target` — только хост получателя.
 `failure` — шаг или причина: `systemDiskNotFound`, `ambiguousDisks`, `diskTooSmall`, `noInternalDisk`,
 `biosNotSupported`, `imageUnavailable`, `notGeneralized`, `partition`, `download`, `verify`, `apply`, `identity`, `bcdboot`.
 

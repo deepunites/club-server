@@ -3,6 +3,7 @@ using Club.Server.Auth;
 using Club.Server.Data;
 using Club.Server.Diskless;
 using Club.Server.Imaging;
+using Club.Server.Integration;
 using Club.Server.Library;
 using Club.Server.Network;
 using Club.Server.Panel;
@@ -14,10 +15,13 @@ var connectionString = builder.Configuration.GetConnectionString("Club")
     ?? throw new InvalidOperationException("ConnectionStrings:Club is not configured");
 var authOptions = builder.Configuration.GetSection("Auth").Get<AuthOptions>() ?? new AuthOptions();
 var libraryOptions = builder.Configuration.GetSection("Library").Get<LibraryOptions>() ?? new LibraryOptions();
+libraryOptions.Validate();
 var trueNasOptions = builder.Configuration.GetSection("TrueNas").Get<TrueNasOptions>() ?? new TrueNasOptions();
 var panelOptions = builder.Configuration.GetSection("Panel").Get<PanelOptions>() ?? new PanelOptions();
 var keaOptions = builder.Configuration.GetSection("Kea").Get<KeaOptions>() ?? new KeaOptions();
 var imagingOptions = builder.Configuration.GetSection("Imaging").Get<ImagingOptions>() ?? new ImagingOptions();
+var machineFeedOptions = builder.Configuration.GetSection("MachineFeed").Get<MachineFeedOptions>() ?? new MachineFeedOptions();
+machineFeedOptions.Validate();
 
 builder.Services.ConfigureHttpJsonOptions(o => ApiJson.Configure(o.SerializerOptions));
 builder.Services.AddSingleton(TimeProvider.System);
@@ -46,9 +50,17 @@ if (builder.Configuration.GetValue("Network:RunWorker", true))
 {
     builder.Services.AddHostedService<NetworkWorker>();
 }
+builder.Services.AddSingleton(machineFeedOptions);
+builder.Services.AddSingleton<MachineFeedState>();
+builder.Services.AddSingleton<MachineFeed>();
+if (machineFeedOptions.Enabled && machineFeedOptions.RunWorker)
+{
+    builder.Services.AddHostedService<MachineFeedWorker>();
+}
 builder.Services.AddSingleton<LibraryRepository>();
 builder.Services.AddSingleton<TrueNasClient>();
 builder.Services.AddSingleton<TrueNasStorage>();
+builder.Services.AddSingleton<TargetVerifier>();
 builder.Services.AddSingleton<MasterRepository>();
 builder.Services.AddSingleton<MasterEditor>();
 builder.Services.AddSingleton<LibraryPublisher>();

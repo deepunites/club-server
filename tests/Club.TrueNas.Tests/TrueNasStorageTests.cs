@@ -139,6 +139,38 @@ public sealed class TrueNasStorageTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Target_delete_removes_each_lun_with_its_own_reload_then_reloads_again()
+    {
+        // targets.py do_delete (TS-25.10.7): iscsi.targetextent.delete на каждую связку (у каждой свой reload),
+        // затем scstadmin -rem_target и ещё один reload.
+        _nas.ReadOnlyCopyManagerBug = false;
+        await PublishAsync("v1");
+        Assert.True(_nas.IsLive("games-v1"));
+
+        var before = _nas.Reloads;
+        Assert.Equal(DeleteOutcome.Deleted, (await _storage.DeleteTargetAsync("games-v1")).Outcome);
+        Assert.Equal(2, _nas.Reloads - before);
+        Assert.Equal(0, _nas.Count("targetextent"));
+        Assert.False(_nas.IsLive("games-v1"));
+        Assert.NotNull(await _storage.GetExtentAsync("lib-v1")); // экстенты target.delete не трогает (delete_extents=false)
+    }
+
+    [Fact]
+    public async Task Lun_of_a_target_in_use_is_not_removed_without_force()
+    {
+        await PublishAsync("v1");
+        _nas.AddSession("iqn.1991-05.com.microsoft:pc-01", "games-v1");
+        var lun = (await _storage.GetTargetExtentAsync((await _storage.GetTargetAsync("games-v1"))!.Id, (await _storage.GetExtentAsync("lib-v1"))!.Id))!;
+
+        var error = await Assert.ThrowsAsync<TrueNasRpcException>(() => _client.CallAsync("iscsi.targetextent.delete", [lun.Id, false]));
+        Assert.Contains("is in use", error.Message);
+        Assert.Equal(1, _nas.Count("targetextent"));
+
+        await _client.CallAsync("iscsi.targetextent.delete", [lun.Id, true]);
+        Assert.Equal(0, _nas.Count("targetextent"));
+    }
+
+    [Fact]
     public async Task Dataset_with_iscsi_attachments_is_never_deleted()
     {
         await PublishAsync("v1");
@@ -189,6 +221,64 @@ public sealed class TrueNasStorageTests : IAsyncLifetime
         await _storage.GetDatasetAsync(Master);
         Assert.Equal(1, _nas.Connections);
     }
+
+    [Fact]
+    public async Task Extent_before_target_leaves_a_read_only_target_disabled_as_on_the_stand()
+    {
+        // Порядок публикации до 2026-10-02: экстент → таргет → LUN. Все вызовы успешны, конфиг верный (*.query)...
+        await PublishAsync("v1");
+        Assert.NotNull(await _storage.GetTargetExtentAsync((await _storage.GetTargetAsync("games-v1"))!.Id, (await _storage.GetExtentAsync("lib-v1"))!.Id));
+
+        // ...но reload от target.create открыл read-only устройство, SCST добавил его в copy_manager_tgt, и reload от
+        // targetextent.create сорвался: таргет enabled 0 без LUN — «target not found or hidden from login».
+        Assert.False(_nas.IsLive("games-v1"));
+        Assert.Equal(1, _nas.FailedReloads);
+        Assert.DoesNotContain($"{Basename}:games-v1", await DiscoverAsync());
+
+        // Стоп/старт службы в интерфейсе TrueNAS (без -force) чинил стенд.
+        _nas.RestartIscsiService();
+        Assert.True(_nas.IsLive("games-v1"));
+        Assert.Contains($"{Basename}:games-v1", await DiscoverAsync());
+    }
+
+    [Fact]
+    public async Task Reload_through_an_unchanged_target_update_applies_the_configuration_again()
+    {
+        await PublishAsync("v1");
+        Assert.False(_nas.IsLive("games-v1"));
+        var groups = await _storage.TargetGroupsAsync((await _storage.GetTargetAsync("games-v1"))!.Id);
+
+        await _storage.ReloadIscsiAsync("games-v1");
+
+        Assert.True(_nas.IsLive("games-v1"));
+        Assert.Contains($"{Basename}:games-v1", await DiscoverAsync());
+        Assert.Equal(groups, await _storage.TargetGroupsAsync((await _storage.GetTargetAsync("games-v1"))!.Id));
+        Assert.Equal(1, _nas.Count("target"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _storage.ReloadIscsiAsync("games-none"));
+    }
+
+    [Fact]
+    public async Task Extent_create_fails_until_the_clone_device_appears()
+    {
+        _nas.CloneDeviceDelay = 2;
+        await _storage.EnsureZvolAsync(Master, 1L << 40, "64K", Labels);
+        var snapshot = await _storage.EnsureSnapshotAsync(Master, "v1", Labels);
+        var clone = await _storage.EnsureReadOnlyCloneAsync(snapshot.Id, $"{Published}/lib-v1", Labels);
+
+        for (var i = 0; i < 2; i++)
+        {
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() => _storage.EnsureReadOnlyExtentAsync("lib-v1", clone.Id, "test"));
+            Assert.IsType<TrueNasRpcException>(error.InnerException);
+        }
+
+        Assert.True((await _storage.EnsureReadOnlyExtentAsync("lib-v1", clone.Id, "test")).ReadOnly);
+        Assert.Single(await _storage.ListExtentsAsync());
+    }
+
+    private const string Basename = "iqn.2005-10.org.freenas.ctl";
+
+    private Task<IReadOnlyList<string>> DiscoverAsync() =>
+        IscsiDiscovery.SendTargetsAsync(_nas.IscsiPortal, "iqn.2026-10.test:probe", TimeSpan.FromSeconds(5));
 
     private async Task PublishAsync(string version)
     {

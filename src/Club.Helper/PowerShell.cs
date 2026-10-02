@@ -45,6 +45,13 @@ public static class PowerShell
         catch (OperationCanceledException)
         {
             process.Kill(entireProcessTree: true);
+            // Свой таймаут — TimeoutException, а не отмена: OperationCanceledException при живом токене службы
+            // проскочил бы фильтры вызывающих (они пропускают отмену наружу) и завершил бы службу.
+            if (!ct.IsCancellationRequested)
+            {
+                throw new TimeoutException("PowerShell did not finish in 120 s");
+            }
+
             throw;
         }
 

@@ -18,6 +18,7 @@ public sealed class MasterEditor(
     LibraryRepository library,
     MachineRepository machines,
     TrueNasStorage storage,
+    TargetVerifier verifier,
     LibraryOptions options,
     TimeProvider clock,
     ILogger<MasterEditor> logger)
@@ -84,8 +85,26 @@ public sealed class MasterEditor(
         var target = await storage.EnsureChapTargetAsync(options.MasterTargetName, "club master", options.PortalId, group.Id, tag, ct);
         await storage.EnsureLunAsync(target.Id, extent.Id, ct);
 
+        // Та же проверка, что у публикации, но от имени IQN этого ПК: таргет мастер-тома открыт только ему (discovery
+        // без CHAP). Не провал: открытие на стенде работало и без неё, а ПК сам сообщит, если не подключится, —
+        // но оговорка видна в панели у открытого тома.
+        await step("verify");
+        var warning = await verifier.EnsureVisibleAsync(options.MasterTargetName, state.InitiatorIqn!, ct) switch
+        {
+            TargetCheck.Hidden =>
+                $"The master target is not visible to the superclient PC ({state.InitiatorIqn}) even after re-applying the iSCSI configuration; " +
+                "if M: does not appear, restart the iSCSI service in TrueNAS (System → Services → iSCSI) — this drops every PC's session",
+            TargetCheck.ProbeDenied =>
+                $"The initiator group of the master target does not include the superclient PC ({state.InitiatorIqn}); close and open the master volume again",
+            _ => null,
+        };
+        if (warning is not null)
+        {
+            logger.LogWarning("Master target {Target} opened with a warning: {Warning}", options.MasterTargetName, warning);
+        }
+
         var basename = await storage.GetIscsiBasenameAsync(ct);
-        await master.MarkOpenAsync($"{basename}:{options.MasterTargetName}", clock.GetUtcNow());
+        await master.MarkOpenAsync($"{basename}:{options.MasterTargetName}", clock.GetUtcNow(), warning);
         logger.LogInformation("Master volume open for initiator {Iqn}", state.InitiatorIqn);
     }
 

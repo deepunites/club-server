@@ -22,7 +22,7 @@ using Club.TrueNas;
 /// Поддельный middleware TrueNAS 25.10 для тестов адаптера: настоящий TLS (свой CA), JSON-RPC 2.0 по WebSocket,
 /// состояние в памяти и формы ошибок из исходников middleware (docs/research/truenas-api.md §4, §7.6, §8).
 /// </summary>
-public sealed class FakeTrueNas : IAsyncDisposable
+public sealed partial class FakeTrueNas : IAsyncDisposable
 {
     public const string Username = "clubsrv";
     public const string ApiKey = "1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -86,6 +86,7 @@ public sealed class FakeTrueNas : IAsyncDisposable
         app.Map("/api/{version}", (HttpContext context) => fake.HandleSocketAsync(context));
         await app.StartAsync();
         fake.Port = new Uri(app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First()).Port;
+        fake.StartIscsiPortal();
         return fake;
     }
 
@@ -272,7 +273,7 @@ public sealed class FakeTrueNas : IAsyncDisposable
                     return DeleteSnapshot(args[0]!.GetValue<string>(), args.Count > 1 ? args[1]!.AsObject() : new JsonObject());
 
                 case "iscsi.global.config":
-                    return new JsonObject { ["basename"] = "iqn.2005-10.org.freenas.ctl" };
+                    return new JsonObject { ["basename"] = IscsiBasename };
                 case "iscsi.global.sessions":
                     return new JsonArray(_sessions.Select(s => (JsonNode)new JsonObject
                     {
@@ -288,12 +289,16 @@ public sealed class FakeTrueNas : IAsyncDisposable
                     return Query(_targets.Values, args);
                 case "iscsi.target.create":
                     return CreateTarget(args[0]!.AsObject());
+                case "iscsi.target.update":
+                    return UpdateTarget(args[0]!.GetValue<int>(), args[1]!.AsObject());
                 case "iscsi.target.delete":
                     return DeleteTarget(args[0]!.GetValue<int>(), args.Count > 1 && args[1]!.GetValue<bool>());
                 case "iscsi.targetextent.query":
                     return Query(_targetExtents.Values, args);
                 case "iscsi.targetextent.create":
                     return CreateTargetExtent(args[0]!.AsObject());
+                case "iscsi.targetextent.delete":
+                    return DeleteTargetExtent(args[0]!.GetValue<int>(), args.Count > 1 && args[1]!.GetValue<bool>());
                 case "iscsi.auth.query":
                     return Query(_auths.Values.Select(a => new JsonObject { ["id"] = a["id"]!.DeepClone(), ["tag"] = a["tag"]!.DeepClone(), ["user"] = a["user"]!.DeepClone(), ["secret"] = a["secret"]!.DeepClone() }), args);
                 case "iscsi.auth.create":
@@ -308,6 +313,7 @@ public sealed class FakeTrueNas : IAsyncDisposable
                     return CreateInitiator(args[0]!.AsObject());
                 case "iscsi.initiator.update":
                     _initiators[args[0]!.GetValue<int>()]["initiators"] = args[1]!["initiators"]!.DeepClone();
+                    Reload(method);
                     return _initiators[args[0]!.GetValue<int>()].DeepClone();
                 case "iscsi.initiator.delete":
                     return DeleteInitiator(args[0]!.GetValue<int>());
@@ -377,7 +383,8 @@ public sealed class FakeTrueNas : IAsyncDisposable
         }
 
         // Как в middleware: каскад по attachment delegates удаляет включённые экстенты и связки без проверки сессий.
-        foreach (var extent in _extents.Values.Where(e => e["disk"]!.GetValue<string>() == "zvol/" + id).ToList())
+        var cascade = _extents.Values.Where(e => e["disk"]!.GetValue<string>() == "zvol/" + id).ToList();
+        foreach (var extent in cascade)
         {
             var extentId = extent["id"]!.GetValue<int>();
             foreach (var te in _targetExtents.Where(te => te.Value["extent"]!.GetValue<int>() == extentId).ToList())
@@ -388,7 +395,13 @@ public sealed class FakeTrueNas : IAsyncDisposable
             _extents.Remove(extentId);
         }
 
+        if (cascade.Count > 0)
+        {
+            Reload("pool.dataset.delete");
+        }
+
         _datasets.Remove(id);
+        _deviceCountdown.Remove(id);
         foreach (var deferred in _snapshots.Values.Where(s => s["defer_destroy"]?.GetValue<bool>() == true).ToList())
         {
             if (!ClonesOf(deferred["id"]!.GetValue<string>()).Any())
@@ -449,6 +462,11 @@ public sealed class FakeTrueNas : IAsyncDisposable
         var properties = (data["dataset_properties"] as JsonObject ?? []).ToDictionary(p => p.Key, p => p.Value!.GetValue<string>());
         var readOnly = properties.Remove("readonly", out var ro) && ro == "on";
         _datasets[target] = Dataset(target, "VOLUME", readOnly, origin: snapshot, properties);
+        if (CloneDeviceDelay > 0)
+        {
+            _deviceCountdown[target] = CloneDeviceDelay;
+        }
+
         return true;
     }
 
@@ -484,8 +502,15 @@ public sealed class FakeTrueNas : IAsyncDisposable
             throw Validation("iscsi_extent_create.name", "Extent name must be unique", 22);
         }
 
-        if (!_datasets.ContainsKey(disk["zvol/".Length..]))
+        var zvol = disk["zvol/".Length..];
+        if (!_datasets.ContainsKey(zvol) || !DeviceReady(zvol))
         {
+            // clean_type_and_path: os.path.exists('/dev/zvol/…'); узел свежего клона udev создаёт не сразу.
+            if (!DeviceReady(zvol))
+            {
+                _deviceCountdown[zvol]--;
+            }
+
             throw Validation("iscsi_extent_create.disk", $"Device /dev/{disk} for volume does not exist", 2);
         }
 
@@ -514,6 +539,7 @@ public sealed class FakeTrueNas : IAsyncDisposable
         }
 
         _extents.Remove(id);
+        Reload("iscsi.extent.delete");
         return extent["id"]!.DeepClone();
     }
 
@@ -528,6 +554,7 @@ public sealed class FakeTrueNas : IAsyncDisposable
 
         var id = _nextId++;
         _auths[id] = new JsonObject { ["id"] = id, ["tag"] = data["tag"]!.GetValue<int>(), ["user"] = data["user"]!.GetValue<string>(), ["secret"] = secret, ["peeruser"] = "", ["peersecret"] = "" };
+        Reload("iscsi.auth.create");
         return _auths[id].DeepClone();
     }
 
@@ -544,6 +571,7 @@ public sealed class FakeTrueNas : IAsyncDisposable
             auth["secret"] = secret;
         }
 
+        Reload("iscsi.auth.update");
         return auth.DeepClone();
     }
 
@@ -559,6 +587,7 @@ public sealed class FakeTrueNas : IAsyncDisposable
         }
 
         _auths.Remove(id);
+        Reload("iscsi.auth.delete");
         return true;
     }
 
@@ -566,6 +595,7 @@ public sealed class FakeTrueNas : IAsyncDisposable
     {
         var id = _nextId++;
         _initiators[id] = new JsonObject { ["id"] = id, ["initiators"] = data["initiators"]?.DeepClone() ?? new JsonArray(), ["comment"] = data["comment"]?.GetValue<string>() ?? "" };
+        Reload("iscsi.initiator.create");
         return _initiators[id].DeepClone();
     }
 
@@ -579,6 +609,7 @@ public sealed class FakeTrueNas : IAsyncDisposable
         }
 
         _initiators.Remove(id);
+        Reload("iscsi.initiator.delete");
         return true;
     }
 
@@ -632,9 +663,32 @@ public sealed class FakeTrueNas : IAsyncDisposable
         var id = _nextId++;
         var target = new JsonObject { ["id"] = id, ["name"] = name, ["alias"] = data["alias"]?.DeepClone(), ["mode"] = "ISCSI", ["groups"] = data["groups"]?.DeepClone() };
         _targets[id] = target;
+        Reload("iscsi.target.create");
         return target.DeepClone();
     }
 
+    /// <summary>Поля модели необязательны: update без изменений — только reload (как в middleware, targets.py do_update).</summary>
+    private JsonNode UpdateTarget(int id, JsonObject data)
+    {
+        var target = _targets.GetValueOrDefault(id) ?? throw NotFound(id.ToString());
+        if (data["name"]?.GetValue<string>() is { } name && _targets.Values.Any(t => t != target && t["name"]!.GetValue<string>() == name))
+        {
+            throw Validation("iscsi_target_update.name", "Target name already exists", 22);
+        }
+
+        foreach (var key in new[] { "name", "alias", "groups" }.Where(data.ContainsKey))
+        {
+            target[key] = data[key]?.DeepClone();
+        }
+
+        Reload("iscsi.target.update");
+        return target.DeepClone();
+    }
+
+    /// <summary>
+    /// Как targets.py do_delete (TS-25.10.7): каждая связка — через <c>iscsi.targetextent.delete</c> (у каждой свой
+    /// reload), затем группы и запись, <c>scstadmin -rem_target</c> и ещё один reload.
+    /// </summary>
     private JsonNode DeleteTarget(int id, bool force)
     {
         var target = _targets.GetValueOrDefault(id) ?? throw NotFound(id.ToString());
@@ -643,12 +697,29 @@ public sealed class FakeTrueNas : IAsyncDisposable
             throw CallError(14, "EFAULT", $"Target {target["name"]} is in use.");
         }
 
-        foreach (var te in _targetExtents.Where(te => te.Value["target"]!.GetValue<int>() == id).ToList())
+        foreach (var te in _targetExtents.Where(te => te.Value["target"]!.GetValue<int>() == id).Select(te => te.Key).ToList())
         {
-            _targetExtents.Remove(te.Key);
+            DeleteTargetExtent(te, force);
         }
 
         _targets.Remove(id);
+        RemoveTargetFromScst(target["name"]!.GetValue<string>());
+        Reload("iscsi.target.delete");
+        return true;
+    }
+
+    /// <summary>target_to_extent.py do_delete: при сессиях таргета без force — отказ; запись удаляется, затем reload.</summary>
+    private JsonNode DeleteTargetExtent(int id, bool force)
+    {
+        var row = _targetExtents.GetValueOrDefault(id) ?? throw NotFound(id.ToString());
+        var targetName = _targets.GetValueOrDefault(row["target"]!.GetValue<int>())?["name"]?.GetValue<string>();
+        if (!force && _sessions.Any(s => s.Target == targetName))
+        {
+            throw CallError(14, "EFAULT", $"Associated target {targetName} is in use.");
+        }
+
+        _targetExtents.Remove(id);
+        Reload("iscsi.targetextent.delete");
         return true;
     }
 
@@ -664,6 +735,7 @@ public sealed class FakeTrueNas : IAsyncDisposable
         var id = _nextId++;
         var row = new JsonObject { ["id"] = id, ["target"] = target, ["extent"] = extent, ["lunid"] = data["lunid"]?.GetValue<int>() ?? 0 };
         _targetExtents[id] = row;
+        Reload("iscsi.targetextent.create");
         return row.DeepClone();
     }
 
@@ -723,7 +795,8 @@ public sealed class FakeTrueNas : IAsyncDisposable
         ["data"] = new JsonObject { ["error"] = errno, ["errname"] = errname, ["reason"] = $"[{errname}] {reason}", ["trace"] = null, ["extra"] = null },
     });
 
-    private static (X509Certificate2 Ca, X509Certificate2 Server) CreateCertificates()
+    /// <summary>Тестовый CA и сертификат <c>localhost</c>, выписанный им (для HTTPS поддельных серверов).</summary>
+    public static (X509Certificate2 Ca, X509Certificate2 Server) CreateCertificates()
     {
         using var caKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         var caRequest = new CertificateRequest("CN=Club Test CA", caKey, HashAlgorithmName.SHA256);
@@ -744,6 +817,7 @@ public sealed class FakeTrueNas : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        StopIscsiPortal();
         await _app.StopAsync();
         await _app.DisposeAsync();
         File.Delete(CaPath);

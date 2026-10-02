@@ -194,6 +194,14 @@
     if (data.reimaging) chips.push(chip(data.reimaging, "sumReimaging"));
     chips.push(el("span", { class: "chip" }, `${t("sumLibrary")}: `, data.currentLibraryVersion ? el("b", {}, data.currentLibraryVersion) : dash()));
     chips.push(el("span", { class: "chip" }, `${t("sumImage")}: `, data.currentImageVersion ? el("b", {}, data.currentImageVersion) : dash()));
+    const feed = data.machineFeed;
+    if (feed) {
+      const vars = { host: feed.target, n: feed.machines };
+      chips.push(el("span", { class: "chip" }, feed.state === "failing"
+        ? [badge("bad", t("feedFailing", vars), feed.error), " ", ago(feed.lastAttemptAt)]
+        : feed.state === "pending" ? badge("idle", t("feedPending", vars))
+        : [badge("ok", t("feedOk", vars)), " ", ago(feed.lastDeliveredAt)]));
+    }
     $("summary").replaceChildren(...chips);
   }
 
@@ -438,8 +446,8 @@
 
   const LIB_STATE = { publishing: "info", published: "ok", retiring: "idle", retired: "idle", failed: "bad" };
   const OP_STATUS = { pending: "idle", running: "info", done: "ok", failed: "bad" };
-  const PUBLISH_STEPS = ["snapshot", "clone", "extent", "target", "promote"];
-  const MASTER_OPEN_STEPS = ["auth", "initiator", "extent", "target"];
+  const PUBLISH_STEPS = ["snapshot", "clone", "target", "extent", "lun", "verify", "promote"];
+  const MASTER_OPEN_STEPS = ["auth", "initiator", "extent", "target", "verify"];
   const MASTER_CLOSE_STEPS = ["target", "extent", "initiator", "auth"];
 
   function suggestLabel() {
@@ -496,7 +504,8 @@
     }
     parts.push(el("div", { class: "master-row" }, head));
     if (m.state === "closing") parts.push(el("div", { class: "muted small" }, t("masterWaiting")));
-    if (m.lastError && m.state !== "open") parts.push(el("div", { class: "error small" }, m.lastError));
+    // У открытого тома lastError — оговорка открытия (таргет не виден ПК), а не ошибка.
+    if (m.lastError) parts.push(el("div", { class: m.state === "open" ? "notice small" : "error small" }, m.lastError));
     if (m.dirty && m.state === "closed") parts.push(el("p", { class: "notice small" }, t("masterDirty")));
 
     const actions = [];

@@ -28,9 +28,17 @@ public sealed record ReimageView(
 
 public sealed record ZoneView(string Id, string Name);
 
+/// <summary>
+/// Отправка списка ПК внешней системе (<c>MachineFeed</c>; null — выключена). <c>state</c>: <c>pending</c> (ещё не
+/// отправлялся) | <c>ok</c> | <c>failing</c>. <c>target</c> — только хост получателя: путь адреса может нести токен.
+/// </summary>
+public sealed record MachineFeedView(
+    string State, string Target, DateTimeOffset? LastDeliveredAt, DateTimeOffset? LastAttemptAt, int Machines, string? Error, int Failures);
+
 public sealed record MachinesOverview(
     IReadOnlyList<MachineView> Machines, IReadOnlyList<ZoneView> Zones, string? CurrentLibraryVersion,
-    int Online, int Offline, int Pending, int Maintenance, string? CurrentImageVersion = null, int Reimaging = 0);
+    int Online, int Offline, int Pending, int Maintenance, string? CurrentImageVersion = null, int Reimaging = 0,
+    MachineFeedView? MachineFeed = null);
 
 public sealed record ReimageRequest(string? Image, bool? AllowNewDisk);
 
@@ -46,7 +54,7 @@ public static class MachinesPanelEndpoints
     {
         var panel = app.MapGroup(PanelAuthMiddleware.Prefix + "/v1");
 
-        panel.MapGet("/machines", async (MachineRepository machines, LibraryRepository library, Imaging.ImageRepository images, TimeProvider clock, ILoggerFactory logs) =>
+        panel.MapGet("/machines", async (MachineRepository machines, LibraryRepository library, Imaging.ImageRepository images, Integration.MachineFeedOptions feedOptions, Integration.MachineFeedState feed, TimeProvider clock, ILoggerFactory logs) =>
         {
             var logger = logs.CreateLogger("Club.Server.Panel.Sanity");
             var now = clock.GetUtcNow();
@@ -66,7 +74,8 @@ public static class MachinesPanelEndpoints
                     views.Count(v => v.Status == "pendingApproval"),
                     views.Count(v => v.Status == "maintenance"),
                     (await images.PointersAsync()).Current?.Label,
-                    views.Count(v => v.Status == "reimaging")),
+                    views.Count(v => v.Status == "reimaging"),
+                    FeedView(feedOptions, feed)),
                 ApiJson.Options);
         });
 
@@ -126,6 +135,14 @@ public static class MachinesPanelEndpoints
             };
         });
     }
+
+    private static MachineFeedView? FeedView(Integration.MachineFeedOptions options, Integration.MachineFeedState feed) =>
+        !options.Enabled
+            ? null
+            : new MachineFeedView(
+                feed.LastError is not null ? "failing" : feed.LastDeliveredAt is null ? "pending" : "ok",
+                Integration.MachineFeed.Host(options.Url), feed.LastDeliveredAt, feed.LastAttemptAt, feed.Machines, feed.LastError,
+                feed.ConsecutiveFailures);
 
     private static MachineView View(MachineRow m, string? currentLibrary, DateTimeOffset now, ILogger sanity, Imaging.ReimageJob? job, IReadOnlyDictionary<Guid, string> labels)
     {

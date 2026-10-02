@@ -36,6 +36,8 @@ public sealed partial class LibraryTests : IAsyncLifetime
             ["Library:MasterZvol"] = Master,
             ["Library:PublishedParent"] = Published,
             ["Library:PortalAddress"] = "192.168.77.10:3260",
+            ["Library:DiscoveryAddress"] = _nas.IscsiPortal, // проверка публикации — у портала поддельного TrueNAS
+            ["Library:VerifyDelayMs"] = "0",
             ["Library:ExtentRetryDelayMs"] = "10",
             ["Library:ExtentAttempts"] = "2",
             ["Library:MaxAttempts"] = "1",

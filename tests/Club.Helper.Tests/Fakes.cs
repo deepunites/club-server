@@ -1,4 +1,5 @@
 using Club.Helper.Core;
+using Microsoft.Extensions.Logging;
 
 namespace Club.Helper.Tests;
 
@@ -180,4 +181,72 @@ public sealed class FakeIdentity(string hwid) : IMachineIdentity
 
     public Task<MachineFacts> ReadAsync(CancellationToken ct) =>
         Task.FromResult(new MachineFacts(hwid, "PC-TEST", ["aa:bb:cc:dd:ee:01"], "Windows 11 Pro 24H2", DateTimeOffset.UtcNow.AddMinutes(-3), [.. DhcpServers], SecureBoot: SecureBoot, InitiatorIqn: InitiatorIqn));
+}
+
+/// <summary>
+/// Поддельный источник фактов Windows для <see cref="CachedMachineIdentity"/>: считает полные и короткие опросы.
+/// Как настоящий, полный опрос IQN не читает. IQN пуст, пока «служба инициатора» не отдала порт (как на ПК, где
+/// MSiSCSI была остановлена при старте помощника).
+/// </summary>
+public sealed class FakeFactsSource(string hwid) : IMachineFactsSource
+{
+    public string? InitiatorIqn { get; set; }
+
+    /// <summary>Чем падает короткий опрос IQN (powershell.exe завершился с ошибкой, таймаут); <c>null</c> — не падает.</summary>
+    public Exception? IqnReadError { get; set; }
+
+    public List<string> DhcpServers { get; } = [];
+
+    public int FullReads { get; private set; }
+
+    public int IqnReads { get; private set; }
+
+    public Task<MachineFacts> ReadAllAsync(CancellationToken ct)
+    {
+        FullReads++;
+        return Task.FromResult(new MachineFacts(hwid, "PC-TEST", ["aa:bb:cc:dd:ee:01"], "Windows 11 Pro 24H2", DateTimeOffset.UtcNow.AddMinutes(-3)));
+    }
+
+    public Task<string?> ReadInitiatorIqnAsync(CancellationToken ct)
+    {
+        IqnReads++;
+        return IqnReadError is { } error ? Task.FromException<string?>(error) : Task.FromResult(InitiatorIqn);
+    }
+
+    public MachineFacts Refresh(MachineFacts facts) => facts with { DhcpServers = [.. DhcpServers] };
+}
+
+/// <summary>Часы, которые идут только по команде теста: и системное время, и монотонные отметки.</summary>
+public sealed class ManualClock : TimeProvider
+{
+    private DateTimeOffset _now = new(2026, 10, 2, 12, 0, 0, TimeSpan.Zero);
+    private long _timestamp;
+
+    public override DateTimeOffset GetUtcNow() => _now;
+
+    public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+    public override long GetTimestamp() => _timestamp;
+
+    public void Advance(TimeSpan by)
+    {
+        _now += by;
+        _timestamp += by.Ticks;
+    }
+
+    /// <summary>Перевод системного времени (NTP поправил RTC): монотонные отметки не двигаются.</summary>
+    public void StepWallClock(TimeSpan by) => _now += by;
+}
+
+/// <summary>Журнал в память: тесты проверяют, что и с каким уровнем попало бы в журнал Windows.</summary>
+public sealed class ListLogger<T> : ILogger<T>
+{
+    public List<(LogLevel Level, string Message)> Entries { get; } = [];
+
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+    public bool IsEnabled(LogLevel logLevel) => true;
+
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+        Entries.Add((logLevel, formatter(state, exception)));
 }

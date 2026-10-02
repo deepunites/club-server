@@ -69,18 +69,38 @@ public sealed partial class ProcessInspector : IProcessInspector
     private static extern bool CloseHandle(IntPtr handle);
 }
 
-/// <summary>Идентичность машины: HWID из SMBIOS UUID и серийника платы, MAC физических Ethernet-карт.</summary>
-public sealed class MachineIdentity : IMachineIdentity
+/// <summary>
+/// Факты машины: HWID из SMBIOS UUID и серийника платы, MAC физических Ethernet-карт, IQN инициатора. Что из этого
+/// кэшируется и что читается повторно, решает <see cref="CachedMachineIdentity"/>.
+/// </summary>
+public sealed class WindowsMachineFacts : IMachineFactsSource
 {
-    private MachineFacts? _cached;
+    /// <summary>
+    /// IQN инициатора iSCSI: по нему сервер пускает к мастер-тому только этот ПК (режим суперклиента). Пока служба
+    /// MSiSCSI остановлена (так в Windows по умолчанию), <c>Get-InitiatorPort</c> не отдаёт iSCSI-порт, поэтому служба
+    /// запускается здесь, а не только при подключении тома: иначе на новом стенде ПК суперклиента не сообщит IQN
+    /// никогда. Ожидание запуска — не дольше 10 с: <c>Start-Service</c> в PowerShell 5.1 ждёт службу в StartPending
+    /// без срока (и пишет предупреждения в stdout, ломая JSON), а <c>ServiceController.Start</c> и
+    /// <c>WaitForStatus</c> с таймаутом ничего не выводят. Всё best effort — сбой не срывает опрос, IQN — <c>null</c>.
+    /// </summary>
+    private const string InitiatorIqnScript = """
+        $iqn = $null
+        try {
+            $svc = Get-Service -Name MSiSCSI -ErrorAction Stop
+            if ($svc.StartType -ne 'Automatic') { Set-Service -Name MSiSCSI -StartupType Automatic -ErrorAction Stop }
+            if ($svc.Status -eq 'Stopped') { $svc.Start() }
+            if ($svc.Status -ne 'Running') { $svc.WaitForStatus('Running', [TimeSpan]::FromSeconds(10)) }
+        } catch { }
+        try { $iqn = (Get-InitiatorPort -ErrorAction Stop | Where-Object { $_.ConnectionType -eq 'iSCSI' } | Select-Object -First 1).NodeAddress } catch { }
+        ConvertTo-Json -InputObject $iqn -Compress
+        """;
 
-    public async Task<MachineFacts> ReadAsync(CancellationToken ct)
+    /// <summary>
+    /// Полный опрос без IQN: служба MSiSCSI, запускаемая ради IQN, не задерживает HWID и MAC — IQN читает
+    /// <see cref="ReadInitiatorIqnAsync"/>, первый раз на следующем такте после этого опроса (<see cref="CachedMachineIdentity"/>).
+    /// </summary>
+    public async Task<MachineFacts> ReadAllAsync(CancellationToken ct)
     {
-        if (_cached is not null)
-        {
-            return _cached with { BootTime = BootTime(), DhcpServers = DhcpServers(), ImageVersion = ImageVersion() };
-        }
-
         var json = await PowerShell.RunAsync(
             """
             $product = Get-CimInstance -ClassName Win32_ComputerSystemProduct
@@ -99,12 +119,8 @@ public sealed class MachineIdentity : IMachineIdentity
                     pca2011Revoked = $dbx -match 'Microsoft Windows Production PCA 2011'
                 }
             } catch { }
-            # IQN инициатора iSCSI: по нему сервер пускает к мастер-тому только этот ПК (режим суперклиента).
-            $iqn = $null
-            try { $iqn = (Get-InitiatorPort -ErrorAction Stop | Where-Object { $_.ConnectionType -eq 'iSCSI' } | Select-Object -First 1).NodeAddress } catch { }
             [pscustomobject]@{
                 secureBoot = $sb
-                initiatorIqn = $iqn
                 uuid = [string]$product.UUID; board = [string]$board.SerialNumber; os = "$($os.Caption) $($os.Version)"
                 diskSerial = ([string]$disk.SerialNumber).Trim(); diskModel = [string]$disk.FriendlyName; diskSize = [long]$disk.Size; diskBus = [string]$disk.BusType
             } | ConvertTo-Json -Compress
@@ -129,12 +145,25 @@ public sealed class MachineIdentity : IMachineIdentity
         var secureBoot = root.TryGetProperty("secureBoot", out var sb) && sb.ValueKind == JsonValueKind.Object
             ? new SecureBootFacts(Flag(sb, "enabled"), Flag(sb, "thirdPartyCa2011"), Flag(sb, "windowsCa2023"), Flag(sb, "pca2011Revoked"))
             : null;
-        var initiatorIqn = root.TryGetProperty("initiatorIqn", out var iqn) && iqn.ValueKind == JsonValueKind.String ? iqn.GetString() : null;
-        _cached = new MachineFacts(
-            hwid, Environment.MachineName, macs, root.GetProperty("os").GetString() ?? "", BootTime(), SystemDisk: systemDisk, SecureBoot: secureBoot,
-            InitiatorIqn: initiatorIqn);
-        return _cached with { DhcpServers = DhcpServers(), ImageVersion = ImageVersion() };
+        return new MachineFacts(
+            hwid, Environment.MachineName, macs, root.GetProperty("os").GetString() ?? "", BootTime(), SystemDisk: systemDisk, SecureBoot: secureBoot);
     }
+
+    /// <summary>Короткий опрос одного IQN: полный (CIM, Secure Boot, диск) ради него не повторяется.</summary>
+    public async Task<string?> ReadInitiatorIqnAsync(CancellationToken ct)
+    {
+        var json = await PowerShell.RunAsync(InitiatorIqnScript, null, ct);
+        if (json.Length == 0)
+        {
+            return null;
+        }
+
+        using var doc = JsonDocument.Parse(json);
+        return doc.RootElement.ValueKind == JsonValueKind.String ? doc.RootElement.GetString() : null;
+    }
+
+    public MachineFacts Refresh(MachineFacts facts) =>
+        facts with { BootTime = BootTime(), DhcpServers = DhcpServers(), ImageVersion = ImageVersion() };
 
     private static bool? Flag(JsonElement element, string name) =>
         element.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False ? value.GetBoolean() : null;
