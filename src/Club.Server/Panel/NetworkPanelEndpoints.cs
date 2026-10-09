@@ -95,7 +95,7 @@ public static class NetworkPanelEndpoints
             return Results.Json(new NetworkStatusView(settings.Configured, kea.Enabled, sync, state.Foreign, reservations, warnings), ApiJson.Options);
         });
 
-        panel.MapGet("/kea-dhcp4.conf", async (NetworkRepository network, Imaging.ImagingOptions imaging) =>
+        panel.MapGet("/kea-dhcp4.conf", async (NetworkRepository network, Imaging.ImagingOptions imaging, Diskless.DisklessOptions diskless) =>
         {
             var settings = await network.GetAsync();
             if (!settings.Configured)
@@ -103,13 +103,16 @@ public static class NetworkPanelEndpoints
                 throw new ApiException(StatusCodes.Status409Conflict, ErrorCodes.Conflict, "Network settings are not saved yet", new { reason = "notConfigured" });
             }
 
-            return Results.Text(KeaConfig.Render(settings, pxe: PxeBootFor(settings, imaging)), "application/json; charset=utf-8");
+            return Results.Text(KeaConfig.Render(settings, pxe: PxeBootFor(settings, imaging, diskless.Enabled)), "application/json; charset=utf-8");
         });
     }
 
-    /// <summary>PXE в конфиге Kea — только при включённых образах и известном адресе сервера для ПК; TFTP — на этой же машине.</summary>
-    public static PxeBoot? PxeBootFor(NetworkSettings settings, Imaging.ImagingOptions imaging) =>
-        imaging.Enabled && Uri.TryCreate(imaging.PublicBaseUrl, UriKind.Absolute, out var url) && url.Scheme == Uri.UriSchemeHttp
+    /// <summary>
+    /// PXE в конфиге Kea — при включённых образах (перезаливка) или полном бездиске и известном адресе сервера для ПК
+    /// (<c>Imaging:PublicBaseUrl</c> — HTTP для iPXE); TFTP — на этой же машине.
+    /// </summary>
+    public static PxeBoot? PxeBootFor(NetworkSettings settings, Imaging.ImagingOptions imaging, bool diskless = false) =>
+        (imaging.Enabled || diskless) && Uri.TryCreate(imaging.PublicBaseUrl, UriKind.Absolute, out var url) && url.Scheme == Uri.UriSchemeHttp
             ? new PxeBoot(settings.DhcpServer, url.ToString().TrimEnd('/') + Imaging.PxeEndpoints.Prefix + "/boot.ipxe")
             : null;
 

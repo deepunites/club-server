@@ -291,6 +291,16 @@ public sealed class DisklessBootTests : IAsyncLifetime
     }
 
     [Fact]
+    public void Kea_config_offers_network_boot_when_only_diskless_is_on()
+    {
+        var settings = new Network.NetworkSettings(true, "192.168.1.0/24", 1, "ens3", "192.168.1.201", "192.168.1.1", ["192.168.1.1"], "192.168.1.80", "192.168.1.100", "192.168.1.60", 43200);
+        var imaging = new Imaging.ImagingOptions { Enabled = false, PublicBaseUrl = "http://192.168.1.201:5080" };
+        Assert.Null(Club.Server.Panel.NetworkPanelEndpoints.PxeBootFor(settings, imaging));
+        var pxe = Club.Server.Panel.NetworkPanelEndpoints.PxeBootFor(settings, imaging, diskless: true);
+        Assert.Equal("http://192.168.1.201:5080/pxe/v1/boot.ipxe", pxe!.ScriptUrl);
+    }
+
+    [Fact]
     public async Task Boot_mode_is_validated()
     {
         var (machine, _) = await TestMachine.RegisterAsync(_server.CreateClient(), null, Mac);
