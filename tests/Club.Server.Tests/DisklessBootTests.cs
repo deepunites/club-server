@@ -222,6 +222,75 @@ public sealed class DisklessBootTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Panel_overview_shows_versions_seats_and_boot_modes()
+    {
+        var machine = await DisklessSeatAsync();
+        await PublishAsync("v1");
+        await BootScriptAsync();
+        await PublishAsync("v2");
+
+        var overview = await Panel().GetFromJsonAsync<JsonElement>("/panel/api/v1/diskless");
+        Assert.Equal(("v2", "v1"), (overview.GetProperty("currentVersion").GetString(), overview.GetProperty("rollbackVersion").GetString()));
+        Assert.Equal(new[] { "v2", "v1" }, overview.GetProperty("versions").EnumerateArray().Select(v => v.GetProperty("version").GetString()!).ToArray());
+        var seat = overview.GetProperty("seats")[0];
+        Assert.Equal(("seat-01", "v1", "ready", 1), (seat.GetProperty("target").GetString(), seat.GetProperty("baseVersion").GetString(),
+            seat.GetProperty("state").GetString(), seat.GetProperty("number").GetInt32()));
+        Assert.Equal("diskless", overview.GetProperty("machines")[0].GetProperty("bootMode").GetString());
+
+        var machines = await Panel().GetFromJsonAsync<JsonElement>("/panel/api/v1/machines");
+        var row = machines.GetProperty("machines").EnumerateArray().Single(m => m.GetProperty("id").GetGuid() == machine.MachineId);
+        Assert.Equal("diskless", row.GetProperty("bootMode").GetString());
+    }
+
+    [Fact]
+    public async Task Pc_added_by_mac_boots_diskless_and_the_helper_adopts_its_record()
+    {
+        using var add = await Panel().PostAsJsonAsync("/panel/api/v1/machines", new { macAddress = "02-00-00-00-20-01", number = 7, name = "Z1-07" });
+        Assert.Equal(HttpStatusCode.Created, add.StatusCode);
+        var added = await add.Content.ReadFromJsonAsync<JsonElement>();
+        var id = added.GetProperty("id").GetGuid();
+        await PublishAsync("v1");
+
+        var script = await BootScriptAsync();
+        Assert.Contains($"sanboot iscsi:192.168.77.10::3260::{Basename}:seat-07", script);
+
+        // Помощник из эталона регистрируется с настоящим HWID — в ту же запись, без новой машины.
+        var (machine, reply) = await TestMachine.RegisterAsync(_server.CreateClient(), "real-hwid-07", Mac, "02:00:00:00:20:99");
+        Assert.Equal(id, machine.MachineId);
+        Assert.Equal((7, "Z1-07"), (reply.GetProperty("number").GetInt32(), reply.GetProperty("name").GetString()));
+        var machines = await Panel().GetFromJsonAsync<JsonElement>("/panel/api/v1/machines");
+        var rows = machines.GetProperty("machines").EnumerateArray().ToList();
+        var row = Assert.Single(rows);
+        Assert.Equal(("diskless", Mac), (row.GetProperty("bootMode").GetString(), row.GetProperty("macAddresses")[0].GetString()));
+
+        // Повторная регистрация (диск места сброшен — помощник снова без учётных данных) — та же машина.
+        var (again, _) = await TestMachine.RegisterAsync(_server.CreateClient(), "real-hwid-07", Mac);
+        Assert.Equal(id, again.MachineId);
+    }
+
+    [Fact]
+    public async Task Adding_by_mac_rejects_duplicates_and_bad_input()
+    {
+        using (var first = await Panel().PostAsJsonAsync("/panel/api/v1/machines", new { macAddress = Mac, number = 3 }))
+        {
+            Assert.Equal(HttpStatusCode.Created, first.StatusCode);
+        }
+
+        async Task<(HttpStatusCode, string?)> AddAsync(object body)
+        {
+            using var response = await Panel().PostAsJsonAsync("/panel/api/v1/machines", body);
+            var text = await response.Content.ReadAsStringAsync();
+            return (response.StatusCode, response.IsSuccessStatusCode ? null
+                : JsonDocument.Parse(text).RootElement.GetProperty("error").GetProperty("details").GetProperty("reason").GetString());
+        }
+
+        Assert.Equal((HttpStatusCode.Conflict, "macTaken"), await AddAsync(new { macAddress = Mac.ToUpperInvariant() }));
+        Assert.Equal((HttpStatusCode.Conflict, "numberTaken"), await AddAsync(new { macAddress = "02:00:00:00:20:02", number = 3 }));
+        Assert.Equal((HttpStatusCode.BadRequest, "format"), await AddAsync(new { macAddress = "not-a-mac" }));
+        Assert.Equal((HttpStatusCode.BadRequest, "format"), await AddAsync(new { macAddress = "02:00:00:00:20:03", bootMode = "cloud" }));
+    }
+
+    [Fact]
     public async Task Boot_mode_is_validated()
     {
         var (machine, _) = await TestMachine.RegisterAsync(_server.CreateClient(), null, Mac);

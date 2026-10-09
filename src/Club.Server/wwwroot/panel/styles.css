@@ -225,3 +225,5 @@ td.wrap { white-space: normal; min-width: 300px; }
 
 /* Действия в строке машины — столбиком: таблица рабочих станций широкая. */
 #rows .row-actions { flex-direction: column; align-items: stretch; }
+.spaced-top { margin-top: 12px; }
+.ok-text { color: var(--ok); }

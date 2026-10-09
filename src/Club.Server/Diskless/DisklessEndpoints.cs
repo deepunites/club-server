@@ -103,9 +103,11 @@ public static partial class DisklessEndpoints
 
         var registration = new MachineRegistration(request.Hwid, request.Hostname, macs, ClientIp(context), request.HelperVersion, request.OsVersion);
         var existing = await machines.FindByHwidAsync(request.Hwid);
-        var machine = existing is null
-            ? await machines.CreateAsync(registration, options.AutoApprovePcs)
-            : await machines.ReregisterAsync(existing.Id, registration);
+        // ПК, добавленный в панели по MAC (бездиск без своей Windows), регистрируется в свою заготовку.
+        var placeholder = existing is null ? await machines.FindPlaceholderAsync(macs) : null;
+        var machine = existing is not null ? await machines.ReregisterAsync(existing.Id, registration)
+            : placeholder is not null ? await machines.AdoptAsync(placeholder.Id, registration)
+            : await machines.CreateAsync(registration, options.AutoApprovePcs);
 
         if (!machine.Approved)
         {

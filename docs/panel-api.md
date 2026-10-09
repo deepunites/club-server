@@ -142,3 +142,19 @@ pxeArmed, attempts, updatedAt }`, статус `reimaging`, в обзоре `cur
 `POST /deploy/v1/start`, `PUT /deploy/v1/jobs/{id}/progress`, `GET /deploy/v1/jobs/{id}/image` (Range),
 `POST /deploy/v1/jobs/{id}/unattend|fail|complete`.
 
+
+## Полный бездиск
+
+Проект и устройство — `docs/diskless-full.md`. Включается настройкой `Diskless:Enabled`.
+
+| Запрос | Что делает |
+|---|---|
+| `GET /diskless` | Эталон (`currentVersion`, `rollbackVersion`, `imageZvol`), режим мастера (`masterMachineId`, `masterMachineName`, `masterInstall`), версии (`versions`: `version`, `comment`, `createdBy`, `createdAt`), личные диски мест (`seats`: `number`, `machineName`, `kind` seat/master, `target`, `baseVersion`, `state` new/ready/failed, `error`, `boots`, `lastBootAt`), одобренные машины (`machines`: `id`, `number`, `name`, `bootMode`, `online`) |
+| `POST /diskless/versions` `{label, comment}` | Снапшот zvol эталона `@img-<label>` — новая текущая версия, прежняя — откатная. `400 label` — формат `^[a-z0-9][a-z0-9-]{0,39}$`; `409 exists`, `409 noImage` (нет zvol эталона), `409 masterConnected` (ПК мастера подключён к эталону — выключить) |
+| `POST /diskless/rollback` | Текущая и откатная меняются местами; `409 noRollback` |
+| `PUT /diskless/master` `{machineId, install}` | Режим мастера: машина грузится с самого эталона; `install: true` — установщик Windows на эталон (файлы в `Imaging:PxeRoot/winsetup`). `machineId: null` — выключить. `404 noMachine`, `409 notApproved` |
+| `POST /machines` `{macAddress, number?, name?, bootMode?}` | Новый ПК по MAC (бездисковый ПК без своей Windows не может зарегистрироваться сам): сразу одобрен, `bootMode` по умолчанию `diskless`, номер — следующий свободный. Первая регистрация помощника с этим MAC (из эталона) попадает в эту запись: HWID и факты — от помощника, номер, имя и режим остаются. `201 {id, number, name}`; `400 format`, `409 macTaken`, `409 numberTaken` |
+| `PUT /machines/{id}/boot-mode` `{mode}` | `local` (с диска ПК) или `diskless` (по сети с личного диска места). `400 mode`, `404 noMachine`, `409 notApproved` |
+
+Версии доходят до мест при их следующей загрузке; у работающего места (свежий отчёт помощника и сессия к его диску)
+диск не сбрасывается. В строке машины на «Рабочих станциях» — `bootMode`.

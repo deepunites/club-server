@@ -1,4 +1,4 @@
-// Экраны «Рабочие станции», «Библиотека игр», «Образы Windows» и «Сеть». Без сборки и внешних зависимостей: панель работает в клубе без интернета.
+// Экраны «Рабочие станции», «Библиотека игр», «Образы Windows», «Бездиск» и «Сеть». Без сборки и внешних зависимостей: панель работает в клубе без интернета.
 (() => {
   "use strict";
 
@@ -22,6 +22,8 @@
   let reimaging = null;
   let lib = null;
   let libJson = "";
+  let dl = null;
+  let dlJson = "";
   const openContents = new Set();
   const NET_FIELDS = ["subnet", "interface", "dhcpServer", "gateway", "dnsServers", "poolStart", "poolEnd", "reservedStart", "leaseTimeSec", "keaSubnetId"];
 
@@ -139,7 +141,7 @@
   // Версия образа на ПК и ход перезаливки: этап, проценты, причина сбоя.
   function windowsCell(m) {
     const r = m.reimage;
-    const parts = [m.imageVersion ? el("span", { class: "mono" }, m.imageVersion) : dash()];
+    const parts = [m.bootMode === "diskless" ? badge("info", t("bootDiskless"), t("bootDisklessHint")) : m.imageVersion ? el("span", { class: "mono" }, m.imageVersion) : dash()];
     if (m.masterState) {
       parts.push(el("div", {}, badge(m.masterState === "failed" ? "bad" : "warn", t("masterBadge", { letter: "M" }), t(`mm_${m.masterState}`))));
     }
@@ -171,12 +173,23 @@
     const r = m.reimage;
     const active = r && ["requested", "deploying", "failed", "booting"].includes(r.state);
     const buttons = [el("button", { class: "ghost small", onclick: () => openEdit(m) }, t("edit"))];
+    const toDiskless = m.bootMode !== "diskless";
+    buttons.push(el("button", { class: "ghost small", title: t(toDiskless ? "bootToDisklessHint" : "bootToLocalHint"), onclick: async () => {
+      if (!confirm(t(toDiskless ? "bootToDisklessConfirm" : "bootToLocalConfirm", { name: m.name }))) return;
+      try {
+        await api(`/machines/${m.id}/boot-mode`, { method: "PUT", body: JSON.stringify({ mode: toDiskless ? "diskless" : "local" }) });
+      } catch (error) {
+        alert(error.message);
+      }
+      dataJson = "";
+      await load();
+    } }, t(toDiskless ? "bootToDiskless" : "bootToLocal")));
     if (r && ["requested", "failed"].includes(r.state) && !r.diskTouched) {
       buttons.push(el("button", { class: "danger small", onclick: () => {
         if (confirm(t("reimageConfirmCancel", { name: m.name }))) act(`/machines/${m.id}/reimage/cancel`);
       } }, t("reimageCancel")));
     }
-    if (!active || r.state === "booting" || r.state === "failed") {
+    if (m.bootMode !== "diskless" && (!active || r.state === "booting" || r.state === "failed")) {
       buttons.push(el("button", { class: "ghost small", onclick: () => openReimage(m) }, t("reimage")));
     }
     return el("td", {}, el("div", { class: "row-actions" }, buttons));
@@ -776,16 +789,162 @@
     await loadImages();
   }
 
+  // ---------- Бездиск ----------
+
+  const SEAT_STATE = { ready: "ok", new: "info", failed: "bad" };
+
+  function renderDiskless() {
+    if (!dl) return;
+    $("dl-disabled").hidden = dl.enabled;
+    const chip = (key, value) => el("span", { class: "chip" }, `${t(key)}: `, value ? el("b", {}, value) : dash());
+    const diskless = dl.machines.filter((m) => m.bootMode === "diskless").length;
+    $("dl-summary").replaceChildren(
+      chip("dlCurrent", dl.currentVersion),
+      chip("dlRollbackVersion", dl.rollbackVersion),
+      el("span", { class: "chip" }, el("b", {}, diskless), " ", t("dlSeatsCount")),
+      el("span", { class: "chip mono small", title: t("dlImageZvol") }, dl.imageZvol));
+
+    if (!$("dl-label").value || $("dl-label").dataset.auto !== "0") {
+      const d = new Date();
+      const base = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      let label = base;
+      for (let i = 2; dl.versions.some((v) => v.version === label); i++) label = `${base}-${i}`;
+      $("dl-label").value = label;
+      $("dl-label").dataset.auto = "1";
+    }
+    const masterOn = !!dl.masterMachineId;
+    $("dl-publish-button").disabled = !dl.enabled;
+    $("dl-rollback").disabled = !dl.rollbackVersion;
+    $("dl-rollback-text").textContent = dl.rollbackVersion
+      ? t("dlRollbackText", { current: dl.currentVersion ?? "—", previous: dl.rollbackVersion })
+      : t("dlNoRollback");
+
+    // Режим мастера: кто правит эталон; с «установкой» — ставится Windows прямо на эталон.
+    const box = [];
+    if (masterOn) {
+      box.push(el("div", { class: "master-row" },
+        badge("warn", t(dl.masterInstall ? "dlMasterInstalling" : "dlMasterEditing")), " ",
+        el("b", {}, dl.masterMachineName ?? "?")));
+      box.push(el("p", { class: "muted small" }, t(dl.masterInstall ? "dlMasterInstallSteps" : "dlMasterEditSteps")));
+      const actions = [];
+      if (dl.masterInstall) actions.push(el("button", { onclick: () => dlAct("/diskless/master", "PUT", { machineId: dl.masterMachineId, install: false }) }, t("dlMasterInstalled")));
+      actions.push(el("button", { class: "ghost", onclick: () => {
+        if (confirm(t("dlMasterOffConfirm"))) dlAct("/diskless/master", "PUT", { machineId: null, install: false });
+      } }, t("dlMasterOff")));
+      box.push(el("div", { class: "master-row" }, actions));
+    } else if (dl.machines.length === 0) {
+      box.push(el("p", { class: "muted small" }, t("dlNoMachines")));
+    } else {
+      const select = el("select", { "aria-label": t("masterPc") }, dl.machines.map((m) =>
+        el("option", { value: m.id }, `№${m.number} ${m.name}${m.online ? ` · ${t("online")}` : ""}`)));
+      const install = el("input", { type: "checkbox", id: "dl-master-install" });
+      if (!dl.currentVersion) install.checked = true;
+      box.push(el("div", { class: "master-row" }, select,
+        el("label", { class: "check small", for: "dl-master-install" }, install, " ", t("dlMasterInstallBox")),
+        el("button", { onclick: () => dlAct("/diskless/master", "PUT", { machineId: select.value, install: install.checked }) }, t("dlMasterOn"))));
+    }
+    $("dl-master").replaceChildren(...box);
+
+    $("dl-seats-empty").hidden = dl.seats.length > 0;
+    $("dl-seat-rows").replaceChildren(...dl.seats.map((s) => el("tr", {},
+      el("td", { class: "mono" }, s.kind === "master" ? t("dlMasterSeat") : s.target),
+      el("td", {}, s.machineName ? `№${s.number} ${s.machineName}` : dash()),
+      el("td", { class: "mono" }, s.kind === "master" ? t("dlMasterDisk") : orDash(s.baseVersion, true)),
+      el("td", {}, badge(SEAT_STATE[s.state] || "idle", t(`dlState_${s.state}`), s.error || "")),
+      el("td", { class: "num" }, s.boots),
+      el("td", {}, ago(s.lastBootAt)))));
+
+    $("dl-versions-empty").hidden = dl.versions.length > 0;
+    $("dl-version-rows").replaceChildren(...dl.versions.map((v) => el("tr", {},
+      el("td", { class: "mono" }, v.version),
+      el("td", {}, v.version === dl.currentVersion ? badge("ok", t("dlIsCurrent"))
+        : v.version === dl.rollbackVersion ? badge("info", t("dlIsRollback")) : badge("idle", t("dlIsOld"))),
+      el("td", { class: "wrap" }, orDash(v.comment)),
+      el("td", {}, ago(v.createdAt)))));
+  }
+
+  async function loadDiskless() {
+    try {
+      const fresh = await api("/diskless");
+      const json = JSON.stringify(fresh);
+      $("dl-error").hidden = true;
+      if (json !== dlJson) {
+        dl = fresh;
+        dlJson = json;
+        renderDiskless();
+      } else {
+        refreshAgo();
+      }
+    } catch (error) {
+      if (error.message === "unauthorized") return;
+      $("dl-error").textContent = t("loadFailed", { error: error.message });
+      $("dl-error").hidden = false;
+    }
+  }
+
+  async function dlAct(path, method, body) {
+    try {
+      await api(path, { method, ...(body ? { body: JSON.stringify(body) } : {}) });
+    } catch (error) {
+      alert(t(`dlErr_${error.reason}`) !== `dlErr_${error.reason}` ? t(`dlErr_${error.reason}`) : error.message);
+    }
+    dlJson = "";
+    await loadDiskless();
+  }
+
+  async function publishDiskless(event) {
+    event.preventDefault();
+    $("dl-publish-error").hidden = true;
+    try {
+      await api("/diskless/versions", { method: "POST", body: JSON.stringify({ label: $("dl-label").value.trim(), comment: $("dl-comment").value.trim() }) });
+      $("dl-comment").value = "";
+      $("dl-label").dataset.auto = "1";
+    } catch (error) {
+      $("dl-publish-error").textContent = t(`dlErr_${error.reason}`) !== `dlErr_${error.reason}` ? t(`dlErr_${error.reason}`) : error.message;
+      $("dl-publish-error").hidden = false;
+    }
+    dlJson = "";
+    await loadDiskless();
+  }
+
+  async function addDisklessMachine(event) {
+    event.preventDefault();
+    const result = $("dl-add-result");
+    const number = $("dl-add-number").value.trim();
+    try {
+      const added = await api("/machines", { method: "POST", body: JSON.stringify({
+        macAddress: $("dl-add-mac").value.trim(),
+        number: number ? Number(number) : null,
+        name: $("dl-add-name").value.trim() || null,
+        bootMode: "diskless",
+      }) });
+      result.className = "small ok-text";
+      result.textContent = t("dlAdded", { name: added.name, number: added.number });
+      $("dl-add-mac").value = "";
+      $("dl-add-number").value = "";
+      $("dl-add-name").value = "";
+    } catch (error) {
+      result.className = "error small";
+      result.textContent = t(`dlErr_${error.reason}`) !== `dlErr_${error.reason}` ? t(`dlErr_${error.reason}`) : error.message;
+    }
+    result.hidden = false;
+    dlJson = "";
+    dataJson = "";
+    await loadDiskless();
+  }
+
   // ---------- Навигация ----------
 
   function route() {
-    view = { "#network": "network", "#images": "images", "#library": "library" }[location.hash] ?? "machines";
+    view = { "#network": "network", "#images": "images", "#library": "library", "#diskless": "diskless" }[location.hash] ?? "machines";
     document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === view));
     if (!token) return;
     $("machines").hidden = view !== "machines";
     $("network").hidden = view !== "network";
     $("images").hidden = view !== "images";
     $("library").hidden = view !== "library";
+    $("diskless").hidden = view !== "diskless";
+    if (view === "diskless") dlJson = "";
     if (view === "images") imgsJson = "";
     if (view === "library") libJson = "";
     if (view === "network") {
@@ -799,6 +958,7 @@
     if (view === "machines") load();
     if (view === "images") loadImages();
     if (view === "library") loadLibrary();
+    if (view === "diskless") loadDiskless();
     loadNetwork();
   }
 
@@ -881,6 +1041,7 @@
     $("network").hidden = true;
     $("images").hidden = true;
     $("library").hidden = true;
+    $("diskless").hidden = true;
     $("dhcp-alert").hidden = true;
     $("logout").hidden = true;
     $("login").hidden = false;
@@ -915,6 +1076,8 @@
       renderImages();
       libJson = "";
       if (view === "library") loadLibrary();
+      dlJson = "";
+      renderDiskless();
     });
     $("login-form").addEventListener("submit", login);
     $("logout").addEventListener("click", logout);
@@ -926,6 +1089,12 @@
     $("reimage-form").addEventListener("submit", startReimage);
     $("lib-publish").addEventListener("submit", publishLibrary);
     $("lib-label").addEventListener("input", () => { $("lib-label").dataset.auto = "0"; });
+    $("dl-publish").addEventListener("submit", publishDiskless);
+    $("dl-add").addEventListener("submit", addDisklessMachine);
+    $("dl-label").addEventListener("input", () => { $("dl-label").dataset.auto = "0"; });
+    $("dl-rollback").addEventListener("click", () => {
+      if (confirm(t("dlRollbackConfirm", { previous: dl?.rollbackVersion ?? "" }))) dlAct("/diskless/rollback", "POST");
+    });
     $("reimage-cancel").addEventListener("click", () => $("reimage").close());
     window.addEventListener("hashchange", route);
     if (token) showApp(); else logout();

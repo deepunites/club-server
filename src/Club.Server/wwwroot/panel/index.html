@@ -15,6 +15,7 @@
       <a class="tab" href="#machines" data-view="machines" data-i18n="tabMachines">Рабочие станции</a>
       <a class="tab" href="#library" data-view="library" data-i18n="tabLibrary">Библиотека игр</a>
       <a class="tab" href="#images" data-view="images" data-i18n="tabImages">Образы Windows</a>
+      <a class="tab" href="#diskless" data-view="diskless" data-i18n="tabDiskless">Бездиск</a>
       <a class="tab" href="#network" data-view="network" data-i18n="tabNetwork">Сеть</a>
     </nav>
     <div class="topbar-right">
@@ -206,6 +207,83 @@
           <tbody id="img-rows"></tbody>
         </table>
         <p id="img-empty" class="muted empty" data-i18n="imgEmpty" hidden></p>
+      </div>
+    </section>
+
+    <section id="diskless" hidden>
+      <div class="screen-head">
+        <h1 data-i18n="tabDiskless">Бездиск</h1>
+        <div class="summary" id="dl-summary"></div>
+      </div>
+      <p id="dl-error" class="error" hidden></p>
+      <p id="dl-disabled" class="notice" data-i18n="dlDisabled" hidden></p>
+
+      <div class="lib-grid">
+        <form id="dl-publish" class="card lib-card">
+          <h2 data-i18n="dlPublishTitle">Новая версия эталона</h2>
+          <p class="muted small" data-i18n="dlPublishHint"></p>
+          <div class="publish-row">
+            <label><span data-i18n="imgLabel">Версия</span><input id="dl-label" class="mono" maxlength="40" required></label>
+            <label><span data-i18n="dlComment">Что изменилось</span><input id="dl-comment" maxlength="200"></label>
+            <button type="submit" id="dl-publish-button" data-i18n="imgPublish">Опубликовать</button>
+          </div>
+          <p id="dl-publish-error" class="error small" hidden></p>
+          <div class="master-row spaced-top">
+            <span id="dl-rollback-text" class="muted small"></span>
+            <button type="button" id="dl-rollback" class="ghost" data-i18n="dlRollback">Откатить</button>
+          </div>
+        </form>
+        <div class="card lib-card">
+          <h2 data-i18n="dlMasterTitle">Режим мастера: правка эталона</h2>
+          <p class="muted small" data-i18n="dlMasterHint"></p>
+          <div id="dl-master"></div>
+        </div>
+      </div>
+
+      <form id="dl-add" class="card lib-card spaced-card">
+        <h2 data-i18n="dlAddTitle">Новый бездисковый ПК</h2>
+        <p class="muted small" data-i18n="dlAddHint"></p>
+        <div class="publish-row">
+          <label><span>MAC</span><input id="dl-add-mac" class="mono" maxlength="17" placeholder="aa:bb:cc:dd:ee:ff" required></label>
+          <label><span data-i18n="dlAddNumber">Номер места</span><input id="dl-add-number" type="number" min="1" max="9999"></label>
+          <label><span data-i18n="colName">Имя</span><input id="dl-add-name" maxlength="64"></label>
+          <button type="submit" data-i18n="dlAddButton">Добавить</button>
+        </div>
+        <p id="dl-add-result" class="small" hidden></p>
+      </form>
+
+      <div class="table-wrap spaced">
+        <h2 class="table-title" data-i18n="dlSeats">Личные диски мест</h2>
+        <table>
+          <thead>
+            <tr>
+              <th data-i18n="dlSeat">Место</th>
+              <th data-i18n="colName">ПК</th>
+              <th data-i18n="dlDiskVersion">Версия диска</th>
+              <th data-i18n="colStatus">Статус</th>
+              <th data-i18n="dlBoots">Загрузок</th>
+              <th data-i18n="dlLastBoot">Последняя загрузка</th>
+            </tr>
+          </thead>
+          <tbody id="dl-seat-rows"></tbody>
+        </table>
+        <p id="dl-seats-empty" class="muted empty" data-i18n="dlSeatsEmpty" hidden></p>
+      </div>
+
+      <div class="table-wrap">
+        <h2 class="table-title" data-i18n="dlVersions">Версии эталона</h2>
+        <table>
+          <thead>
+            <tr>
+              <th data-i18n="imgLabel">Версия</th>
+              <th data-i18n="colStatus">Статус</th>
+              <th data-i18n="dlComment">Что изменилось</th>
+              <th data-i18n="dlPublished">Опубликована</th>
+            </tr>
+          </thead>
+          <tbody id="dl-version-rows"></tbody>
+        </table>
+        <p id="dl-versions-empty" class="muted empty" data-i18n="dlVersionsEmpty" hidden></p>
       </div>
     </section>
 

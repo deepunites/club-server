@@ -112,6 +112,76 @@ public sealed class MachineRepository(NpgsqlDataSource db)
         return (await FindAsync(id))!;
     }
 
+    /// <summary>HWID заготовки, добавленной в панели по MAC: настоящий HWID придёт с первой регистрацией помощника.</summary>
+    public const string PlaceholderPrefix = "mac:";
+
+    public enum AddResult
+    {
+        Added,
+        NumberTaken,
+        MacTaken,
+    }
+
+    /// <summary>
+    /// Машина по MAC из панели (новый бездисковый ПК без своей Windows: помощнику негде зарегистрироваться, пока
+    /// ПК не загрузится по сети). Сразу одобрена; помощник из эталона потом «усыновит» эту запись по MAC.
+    /// </summary>
+    public async Task<(AddResult Result, MachineRow? Machine)> AddByMacAsync(string mac, int? number, string? name, string bootMode)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        await using var tx = await c.BeginTransactionAsync();
+        await c.ExecuteAsync("LOCK TABLE machines IN SHARE ROW EXCLUSIVE MODE", transaction: tx);
+        if (await c.ExecuteScalarAsync<bool>("SELECT EXISTS (SELECT 1 FROM machines WHERE @mac = ANY(mac_addresses))", new { mac }, tx))
+        {
+            return (AddResult.MacTaken, null);
+        }
+
+        var seat = number ?? await c.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(number), 0) + 1 FROM machines", transaction: tx);
+        if (await c.ExecuteScalarAsync<bool>("SELECT EXISTS (SELECT 1 FROM machines WHERE number = @seat)", new { seat }, tx))
+        {
+            return (AddResult.NumberTaken, null);
+        }
+
+        var id = Guid.NewGuid();
+        await c.ExecuteAsync(
+            """
+            INSERT INTO machines (id, number, name, zone_id, hwid, hostname, mac_addresses, ip_address, approved, maintenance,
+                                  helper_version, os_version, boot_mode)
+            VALUES (@id, @seat, @name, 'standard', @hwid, '', @macs, '', true, false, '', NULL, @bootMode)
+            """,
+            new { id, seat, name = string.IsNullOrWhiteSpace(name) ? $"PC-{seat:D2}" : name.Trim(), hwid = PlaceholderPrefix + mac, macs = new[] { mac }, bootMode },
+            tx);
+        await tx.CommitAsync();
+        return (AddResult.Added, await FindAsync(id));
+    }
+
+    /// <summary>Заготовка из панели с одним из этих MAC (ещё без настоящего HWID).</summary>
+    public async Task<MachineRow?> FindPlaceholderAsync(IReadOnlyList<string> macs)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        return await c.QuerySingleOrDefaultAsync<MachineRow>(
+            $"SELECT {Columns} FROM machines WHERE hwid LIKE 'mac:%' AND mac_addresses && @macs ORDER BY number LIMIT 1", new { macs = macs.ToArray() });
+    }
+
+    /// <summary>
+    /// Первая регистрация помощника на ПК, добавленном по MAC: заготовка получает настоящий HWID и факты; номер места,
+    /// имя, режим загрузки и одобрение остаются. MAC из панели — первым (по нему резервация Kea).
+    /// </summary>
+    public async Task<MachineRow> AdoptAsync(Guid id, MachineRegistration registration)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        await c.ExecuteAsync(
+            """
+            UPDATE machines SET hwid = @Hwid, hostname = @Hostname, ip_address = @IpAddress, helper_version = @HelperVersion,
+                                os_version = @OsVersion, credentials_version = credentials_version + 1,
+                                mac_addresses = ARRAY(SELECT m FROM unnest(mac_addresses || @macs) WITH ORDINALITY AS u(m, o) GROUP BY m ORDER BY min(o))
+            WHERE id = @id
+            """,
+            new { id, registration.Hwid, registration.Hostname, registration.IpAddress, registration.HelperVersion, registration.OsVersion, macs = registration.MacAddresses.ToArray() });
+        await c.ExecuteAsync("DELETE FROM machine_refresh_tokens WHERE machine_id = @id", new { id });
+        return (await FindAsync(id))!;
+    }
+
     /// <summary>Повторная регистрация известной машины (переустановка помощника): прежние токены отзываются.</summary>
     public async Task<MachineRow> ReregisterAsync(Guid id, MachineRegistration registration)
     {

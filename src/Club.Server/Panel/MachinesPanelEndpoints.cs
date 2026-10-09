@@ -15,7 +15,7 @@ public sealed record MachineView(
     Guid Id, int Number, string Name, string Zone, string Status, string Hostname, string? IpAddress,
     IReadOnlyList<string> MacAddresses, string? HelperVersion, string? OsVersion, DateTimeOffset? LastSeenAt,
     DateTimeOffset? BootTime, MachineVolumeView Volume, DateTimeOffset RegisteredAt, string? ImageVersion, ReimageView? Reimage,
-    Diskless.SecureBootReport? SecureBoot = null, string? MasterState = null);
+    Diskless.SecureBootReport? SecureBoot = null, string? MasterState = null, string BootMode = "local");
 
 /// <summary>
 /// Перезаливка машины (последнее задание, если оно не закрыто или закрыто меньше суток назад). <c>state</c>:
@@ -167,7 +167,8 @@ public static class MachinesPanelEndpoints
                     job.DiskTouched, job.PxeArmed, job.Attempts, job.UpdatedAt)
                 : null,
             Imaging.ReimageService.SecureBoot(m),
-            m.MasterState is "mounted" or "mounting" or "failed" ? m.MasterState : null);
+            m.MasterState is "mounted" or "mounting" or "failed" ? m.MasterState : null,
+            m.BootMode);
     }
 
     /// <summary>
