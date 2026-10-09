@@ -37,6 +37,9 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
     private readonly Dictionary<int, JsonObject> _auths = new();
     private readonly Dictionary<int, JsonObject> _initiators = new();
     private readonly List<(string Initiator, string Target)> _sessions = [];
+    private readonly Dictionary<string, int> _snapshotSeq = new();
+    private readonly Dictionary<string, int> _rollbacks = new();
+    private int _nextSnapshotSeq = 1;
     private readonly ConcurrentDictionary<string, int> _dropAfterExecute = new();
     private int _nextId = 1;
 
@@ -109,6 +112,15 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
         lock (_lock)
         {
             _sessions.Add((initiator, targetName));
+        }
+    }
+
+    /// <summary>Сколько раз том откатывали к снапшоту (сброс личного диска места).</summary>
+    public int Rollbacks(string dataset)
+    {
+        lock (_lock)
+        {
+            return _rollbacks.GetValueOrDefault(dataset);
         }
     }
 
@@ -269,6 +281,8 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
                     return CreateSnapshot(args[0]!.AsObject());
                 case "pool.snapshot.clone":
                     return Clone(args[0]!.AsObject());
+                case "pool.snapshot.rollback":
+                    return Rollback(args[0]!.GetValue<string>());
                 case "pool.snapshot.delete":
                     return DeleteSnapshot(args[0]!.GetValue<string>(), args.Count > 1 ? args[1]!.AsObject() : new JsonObject());
 
@@ -436,7 +450,27 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
 
         var snapshot = new JsonObject { ["id"] = id, ["name"] = id, ["dataset"] = dataset, ["snapshot_name"] = name, ["properties"] = properties };
         _snapshots[id] = snapshot;
+        _snapshotSeq[id] = _nextSnapshotSeq++;
         return snapshot.DeepClone();
+    }
+
+    /// <summary>Как ZFS: откат только к последнему снапшоту тома (без recursive); настройки iSCSI не трогает.</summary>
+    private JsonNode? Rollback(string id)
+    {
+        if (!_snapshots.TryGetValue(id, out var snapshot))
+        {
+            throw NotFound(id);
+        }
+
+        var dataset = snapshot["dataset"]!.GetValue<string>();
+        var seq = _snapshotSeq.GetValueOrDefault(id);
+        if (_snapshots.Values.Any(s => s["dataset"]!.GetValue<string>() == dataset && _snapshotSeq.GetValueOrDefault(s["id"]!.GetValue<string>()) > seq))
+        {
+            throw CallError(17, "EEXIST", $"cannot rollback to '{id}': more recent snapshots or bookmarks exist");
+        }
+
+        _rollbacks[dataset] = _rollbacks.GetValueOrDefault(dataset) + 1;
+        return null;
     }
 
     private JsonNode Clone(JsonObject data)

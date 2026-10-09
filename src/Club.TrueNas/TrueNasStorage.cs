@@ -192,6 +192,55 @@ public sealed class TrueNasStorage(TrueNasClient client)
     }
 
     /// <summary>
+    /// Записываемый клон (личный диск места бездиска): как <see cref="EnsureReadOnlyCloneAsync"/>, но без readonly.
+    /// Клон с другим origin — ошибка: пересоздавать его (удалять вместе с таргетом) решает вызывающий.
+    /// </summary>
+    public async Task<ZfsDataset> EnsureWritableCloneAsync(string snapshot, string target, IReadOnlyDictionary<string, string> labels, CancellationToken ct = default)
+    {
+        var clone = await GetDatasetAsync(target, ct);
+        if (clone is null)
+        {
+            TrueNasRpcException? failure = null;
+            try
+            {
+                await client.CallAsync("pool.snapshot.clone", [new { snapshot, dataset_dst = target, dataset_properties = labels }], ct);
+            }
+            catch (TrueNasRpcException ex)
+            {
+                // Решение принимается ниже по факту: объект есть — цель достигнута.
+                failure = ex;
+            }
+
+            clone = await GetDatasetAsync(target, ct) ?? throw new InvalidOperationException($"clone {target} was not created", failure);
+        }
+
+        if (clone.Origin != snapshot)
+        {
+            throw new InvalidOperationException($"{target} exists but is not a clone of {snapshot} (origin '{clone.Origin}')");
+        }
+
+        if (clone.ReadOnly)
+        {
+            throw new InvalidOperationException($"{target} is read-only; a seat disk must be writable");
+        }
+
+        var missing = labels.Where(l => !clone.Labels.TryGetValue(l.Key, out var v) || v != l.Value).ToDictionary();
+        if (missing.Count > 0)
+        {
+            await SetLabelsAsync(target, missing, ct);
+        }
+
+        return await GetDatasetAsync(target, ct) ?? throw new InvalidOperationException($"clone {target} disappeared");
+    }
+
+    /// <summary>
+    /// Откат zvol к его снапшоту — сброс личного диска места перед загрузкой. Настройки iSCSI не меняются (таргет,
+    /// экстент и LUN те же), меняется только содержимое тома. Снапшот должен быть последним у тома.
+    /// </summary>
+    public async Task RollbackSnapshotAsync(string snapshotId, CancellationToken ct = default) =>
+        await client.CallAsync("pool.snapshot.rollback", [snapshotId, new { }], ct);
+
+    /// <summary>
     /// Удаление снапшота всегда с <c>defer=true</c>: без клонов ZFS удаляет сразу, с клонами — сам, когда уйдёт последний
     /// клон. Так не нужно полагаться на свойство <c>clones</c> (его формат на стенде не проверен).
     /// </summary>
