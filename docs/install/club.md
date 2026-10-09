@@ -82,8 +82,11 @@
 1. [удалённо] В TrueNAS: файловые системы `ssd/club/diskless` и `ssd/club/diskless/seats`, zvol эталона
    `ssd/club/diskless/win11` (sparse, 64 ГиБ, volblocksize 16K). В настройках сервера `Diskless__Enabled=true`
    (и `Diskless__ImageZvol`/`SeatsParent`, если пул называется не `ssd`), перезапуск службы.
-2. [удалённо] Установщик Windows для режима мастера: из ISO Windows 11 (`win-noprompt.py` не нужен — wimboot)
-   скопировать `boot/bcd`, `boot/boot.sdi`, `sources/boot.wim` в `/srv/club/pxe/winsetup/` на сервере.
+2. [удалённо] Установщик Windows для режима мастера. ISO Windows 11 — прямо на сервер (ссылка Microsoft
+   действует 24 ч; страница загрузки из сети клуба может не открываться — ссылку берём с телефона через мобильный
+   интернет): `wget -c -O ~/Win11.iso '<ссылка>'`, затем
+   `sudo sh ~/scripts/server/extract-winsetup.sh ~/Win11.iso` — `boot/bcd`, `boot/boot.sdi`, `sources/boot.wim` в
+   `/srv/club/pxe/winsetup/` (wimboot грузит установщик сам, `win-noprompt.py` здесь не нужен).
 3. [удалённо] Kea включается для пилота (`docs/network.md`): резервации мест, классы PXE в конфиге.
 4. [руки] BIOS бездискового ПК: UEFI, сетевая загрузка IPv4 первой, **Secure Boot выключен**, TPM не нужен.
 5. [удалённо] Панель → «Бездиск» → «Новый бездисковый ПК»: MAC сетевой карты (из BIOS или с экрана загрузки по
@@ -101,3 +104,15 @@
 
 Дальше: гибридные ПК (зоны 3–5) — помощник и библиотека (`docs/helper.md`); бездисковые (зоны 1–2) — после кода
 полного бездиска, пилот на 2–3 ПК, затем Kea как DHCP клуба.
+
+## Приложение: BIOS клиентских ПК [руки]
+
+| Зона | Платы | Что выставить |
+|---|---|---|
+| 1–2 (бездиск) | H410/H510 (Gigabyte, MSI, Colorful), A520 | Boot mode **UEFI** (CSM выкл.); **Network Stack / PXE IPv4 — вкл.**, IPv6 PXE — выкл.; первым в Boot Order — **UEFI: PXE IPv4 (сетевая карта)**; **Secure Boot — выкл.**; Fast Boot — выкл.; Wake on LAN — вкл. (по желанию); энергосбережение сети (ErP/EuP) — выкл. |
+| 3–5 и новые (гибрид) | H510/B560, Z490, B450 | UEFI, **TPM (PTT/fTPM) — вкл.**, **Secure Boot — вкл.** (FACEIT, Valorant); сеть в загрузке — после диска (для перезаливки по PXE включается из панели) |
+
+Где искать: Gigabyte — Settings → IO Ports → Network Stack Configuration; Boot → CSM Support. MSI — Settings →
+Advanced → Integrated Peripherals → Network Stack; Boot → Boot mode select. Colorful — Advanced → Network Stack.
+Для бездисковых ПК записать **MAC** с экрана загрузки по сети (iPXE показывает его первой строкой) или из BIOS —
+по нему ПК добавляется в панели («Бездиск» → «Новый бездисковый ПК»).
