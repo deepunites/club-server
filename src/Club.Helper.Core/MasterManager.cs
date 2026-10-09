@@ -13,11 +13,19 @@ public sealed class MasterManager(IWindowsStorage storage, HelperOptions options
     /// <summary>Таргет мастер-тома на сервере называется <c>club-master</c>; по нему находится и после перезапуска помощника.</summary>
     public const string TargetMarker = ":club-master";
 
+    /// <summary>
+    /// Состояние «неизвестно»: мастер-том не назначен, а подключён ли он, прочитать не удалось (или в этом такте его не
+    /// опрашивали, см. <see cref="HelperLoop"/>). Сервер прежнее состояние не меняет (docs/diskless-api.yaml, MasterReport);
+    /// серверы, где unknown ещё нет в контракте, пропускают его как незнакомое — с тем же итогом.
+    /// </summary>
+    public const string UnknownState = "unknown";
+
     public async Task<MasterReport?> ApplyAsync(MasterAssignment? desired, bool known, CancellationToken ct)
     {
+        List<string>? connected = null;
         try
         {
-            var connected = (await storage.ConnectedTargetsAsync(ct)).Where(t => t.EndsWith(TargetMarker, StringComparison.Ordinal)).ToList();
+            connected = (await storage.ConnectedTargetsAsync(ct)).Where(t => t.EndsWith(TargetMarker, StringComparison.Ordinal)).ToList();
             if (desired is null)
             {
                 if (!known)
@@ -39,7 +47,12 @@ public sealed class MasterManager(IWindowsStorage storage, HelperOptions options
         catch (Exception ex) when (ex is InvalidOperationException or IOException or TimeoutException)
         {
             logger.LogWarning(ex, "Master volume: {Reason}", ex.Message);
-            return new MasterReport("failed", desired?.TargetIqn, desired?.DriveLetter, ex.Message);
+
+            // Не назначен и сессии не прочитались — подключён ли том, неизвестно: failed без таргета был бы ложной ошибкой
+            // у любого ПК (и затёр бы mounted на сервере), отчёт без master — ложным «не подключён».
+            return desired is null && connected is null
+                ? new MasterReport(UnknownState, Error: ex.Message)
+                : new MasterReport("failed", desired?.TargetIqn, desired?.DriveLetter, ex.Message);
         }
     }
 

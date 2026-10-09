@@ -108,7 +108,8 @@ public sealed class HelperEndToEndTests : IAsyncLifetime
         _processes.Running['G'] = [@"G:\Riot Games\VALORANT\live\VALORANT.exe"];
         await PublishAsync("v3");
         await helper.TickAsync(CancellationToken.None);
-        Assert.Equal("switchPending", (await MachineAsync()).VolumeState);
+        machine = await MachineAsync();
+        Assert.Equal(("switchPending", "v2"), (machine.VolumeState, machine.VolumeVersion)); // ПК ещё на v2 — панель считает его там
         Assert.True(_windows.Sessions.ContainsKey($"{Basename}:games-v2"));
 
         _processes.Running.Clear();
@@ -116,6 +117,223 @@ public sealed class HelperEndToEndTests : IAsyncLifetime
         machine = await MachineAsync();
         Assert.Equal(("mounted", "v3"), (machine.VolumeState, machine.VolumeVersion));
         Assert.False(_windows.EverWritableOnline);
+    }
+
+    /// <summary>Считает отчёты помощника (<c>PUT …/status</c>), принятые сервером.</summary>
+    private sealed class ReportCounter : DelegatingHandler
+    {
+        public int Reports { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var response = await base.SendAsync(request, cancellationToken);
+            if (request.Method == HttpMethod.Put && request.RequestUri!.AbsolutePath.EndsWith("/status", StringComparison.Ordinal) && response.IsSuccessStatusCode)
+            {
+                Reports++;
+            }
+
+            return response;
+        }
+    }
+
+    [Fact]
+    public async Task Open_files_on_the_old_version_keep_the_pc_reporting_switch_pending_every_tick()
+    {
+        // Стенд 2026-10-02, помощник 1.4.1: Windows не завершала сессию старой версии (на G: открыт проводник / Steam) —
+        // такт падал целиком, отчётов не было, ПК в панели выглядел выключенным.
+        var counter = new ReportCounter();
+        var helper = Helper(_server.CreateDefaultClient(counter));
+        await PublishAsync("v1");
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal("mounted", helper.LastReport!.State);
+
+        _windows.BusySessions[$"{Basename}:games-v1"] = FakeWindowsStorage.SessionBusy;
+        await PublishAsync("v2");
+        await helper.TickAsync(CancellationToken.None);
+        var machine = await MachineAsync();
+        Assert.Equal(("switchPending", $"{Basename}:games-v1", "v1"), (machine.VolumeState, machine.VolumeIqn, machine.VolumeVersion));
+        Assert.Equal($"new version v2 waits: volume in use (open files on G:): {FakeWindowsStorage.SessionBusy}", machine.VolumeError);
+
+        var before = counter.Reports;
+        await helper.TickAsync(CancellationToken.None);
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(before + 2, counter.Reports); // отчёт каждый такт
+        Assert.Equal("switchPending", (await MachineAsync()).VolumeState);
+        Assert.True(_windows.Sessions.ContainsKey($"{Basename}:games-v1"));
+        Assert.False(_windows.Sessions.ContainsKey($"{Basename}:games-v2"));
+
+        _windows.BusySessions.Clear(); // проводник закрыли
+        await helper.TickAsync(CancellationToken.None);
+        machine = await MachineAsync();
+        Assert.Equal(("mounted", "v2", (string?)null), (machine.VolumeState, machine.VolumeVersion, machine.VolumeError));
+        Assert.False(_windows.Sessions.ContainsKey($"{Basename}:games-v1"));
+        Assert.False(_windows.EverWritableOnline);
+    }
+
+    [Fact]
+    public async Task Unexpected_failure_while_applying_the_volume_is_reported_as_failed()
+    {
+        var counter = new ReportCounter();
+        var helper = Helper(_server.CreateDefaultClient(counter));
+        await PublishAsync("v1");
+        await helper.TickAsync(CancellationToken.None);
+
+        _processes.Error = new UnauthorizedAccessException("Access is denied"); // опрос процессов при смене версии упал
+        await PublishAsync("v2");
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal("failed", helper.LastReport!.State);
+        var machine = await MachineAsync();
+        Assert.Equal(("failed", $"{Basename}:games-v1", (string?)null), (machine.VolumeState, machine.VolumeIqn, machine.VolumeVersion));
+        Assert.Equal("library v2: Access is denied", machine.VolumeError);
+        Assert.True(_windows.Sessions.ContainsKey($"{Basename}:games-v1")); // том не тронут
+
+        var before = counter.Reports;
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(before + 1, counter.Reports);
+
+        _processes.Error = null;
+        await helper.TickAsync(CancellationToken.None);
+        machine = await MachineAsync();
+        Assert.Equal(("mounted", "v2"), (machine.VolumeState, machine.VolumeVersion));
+    }
+
+    [Fact]
+    public async Task Unexpected_failure_of_the_master_volume_is_reported_as_failed()
+    {
+        var helper = Helper();
+        await helper.TickAsync(CancellationToken.None);
+        var machine = await MachineAsync();
+        await _server.Services.GetRequiredService<MasterEditor>().RequestOpenAsync(machine.Id, "test");
+        await StorageWorker.RunOnceAsync(_publisher, _library, reconcile: false, TimeProvider.System, CancellationToken.None);
+        var masterIqn = $"{Basename}:club-master";
+
+        // Исключение не из тех, что MasterManager ждёт (InvalidOperation, IO, Timeout): раньше оно роняло такт без отчёта.
+        _windows.ConnectChapError = new UnauthorizedAccessException("Access is denied");
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(new MasterReport("failed", masterIqn, "M", "Access is denied"), helper.LastMasterReport);
+        machine = await MachineAsync();
+        Assert.Equal(("failed", "Access is denied", "none"), (machine.MasterState, machine.MasterError, machine.VolumeState));
+
+        _windows.ConnectChapError = null;
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal("mounted", (await MachineAsync()).MasterState);
+        Assert.True(_windows.Sessions[masterIqn] is { ReadOnly: false, Offline: false, Letter: 'M' });
+    }
+
+    [Fact]
+    public async Task Helper_restart_that_cannot_read_iscsi_sessions_keeps_the_master_state_on_the_server()
+    {
+        // Мастер-том открыт и подключён на ПК; администратор закрывает правку, а служба помощника в это время
+        // перезапустилась, и первый же опрос сессий падает. Пустой отчёт о мастер-томе сервер прочёл бы как «не
+        // подключён» и сбросил бы mounted, хотя том, возможно, ещё на ПК.
+        var helper = Helper();
+        await helper.TickAsync(CancellationToken.None);
+        var machine = await MachineAsync();
+        var editor = _server.Services.GetRequiredService<MasterEditor>();
+        await editor.RequestOpenAsync(machine.Id, "test");
+        await StorageWorker.RunOnceAsync(_publisher, _library, reconcile: false, TimeProvider.System, CancellationToken.None);
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal("mounted", (await MachineAsync()).MasterState);
+        _nas.AddSession("iqn.1991-05.com.microsoft:pc-test", "club-master");
+        await editor.RequestCloseAsync(force: false, "test");
+        await StorageWorker.RunOnceAsync(_publisher, _library, reconcile: false, TimeProvider.System, CancellationToken.None);
+
+        var restarted = Helper();
+        _windows.ConnectedTargetsError = new UnauthorizedAccessException("Access is denied");
+        await restarted.TickAsync(CancellationToken.None);
+        Assert.Equal(new MasterReport(MasterManager.UnknownState, Error: "Access is denied"), restarted.LastMasterReport);
+        machine = await MachineAsync();
+        Assert.Equal(("mounted", "failed"), (machine.MasterState, machine.VolumeState)); // отчёт ушёл, мастер-том не сброшен
+
+        // То же при таймауте PowerShell: том уже упёрся в него, мастер-том в этом такте не опрашивается — unknown, а не
+        // failed без таргета.
+        _windows.ConnectedTargetsError = new TimeoutException("PowerShell did not finish in 120 s");
+        var timedOut = Helper();
+        await timedOut.TickAsync(CancellationToken.None);
+        Assert.Equal(MasterManager.UnknownState, timedOut.LastMasterReport!.State);
+        Assert.Equal("mounted", (await MachineAsync()).MasterState);
+
+        _windows.ConnectedTargetsError = null;
+        await restarted.TickAsync(CancellationToken.None);
+        Assert.False(_windows.Sessions.ContainsKey($"{Basename}:club-master")); // правка закрыта — сбросил кэш и отключил
+        Assert.Equal("none", (await MachineAsync()).MasterState);
+    }
+
+    [Fact]
+    public async Task Failure_after_an_unknown_master_report_does_not_reset_the_master_state()
+    {
+        // Мастер-том подключён; правку закрывают, а Windows не отвечает: отчёт unknown, том не отключён. Следующий сбой —
+        // уже не таймаут, и последний отчёт — unknown: отчёт без master сервер прочёл бы как «не подключён» и сбросил бы
+        // mounted у ПК, где том всё ещё подключён. Опора — последний известный ответ (mounted): failed с таргетом.
+        var helper = Helper();
+        await helper.TickAsync(CancellationToken.None);
+        var machine = await MachineAsync();
+        var editor = _server.Services.GetRequiredService<MasterEditor>();
+        await editor.RequestOpenAsync(machine.Id, "test");
+        await StorageWorker.RunOnceAsync(_publisher, _library, reconcile: false, TimeProvider.System, CancellationToken.None);
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal("mounted", (await MachineAsync()).MasterState);
+        var masterIqn = $"{Basename}:club-master";
+        _nas.AddSession("iqn.1991-05.com.microsoft:pc-test", "club-master");
+        await editor.RequestCloseAsync(force: false, "test");
+        await StorageWorker.RunOnceAsync(_publisher, _library, reconcile: false, TimeProvider.System, CancellationToken.None);
+
+        _windows.ConnectedTargetsError = new TimeoutException("PowerShell did not finish in 120 s");
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(MasterManager.UnknownState, helper.LastMasterReport!.State);
+        Assert.Equal("mounted", (await MachineAsync()).MasterState);
+        Assert.True(_windows.Sessions.ContainsKey(masterIqn));
+
+        _windows.ConnectedTargetsError = new UnauthorizedAccessException("Access is denied");
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(new MasterReport("failed", masterIqn, "M", "Access is denied"), helper.LastMasterReport);
+        machine = await MachineAsync();
+        Assert.Equal(("failed", "Access is denied"), (machine.MasterState, machine.MasterError));
+
+        _windows.ConnectedTargetsError = null;
+        await helper.TickAsync(CancellationToken.None);
+        Assert.False(_windows.Sessions.ContainsKey(masterIqn)); // правка закрыта — сбросил кэш и отключил
+        Assert.Equal("none", (await MachineAsync()).MasterState);
+    }
+
+    [Fact]
+    public async Task Windows_timeout_on_the_volume_skips_the_master_query_for_that_tick()
+    {
+        // Таймаут PowerShell (120 с) на томе: опрос сессий ради мастер-тома почти наверняка ждал бы ещё столько же, и отчёт
+        // вместе с ним. В этом такте мастер-том не опрашивается: master=unknown, сервер прежнее состояние не меняет.
+        var helper = Helper();
+        await PublishAsync("v1");
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal("mounted", helper.LastReport!.State);
+        var v1 = $"{Basename}:games-v1";
+
+        // Сбой ушёл из VolumeManager исключением (опрос сессий): один опрос за такт, а не два.
+        _windows.ConnectedTargetsError = new TimeoutException("PowerShell did not finish in 120 s");
+        var calls = _windows.ConnectedTargetsCalls;
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(calls + 1, _windows.ConnectedTargetsCalls);
+        Assert.Equal(new MasterReport(MasterManager.UnknownState, Error: "not checked: timeout"), helper.LastMasterReport);
+        var machine = await MachineAsync();
+        Assert.Equal(("failed", "v1"), (machine.VolumeState, machine.VolumeVersion));
+
+        // Сбой пойман в VolumeManager (поиск диска текущей версии): том остаётся, мастер-том тоже не опрашивается.
+        _windows.ConnectedTargetsError = null;
+        _windows.FindDiskErrors[v1] = new TimeoutException("PowerShell did not finish in 120 s");
+        calls = _windows.ConnectedTargetsCalls;
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(calls + 1, _windows.ConnectedTargetsCalls);
+        Assert.Equal(MasterManager.UnknownState, helper.LastMasterReport!.State);
+        machine = await MachineAsync();
+        Assert.Equal(("failed", "v1", "not checked: timeout"), (machine.VolumeState, machine.VolumeVersion, machine.VolumeError));
+        Assert.True(_windows.Sessions[v1] is { ReadOnly: true, Offline: false, Letter: 'G' });
+
+        // Windows отвечает — мастер-том снова опрашивается.
+        _windows.FindDiskErrors.Clear();
+        calls = _windows.ConnectedTargetsCalls;
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(calls + 2, _windows.ConnectedTargetsCalls);
+        Assert.Null(helper.LastMasterReport); // мастер-том не назначен и не подключён
+        Assert.Equal("mounted", (await MachineAsync()).VolumeState);
     }
 
     [Fact]

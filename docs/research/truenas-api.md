@@ -325,6 +325,27 @@ AAL1 (по умолчанию): сессия по ключу живёт до 30 
 - SAN policy Windows: `onlineAll` — все новые диски online и read/write; `offlineShared` — iSCSI считается shared bus, диск остаётся offline; `offlineAll` — offline всё, кроме загрузочного. [ПОДТВЕРЖДЕНО] [san](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/san). Каждая версия (новый extent) получит новые NAA и serial, поэтому для Windows это новый диск, к которому применяется SAN policy. [ГИПОТЕЗА] согласуется с кодом (`naa` не задаётся, `serial` уникален)
 - Если extent R/W, а zvol R/O, по комментарию в коде «Windows clients seem to not handle this very well». UI-док про LUN RPM: «Do not change this setting when using Windows as the initiator». [ПОДТВЕРЖДЕНО] [dataset.py#L945-L956](https://github.com/truenas/middleware/blob/release/25.04.2.6/src/middlewared/middlewared/plugins/pool_/dataset.py#L945-L956)
 
+#### 8.6.1 «FLUSH bio failed: -5» на read-only томах
+
+Симптом (стенд 2026-10-02, TrueNAS 25.10.7): в консоли TrueNAS и в `dmesg` при подключении ПК к тому версии
+библиотеки — строки `dev_vdisk: … FLUSH bio failed: -5`. Это известный шум: данные не под угрозой, чтение не
+затронуто. Механизм [ГИПОТЕЗА] — подтверждено кодом, без запуска:
+
+1. `scst.conf.mako` (middleware, `etc_files`) для устройств `vdisk_blockio` не пишет ни `nv_cache`, ни
+   `write_through`, поэтому SCST сообщает в MODE SENSE (Caching page) WCE=1 — и для экстента с `read_only 1` тоже.
+2. Windows (`disk.sys`) при включённом кэше записи шлёт SYNCHRONIZE CACHE — при запуске диска и при сбросе кэша.
+3. SCST (`scst_vdisk.c`, `vdisk_blockio_flush`) отправляет в zvol пустой bio с флагом PREFLUSH.
+4. OpenZFS 2.3.9 (`zvol_os.c`, `zvol_request_impl`) считает такой bio записью, а zvol с `readonly=on` открыт как
+   `ZVOL_RDONLY` → `EROFS` → блочный слой отдаёт `BLK_STS_IOERR` → SCST пишет «FLUSH bio failed: -5» (`-EIO`).
+5. Инициатору SCST отвечает MEDIUM ERROR (sense 03/03/00). Windows на это может записать в журнал System событие
+   Event ID 7 (источник disk, «has a bad block») — по одному на запуск диска; тоже шум.
+
+Из нашего API это не исправить: `iscsi.extent.create` с `ro=true` сам ставит zvol `readonly=on` (§8.2), а
+`nv_cache`/`write_through` у экстента в API нет. Рекомендуется тикет в TrueNAS: для `ro`-экстентов не объявлять
+кэш записи (например, `write_through 1`, тогда WCE=0 и Windows FLUSH не шлёт) или не превращать PREFLUSH на
+read-only zvol в ошибку [ГИПОТЕЗА]. Снимать `readonly` с клона ради тишины в консоли не стоит: это второй уровень
+защиты тома версии от записи.
+
 ### 8.7 Идемпотентность iSCSI
 Естественные ключи: `extent.name`, `extent.serial`, `target.name`, пары (target, extent) и (target, lunid). Повторный create с тем же ключом падает с ValidationError («must be unique», «already exists»). Методы многошаговые и не транзакционные: `extent.create` меняет ZFS до вставки в БД; `target.create` пишет таргет, потом groups (при исключении откатывает запись, при падении процесса — нет); `target.delete` — серия удалений плюс `scstadmin -rem_target`. [ПОДТВЕРЖДЕНО] [targets.py#L109-L147](https://github.com/truenas/middleware/blob/release/25.04.2.6/src/middlewared/middlewared/plugins/iscsi_/targets.py#L109-L147)
 

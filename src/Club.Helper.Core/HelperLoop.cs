@@ -29,6 +29,11 @@ public sealed class InMemoryAssignmentCache : IAssignmentCache
 /// <summary>
 /// Один такт помощника: привести том к назначению → сообщить факты серверу → в ответе узнать актуальное назначение.
 /// Сервер недоступен — действует последнее известное назначение (из памяти или с диска), том не отключается.
+/// Сбой применения тома или мастер-тома отчёт не отменяет: уходит <c>failed</c> с причиной. Иначе ПК в панели выглядит
+/// выключенным, а сервер не узнаёт ни причину, ни новое назначение (стенд 2026-10-02, помощник 1.4.1: отказ Windows
+/// отключить занятый том старой версии ронял такт целиком, и отчётов не было, пока том не освободился). Windows не
+/// ответила на том (таймаут PowerShell, 120 с) — мастер-том в этом такте не опрашивается (unknown), чтобы отчёт не ждал
+/// ещё столько же.
 /// </summary>
 public sealed class HelperLoop(
     DisklessApiClient api, VolumeManager volumes, IAssignmentCache cache, IMachineIdentity identity, HelperOptions options, ILogger<HelperLoop> logger,
@@ -39,6 +44,22 @@ public sealed class HelperLoop(
     private MasterAssignment? _master;
     private bool _masterKnown;
     private string? _contentsReportedFor;
+    private string? _volumeFailure;
+    private string? _masterFailure;
+
+    /// <summary>MasterManager после запуска службы хоть раз ответил: известно, подключён ли мастер-том на ПК.</summary>
+    private bool _masterSeen;
+
+    /// <summary>
+    /// Последний ответ MasterManager, кроме unknown (<c>null</c> — мастер-том не подключён): при сбое отчёт опирается на
+    /// него, а не на <see cref="LastMasterReport"/>, где может быть unknown или failed, составленный здесь же.
+    /// </summary>
+    private MasterReport? _lastKnownMaster;
+
+    /// <summary>
+    /// В последнем применении тома Windows не ответила (таймаут PowerShell, 120 с): мастер-том в этом такте не опрашивается.
+    /// </summary>
+    private bool _windowsTimedOut;
 
     public MountedVolume? LastReport { get; private set; }
 
@@ -87,8 +108,53 @@ public sealed class HelperLoop(
 
     public MasterReport? LastMasterReport { get; private set; }
 
-    private async Task<MasterReport?> ApplyMasterAsync(CancellationToken ct) =>
-        LastMasterReport = masters is null ? null : await masters.ApplyAsync(_master, _masterKnown, ct);
+    private async Task<MasterReport?> ApplyMasterAsync(CancellationToken ct)
+    {
+        if (masters is null)
+        {
+            return LastMasterReport = null;
+        }
+
+        if (_windowsTimedOut)
+        {
+            // Том в этом такте упёрся в таймаут PowerShell: опрос сессий ради мастер-тома почти наверняка ждал бы ещё до
+            // 120 с, и отчёт вместе с ним. Мастер-том — в следующем такте, сейчас unknown: сервер прежнее состояние не
+            // меняет (DisklessEndpoints.StatusAsync → RecordMasterAsync с keepMaster).
+            logger.LogDebug("Master volume not checked this tick: Windows did not answer while applying the library volume");
+            return LastMasterReport = new MasterReport(MasterManager.UnknownState, Error: "not checked: timeout");
+        }
+
+        try
+        {
+            LastMasterReport = await masters.ApplyAsync(_master, _masterKnown, ct);
+            if (LastMasterReport?.State != MasterManager.UnknownState)
+            {
+                _lastKnownMaster = LastMasterReport;
+                _masterSeen = true;
+            }
+
+            _masterFailure = null;
+            return LastMasterReport;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            LogFailure(ref _masterFailure, ex, "Applying the master volume failed; reporting the failure");
+
+            // Как MasterManager при сбое: failed с назначенным таргетом. Не назначен, но по последнему известному ответу
+            // подключён, — тоже failed: отчёт без master сервер понял бы как «не подключён». Последний известный, а не
+            // последний отчёт: после unknown (сессии не прочитались) том мог остаться подключённым. Не назначен и с
+            // запуска службы ни разу не прочитан (первый такт после перезапуска) — неизвестно, подключён ли он на ПК:
+            // отчёт без master сервер прочёл бы как «не подключён» и сбросил бы master_state (например, mounted у ПК, где
+            // том ещё открыт), failed без таргета — ложная ошибка у любого ПК. Поэтому unknown: его сервер пропускает и
+            // прежнее не меняет (DisklessEndpoints.StatusAsync → RecordMasterAsync с keepMaster). Так же, если прошлый
+            // отчёт уже был unknown: состояние так и не прочитано. Не назначен, а последний опрос показал «не подключён»
+            // (или «none» — отключили сами), — сообщать не о чем.
+            return LastMasterReport = _master is { } m ? new MasterReport("failed", m.TargetIqn, m.DriveLetter, ex.Message)
+                : _lastKnownMaster is { State: not "none" } last ? new MasterReport("failed", last.TargetIqn, last.DriveLetter, ex.Message)
+                : !_masterSeen || LastMasterReport?.State == MasterManager.UnknownState ? new MasterReport(MasterManager.UnknownState, Error: ex.Message)
+                : null;
+        }
+    }
 
     private async Task LearnAssignmentAsync(CancellationToken ct)
     {
@@ -109,13 +175,41 @@ public sealed class HelperLoop(
 
     private async Task<MountedVolume> ApplyAsync(CancellationToken ct)
     {
+        _windowsTimedOut = false;
         if (!_known)
         {
             // Ни сервера, ни сохранённого назначения — ничего не трогаем (и ничего не отключаем).
             return LastReport = new MountedVolume("none", Error: "no assignment known yet");
         }
 
-        return LastReport = await volumes.ApplyAsync(_desired, ct);
+        try
+        {
+            LastReport = await volumes.ApplyAsync(_desired, ct);
+            _windowsTimedOut = volumes.WindowsTimedOut;
+            _volumeFailure = null;
+            return LastReport;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            // Отмена при живом токене службы — тоже сбой применения, а не остановка (см. CachedMachineIdentity), и,
+            // как таймаут PowerShell, значит «Windows не ответила».
+            _windowsTimedOut = ex is TimeoutException or OperationCanceledException;
+            LogFailure(ref _volumeFailure, ex, "Applying the library volume failed; reporting the failure");
+            return LastReport = await volumes.FailedAsync(_desired, ex, ct);
+        }
+    }
+
+    /// <summary>Сбой — в журнал при появлении и при смене текста, а не каждый такт (15–30 с).</summary>
+    private void LogFailure(ref string? last, Exception ex, string message)
+    {
+        if (ex.Message == last)
+        {
+            logger.LogDebug("{Message}: {Reason}", message, ex.Message);
+            return;
+        }
+
+        last = ex.Message;
+        logger.LogError(ex, "{Message}", message);
     }
 
     private async Task<StatusAccepted?> ReportAsync(MountedVolume report, MasterReport? master, CancellationToken ct)

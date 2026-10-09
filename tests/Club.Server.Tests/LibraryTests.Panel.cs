@@ -165,7 +165,7 @@ public sealed partial class LibraryTests
 
         var versions = overview.GetProperty("versions").EnumerateArray().ToDictionary(v => v.GetProperty("label").GetString()!);
         Assert.Equal(1, versions["v2"].GetProperty("mountedOn").GetInt32());
-        Assert.Equal(2, versions["v1"].GetProperty("mountedOn").GetInt32()); // ждёт выхода из игры + без проверки RO
+        Assert.Equal(2, versions["v1"].GetProperty("mountedOn").GetInt32()); // ждёт освобождения тома + без проверки RO
         Assert.Equal(["Counter-Strike 2", "Dota 2"], versions["v2"].GetProperty("contents").EnumerateArray().Select(e => e.GetString()!).ToArray());
         Assert.False(versions["v1"].TryGetProperty("contents", out _));
         Assert.Equal(2, overview.GetProperty("current").GetProperty("contents").GetArrayLength());

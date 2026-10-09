@@ -78,6 +78,24 @@ public sealed class MasterManagerTests
         Assert.DoesNotContain($"disconnect {MasterIqn}", _storage.Log);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Unreadable_sessions_without_an_assignment_are_reported_as_unknown_not_failed(bool known)
+    {
+        // Подключён ли мастер-том, неизвестно: failed без таргета — ложная ошибка у любого ПК, отчёт без master — ложное
+        // «не подключён». unknown сервер пропускает и прежнее состояние не меняет.
+        _storage.ConnectedTargetsError = new TimeoutException("PowerShell did not finish in 120 s");
+        Assert.Equal(
+            new MasterReport(MasterManager.UnknownState, Error: "PowerShell did not finish in 120 s"),
+            await _masters.ApplyAsync(null, known, CancellationToken.None));
+
+        // Назначен — как раньше: failed с назначенным таргетом.
+        Assert.Equal(
+            new MasterReport("failed", MasterIqn, "M", "PowerShell did not finish in 120 s"),
+            await _masters.ApplyAsync(Assign(), known: true, CancellationToken.None));
+    }
+
     [Fact]
     public async Task Without_an_answer_from_the_server_the_master_is_left_alone()
     {

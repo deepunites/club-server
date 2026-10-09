@@ -61,10 +61,17 @@ public interface IWindowsStorage
     Task FlushAndOfflineAsync(int diskNumber, char? driveLetter, CancellationToken ct);
 }
 
-/// <summary>Процессы, запущенные с тома (исполняемый файл на букве тома).</summary>
+/// <summary>Процессы, запущенные с тома (исполняемый файл на томе — по пути Win32 или NT, см. <see cref="VolumeImagePaths"/>).</summary>
 public interface IProcessInspector
 {
+    /// <summary>Пути образов (в форме <c>G:\…</c>) процессов, запущенных с тома.</summary>
     Task<IReadOnlyList<string>> ProcessesRunningFromAsync(char driveLetter, CancellationToken ct);
+
+    /// <summary>
+    /// Подробный проход по процессам для журнала. Только когда Windows отказалась отключить старую версию, а процесса с
+    /// её тома не нашлось, и один раз на смену причины — не в каждом такте.
+    /// </summary>
+    Task<ProcessScanReport> DiagnoseAsync(char driveLetter, CancellationToken ct);
 }
 
 /// <summary>

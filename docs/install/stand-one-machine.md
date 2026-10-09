@@ -341,10 +341,12 @@ Get-Disk | ? BusType -eq iSCSI | ft Number,IsReadOnly,IsOffline     # IsReadOnly
 New-Item G:\probe.txt                                              # «Носитель защищён от записи»
 ```
 
-## 13. DHCP: Kea на ВМ сервера (пройдено, пробное переключение)
+## 13. DHCP: Kea на ВМ сервера (пройдено; с 2026-10-02 — DHCP всей сети стенда)
 
 Команды — этап 7 в [stand.md](stand.md) (с `kea-admin -h /var/run/postgresql -u _kea` и правилом AppArmor). Сеть
-стенда — домашняя, поэтому DHCP роутера выключали только на время проверки.
+стенда — домашняя: сначала DHCP роутера выключали на время проверки, затем оставили выключенным — адреса всей сети
+раздаёт Kea (`systemctl is-enabled kea-dhcp4-server` → `enabled`). Пока TrueNAS (и с ней ВМ) выключена, новые
+устройства адрес не получат; ВМ в TrueNAS должна стартовать сама (Virtualization → ВМ → Autostart).
 
 Панель → «Сеть» с нашими адресами (всё — в выделенном нам диапазоне .50–.100):
 
@@ -360,8 +362,10 @@ New-Item G:\probe.txt                                              # «Носи�
 Порядок: перед запуском проверить с ВМ, что .52–.100 свободны (`ping` по диапазону и `ip neigh`), запустить Kea,
 убедиться в `DHCP4_STARTED`, **потом** выключить DHCP на роутере, на ПК `ipconfig /release; ipconfig /renew`.
 
-Итог: ПК получил `192.168.1.78`, помощник сообщил DHCP-сервер `192.168.1.51`, `G:` осталась подключена. Возврат:
-`sudo systemctl disable --now kea-dhcp4-server` на ВМ и DHCP роутера — обратно; конфиг Kea и база остаются.
+Итог: ПК получил `192.168.1.78`, помощник сообщил DHCP-сервер `192.168.1.51`, `G:` осталась подключена. Остальные
+устройства сети при продлении аренды переходят в пул .80–.100 (21 адрес); устройства со статическим адресом (машина
+администратора `.133`) не затрагиваются. Вернуть DHCP роутеру: включить его на роутере и
+`sudo systemctl disable --now kea-dhcp4-server` на ВМ; конфиг Kea и база остаются.
 
 ## 14. Дальше
 
@@ -391,3 +395,5 @@ New-Item G:\probe.txt                                              # «Носи�
 | Панель не открывается в браузере приложения по HTTPS | CA клуба не доверен | `http://192.168.1.51:5080/panel/` в сети стенда или установить `club-ca.crt` |
 | `kea-admin db-init` → `password authentication failed for user "keatest"` | Без `-h`/`-u` kea-admin 3.0.3 идёт на `localhost` как `keatest` (умолчания пакета) | `sudo -u _kea kea-admin db-init pgsql -h /var/run/postgresql -u _kea -n kea` (из `cd /tmp`) |
 | Kea не стартует: `Unable to open database … .s.PGSQL.5432 failed: Permission denied` | Профиль AppArmor `kea-dhcp4` в Ubuntu не пускает к сокету PostgreSQL (`journalctl -k`: `apparmor="DENIED"`); `kea-dhcp4 -t` этого не ловит | `/run/postgresql/.s.PGSQL.* rw,` в `/etc/apparmor.d/local/usr.sbin.kea-dhcp4`, `apparmor_parser -r /etc/apparmor.d/usr.sbin.kea-dhcp4`, перезапуск Kea |
+| После публикации, хотя с G: запущены игра и Steam: на помощнике 1.4.1 ПК в панели выглядит выключенным (отчётов нет, пока том не освободится); на 1.4.2 — долго «ждёт освобождения тома» (`switchPending`), причина `volume in use (open files on G:): …` (или `old version not disconnected: …`) | Помощник (1.4.1, возможно и 1.4.2) в службе не нашёл процессы с G: (стенд 2026-10-02, причина не установлена) и пробовал отключить том — Windows отказала | Закрыть игру и выйти из Steam — через ~30 с новая версия. Помощник 1.4.2 ищет процессы и по пути NT; если на нём причина та же — в журнале «Приложение» (источник `ClubDisklessHelper`) предупреждение `… is not released: … Disk of the target: …; process scan of G: …` сохранить для разбора (`docs/helper.md`, «Диагностика отказа») |
+| Консоль TrueNAS (или `dmesg`): `dev_vdisk: … FLUSH bio failed: -5` при подключении ПК; в журнале System Windows возможно Event ID 7 (disk, «has a bad block») | Известный шум read-only томов: SCST объявляет кэш записи, Windows шлёт SYNCHRONIZE CACHE, read-only zvol отвечает на сброс ошибкой (`docs/research/truenas-api.md` §8.6.1). Данные не под угрозой | Ничего; через наш API не исправить. Тикет в TrueNAS |

@@ -39,8 +39,9 @@ verify) и `masterClose` (target, extent, initiator, auth) — в общем ж�
 
 Версия: `id, label, state (publishing|published|retiring|retired|failed), role (current|rollback|null), targetIqn,
 createdAt, publishedAt, retiredAt, lastError, mountedOn, contents, contentsAt`. `mountedOn` — сколько ПК на связи
-работают с этой версией (подключена или ждут выхода из игры, чтобы переключиться); `contents` — папки верхнего уровня
-тома по отчёту помощника (null — ещё ни один ПК не сообщил).
+работают с этой версией (подключена или ПК ждёт освобождения тома, чтобы переключиться на новую: запущена игра, Steam
+или на томе открыты файлы; помощник 1.4.2+ сообщает в `switchPending` старую, ещё подключённую версию); `contents` —
+папки верхнего уровня тома по отчёту помощника (null — ещё ни один ПК не сообщил).
 
 В обзоре также `machines { online, onCurrent, onOlder, switchPending, failed, notMounted }` — ПК на связи (одобренные,
 отчёт не старше 90 с) по отношению к текущей версии.

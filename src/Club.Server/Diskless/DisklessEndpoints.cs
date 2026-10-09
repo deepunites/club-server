@@ -48,6 +48,9 @@ public static partial class DisklessEndpoints
     private static readonly HashSet<string> VolumeStates = ["none", "mounting", "mounted", "switchPending", "failed"];
     private static readonly HashSet<string> MasterStates = ["none", "mounting", "mounted", "failed"];
 
+    /// <summary>master.state «неизвестно»: помощник не знает, подключён ли мастер-том, — прежнее состояние не меняется.</summary>
+    private const string MasterUnknownState = "unknown";
+
     [GeneratedRegex(@"^iqn\.\d{4}-\d{2}\.[a-z0-9][a-z0-9.\-]*(:[\x21-\x7e]+)?$")]
     private static partial Regex IqnPattern();
 
@@ -184,10 +187,15 @@ public static partial class DisklessEndpoints
         // помощники мастер-том не подключают вовсе. Поэтому прежнее состояние сбрасывается, а не сохраняется: «none»
         // помощник шлёт один раз, в такте, где сам отключил том, — если этот отчёт потерялся или сессию оборвали без
         // помощника (принудительное закрытие, перезагрузка ПК), в панели навсегда остался бы «mounted» (стенд 2026-10-02).
-        // Незнакомое состояние (более новый помощник) не меняет ничего.
+        // unknown (помощник 1.4.2+) — подключён ли мастер-том, помощник прочитать не смог (или в этом такте не опрашивал):
+        // прежнее состояние не меняется. Незнакомое состояние (более новый помощник) — так же.
         if (request.Master is not { } m)
         {
             await machines.RecordMasterAsync(machineId, iqn, null, null);
+        }
+        else if (m.State == MasterUnknownState)
+        {
+            await machines.RecordMasterAsync(machineId, iqn, null, null, keepMaster: true);
         }
         else if (MasterStates.Contains(m.State))
         {

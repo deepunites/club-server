@@ -1,7 +1,9 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Club.Server.Data;
 using Club.TestSupport;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Club.Server.Tests;
 
@@ -211,6 +213,32 @@ public sealed partial class LibraryTests
         await StatusReplyAsync(a);
         Assert.Null(await MachineMasterStateAsync(a));
         Assert.False((await MasterAsync()).TryGetProperty("machineState", out _));
+    }
+
+    [Fact]
+    public async Task Unknown_master_report_keeps_the_previous_state_and_error()
+    {
+        // Помощник 1.4.2+: подключён ли мастер-том, неизвестно (сессии не прочитались после перезапуска службы или в этом
+        // такте не опрашивались из-за таймаута PowerShell) — состояние и причину сбоя сервер не трогает.
+        var a = await OpenMasterAsync();
+        await StatusReplyAsync(a, new { state = "mounted", targetIqn = $"{Basename}:club-master", driveLetter = "M" });
+        await StatusReplyAsync(a, new { state = "unknown", error = "PowerShell did not finish in 120 s" });
+        Assert.Equal(("mounted", (string?)null), await MachineMasterRowAsync(a));
+
+        await StatusReplyAsync(a, new { state = "failed", targetIqn = $"{Basename}:club-master", driveLetter = "M", error = "Access is denied" });
+        await StatusReplyAsync(a, new { state = "unknown", error = "not checked: timeout" });
+        Assert.Equal(("failed", "Access is denied"), await MachineMasterRowAsync(a));
+        Assert.Equal("failed", await MachineMasterStateAsync(a));
+
+        // Отчёт без master — как прежде: «не подключён», отметка снимается.
+        await StatusReplyAsync(a);
+        Assert.Equal(((string?)null, (string?)null), await MachineMasterRowAsync(a));
+    }
+
+    private async Task<(string? State, string? Error)> MachineMasterRowAsync(TestMachine machine)
+    {
+        var row = (await _server.Services.GetRequiredService<MachineRepository>().FindAsync(machine.MachineId))!;
+        return (row.MasterState, row.MasterError);
     }
 
     /// <summary>Отметка «мастер-том на ПК» в списке рабочих станций панели.</summary>

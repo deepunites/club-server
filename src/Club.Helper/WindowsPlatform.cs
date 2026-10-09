@@ -13,48 +13,148 @@ namespace Club.Helper;
 
 /// <summary>
 /// Процессы, чей исполняемый файл лежит на томе. Путь читается через QueryFullProcessImageName с правом
-/// PROCESS_QUERY_LIMITED_INFORMATION — оно есть и у процессов под защитой античита, поэтому игра не «пропадёт».
+/// PROCESS_QUERY_LIMITED_INFORMATION — оно есть и у процессов под защитой античита, поэтому игра не «пропадёт». Путь
+/// берётся в двух формах — Win32 (<c>G:\…</c>) и NT (<c>\Device\HarddiskVolume12\…</c>, PROCESS_NAME_NATIVE) — и
+/// сравнивается с буквой и с устройством NT тома (QueryDosDevice): процесс с тома, если совпала любая. Стенд 2026-10-02,
+/// помощник 1.4.1: служба по одному Win32-пути не нашла запущенные с G: cstrike.exe и steam.exe (причина не
+/// установлена), поэтому обе формы и диагностика <see cref="DiagnoseAsync"/>. Сравнение путей — <see cref="VolumeImagePaths"/>.
 /// </summary>
-public sealed partial class ProcessInspector : IProcessInspector
+public sealed class ProcessInspector(ILogger<ProcessInspector> logger) : IProcessInspector
 {
     private const uint QueryLimitedInformation = 0x1000;
+    private const uint ProcessNameNative = 1;
+
+    /// <summary>Причины «по одному пути Win32 не нашёлся бы», о которых уже предупредили: одна запись на причину, а не каждый такт.</summary>
+    private readonly HashSet<string> _win32Misses = [];
 
     public Task<IReadOnlyList<string>> ProcessesRunningFromAsync(char driveLetter, CancellationToken ct)
     {
-        var prefix = $"{char.ToUpperInvariant(driveLetter)}:\\";
+        var device = NtDevice(driveLetter, out var deviceError);
+        var scan = ReadImages(ct);
         var found = new List<string>();
+        foreach (var image in scan.Images)
+        {
+            if (VolumeImagePaths.MatchImage(image.Win32Path, image.NativePath, driveLetter, device) is not { } match)
+            {
+                continue;
+            }
+
+            found.Add(match.Path);
+            if (match.Win32Miss is { } miss)
+            {
+                ReportWin32Miss(image, miss, device);
+            }
+        }
+
+        logger.LogDebug(
+            "Processes from {Letter}: {Found} of {Total} (device {Device}); OpenProcess failed {Open}, Win32 path failed {Win32}, NT path failed {Native}",
+            driveLetter, found.Count, scan.Images.Count, device ?? deviceError, scan.Open, scan.Win32, scan.Native);
+        return Task.FromResult<IReadOnlyList<string>>(found);
+    }
+
+    public Task<ProcessScanReport> DiagnoseAsync(char driveLetter, CancellationToken ct)
+    {
+        var device = NtDevice(driveLetter, out var deviceError);
+        var scan = ReadImages(ct);
+        var matched = scan.Images.Count(i => VolumeImagePaths.Match(i.Win32Path, i.NativePath, driveLetter, device) is not null);
+        var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        var windowsNt = windows is [var drive, ':', ..] && NtDevice(drive, out _) is { } systemDevice ? systemDevice + windows[2..] : null;
+        var outside = VolumeImagePaths.OutsideWindows(scan.Images, windows, windowsNt);
+        return Task.FromResult(new ProcessScanReport(
+            driveLetter, device, deviceError, scan.Images.Count, matched, scan.Open, scan.Win32, scan.Native, windows, outside.Count,
+            outside.Take(ProcessScanReport.MaxSamples).ToList()));
+    }
+
+    /// <summary>
+    /// Процесс с тома нашёлся, но не по пути Win32 под буквой (путь не прочитался, другая форма или префикс) — ради
+    /// этого случая путь NT и читается (стенд 2026-10-02: 1.4.1 по пути Win32 не нашла запущенные с G: игру и Steam).
+    /// Предупреждение с обеими формами пути подтверждает гипотезу; одно на причину за время работы службы.
+    /// </summary>
+    private void ReportWin32Miss(ProcessImage image, string miss, string? device)
+    {
+        lock (_win32Misses)
+        {
+            if (!_win32Misses.Add(miss))
+            {
+                return;
+            }
+        }
+
+        logger.LogWarning(
+            "Process [{Pid}] runs from the library volume, but a plain Win32 path check (helper 1.4.1) would miss it ({Miss}): Win32 path {Win32}, NT path {Native}, volume device {Device}",
+            image.Pid, miss, image.Win32Path ?? "?", image.NativePath ?? "?", device);
+    }
+
+    /// <summary>Все процессы (не открылся — без путей) и сбои: OpenProcess, путь Win32, путь NT.</summary>
+    private sealed record Scan(List<ProcessImage> Images, ErrorTally Open, ErrorTally Win32, ErrorTally Native);
+
+    private static Scan ReadImages(CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var scan = new Scan([], new ErrorTally(), new ErrorTally(), new ErrorTally());
+        var buffer = new char[32768];
         foreach (var process in Process.GetProcesses())
         {
             using (process)
             {
-                if (ImagePath(process.Id) is { } path && path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                {
-                    found.Add(path);
-                }
+                scan.Images.Add(Read(process.Id, buffer, scan));
             }
         }
 
-        return Task.FromResult<IReadOnlyList<string>>(found);
+        return scan;
     }
 
-    private static string? ImagePath(int pid)
+    private static ProcessImage Read(int pid, char[] buffer, Scan scan)
     {
         var handle = OpenProcess(QueryLimitedInformation, false, (uint)pid);
         if (handle == IntPtr.Zero)
         {
-            return null;
+            scan.Open.Add(Marshal.GetLastPInvokeError());
+            return new ProcessImage(pid, null, null);
         }
 
         try
         {
-            var buffer = new char[32768];
-            var size = (uint)buffer.Length;
-            return QueryFullProcessImageNameW(handle, 0, buffer, ref size) ? new string(buffer, 0, (int)size) : null;
+            return new ProcessImage(pid, ImagePath(handle, 0, buffer, scan.Win32), ImagePath(handle, ProcessNameNative, buffer, scan.Native));
         }
         finally
         {
             CloseHandle(handle);
         }
+    }
+
+    private static string? ImagePath(IntPtr handle, uint flags, char[] buffer, ErrorTally failures)
+    {
+        var size = (uint)buffer.Length;
+        if (QueryFullProcessImageNameW(handle, flags, buffer, ref size))
+        {
+            return new string(buffer, 0, (int)size);
+        }
+
+        failures.Add(Marshal.GetLastPInvokeError());
+        return null;
+    }
+
+    /// <summary>Устройство NT тома по букве (QueryDosDevice, см. <see cref="VolumeImagePaths.ResolveNtDevice"/>); не вышло — <c>null</c> и причина.</summary>
+    private static string? NtDevice(char letter, out string? error)
+    {
+        string? failure = null;
+        var device = VolumeImagePaths.ResolveNtDevice(letter, name =>
+        {
+            var buffer = new char[4096];
+            var length = QueryDosDeviceW(name, buffer, (uint)buffer.Length);
+            if (length == 0)
+            {
+                failure ??= $"QueryDosDevice({name}) error {Marshal.GetLastPInvokeError()}";
+                return null;
+            }
+
+            // Ответ — несколько строк через \0; нужна первая (текущее значение имени).
+            var end = Array.IndexOf(buffer, '\0', 0, (int)Math.Min(length, (uint)buffer.Length));
+            return new string(buffer, 0, end < 0 ? (int)length : end);
+        });
+        error = device is null ? failure ?? "QueryDosDevice gave no NT device path" : null;
+        return device;
     }
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -63,6 +163,9 @@ public sealed partial class ProcessInspector : IProcessInspector
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, [Out] char[] name, ref uint size);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern uint QueryDosDeviceW(string deviceName, [Out] char[] targetPath, uint max);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

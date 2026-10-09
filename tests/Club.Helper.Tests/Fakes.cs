@@ -40,7 +40,18 @@ public sealed class FakeWindowsStorage : IWindowsStorage
         return Task.CompletedTask;
     }
 
-    public Task<IReadOnlyList<string>> ConnectedTargetsAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<string>>(_sessions.Keys.ToList());
+    /// <summary>Чем падает опрос сессий (PowerShell не ответил за 120 с, отказ доступа); <c>null</c> — не падает.</summary>
+    public Exception? ConnectedTargetsError { get; set; }
+
+    public int ConnectedTargetsCalls { get; private set; }
+
+    public Task<IReadOnlyList<string>> ConnectedTargetsAsync(CancellationToken ct)
+    {
+        ConnectedTargetsCalls++;
+        return ConnectedTargetsError is { } error
+            ? Task.FromException<IReadOnlyList<string>>(error)
+            : Task.FromResult<IReadOnlyList<string>>(_sessions.Keys.ToList());
+    }
 
     public Task ConnectAsync(string targetIqn, string portalHost, int portalPort, CancellationToken ct)
     {
@@ -51,19 +62,68 @@ public sealed class FakeWindowsStorage : IWindowsStorage
         return Task.CompletedTask;
     }
 
+    /// <summary>Отказ Windows завершить сессию, пока на томе открыты файлы (английская Windows).</summary>
+    public const string SessionBusy = "The session cannot be logged out since a device on that session is currently being used.";
+
+    /// <summary>
+    /// Таргеты, сессию которых Windows не завершает: на томе открыты файлы процессов, запущенных не с него (проводник,
+    /// Steam). Значение — текст отказа: на нелатинской Windows он локализован.
+    /// </summary>
+    public Dictionary<string, string> BusySessions { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Таргеты, отключение которых падает иначе, чем отказом Windows (таймаут PowerShell и т. п.).</summary>
+    public Dictionary<string, Exception> FailingDisconnects { get; } = new(StringComparer.OrdinalIgnoreCase);
+
     public Task DisconnectAsync(string targetIqn, CancellationToken ct)
     {
         Log.Add($"disconnect {targetIqn}");
+        if (FailingDisconnects.TryGetValue(targetIqn, out var failure))
+        {
+            throw failure;
+        }
+
+        if (BusySessions.TryGetValue(targetIqn, out var refusal))
+        {
+            // Как PowerShell.RunAsync в службе: командлет упал — исключение с текстом ошибки.
+            throw new InvalidOperationException($"PowerShell failed (1): {refusal}");
+        }
+
         _sessions.Remove(targetIqn);
         return Task.CompletedTask;
     }
 
-    public Task<DiskInfo?> FindDiskAsync(string targetIqn, CancellationToken ct) =>
-        Task.FromResult(_sessions.TryGetValue(targetIqn, out var d) ? new DiskInfo(d.Number, d.ReadOnly, d.Offline, d.Letter) : null);
+    /// <summary>Таргеты, диск которых «служба не видит»: сессия есть, а поиск диска возвращает <c>null</c>.</summary>
+    public HashSet<string> HiddenDisks { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Чем падает поиск диска таргета (таймаут PowerShell и т. п.).</summary>
+    public Dictionary<string, Exception> FindDiskErrors { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Для каких таргетов искали диск — по порядку.</summary>
+    public List<string> DiskLookups { get; } = [];
+
+    public Task<DiskInfo?> FindDiskAsync(string targetIqn, CancellationToken ct)
+    {
+        DiskLookups.Add(targetIqn);
+        if (FindDiskErrors.TryGetValue(targetIqn, out var error))
+        {
+            return Task.FromException<DiskInfo?>(error);
+        }
+
+        return Task.FromResult(
+            !HiddenDisks.Contains(targetIqn) && _sessions.TryGetValue(targetIqn, out var d) ? new DiskInfo(d.Number, d.ReadOnly, d.Offline, d.Letter) : null);
+    }
+
+    /// <summary>Чем падает установка read-only (таймаут PowerShell); <c>null</c> — не падает.</summary>
+    public Exception? SetReadOnlyError { get; set; }
 
     public Task SetDiskReadOnlyAsync(int diskNumber, CancellationToken ct)
     {
         Log.Add($"ro {diskNumber}");
+        if (SetReadOnlyError is { } error)
+        {
+            throw error;
+        }
+
         if (!RefuseReadOnly)
         {
             Disk(diskNumber).ReadOnly = true;
@@ -98,8 +158,16 @@ public sealed class FakeWindowsStorage : IWindowsStorage
 
     public List<(string Iqn, string User, string Secret)> ChapLogins { get; } = [];
 
+    /// <summary>Чем падает вход с CHAP помимо неверного секрета (то, чего MasterManager не ждёт); <c>null</c> — не падает.</summary>
+    public Exception? ConnectChapError { get; set; }
+
     public async Task ConnectChapAsync(string targetIqn, string portalHost, int portalPort, string chapUser, string chapSecret, CancellationToken ct)
     {
+        if (ConnectChapError is { } error)
+        {
+            throw error;
+        }
+
         ChapLogins.Add((targetIqn, chapUser, chapSecret));
         if (ExpectedChap is { } expected && (expected.User != chapUser || expected.Secret != chapSecret))
         {
@@ -167,8 +235,35 @@ public sealed class FakeProcesses : IProcessInspector
 {
     public Dictionary<char, List<string>> Running { get; } = new();
 
+    /// <summary>Чем падает опрос процессов (неожиданный сбой Win32); <c>null</c> — не падает.</summary>
+    public Exception? Error { get; set; }
+
     public Task<IReadOnlyList<string>> ProcessesRunningFromAsync(char driveLetter, CancellationToken ct) =>
-        Task.FromResult<IReadOnlyList<string>>(Running.TryGetValue(driveLetter, out var list) ? list : []);
+        Error is { } error
+            ? Task.FromException<IReadOnlyList<string>>(error)
+            : Task.FromResult<IReadOnlyList<string>>(Running.TryGetValue(driveLetter, out var list) ? list : []);
+
+    /// <summary>Сколько раз помощник просил подробный проход по процессам (дорогой — только при отказе Windows).</summary>
+    public List<char> Diagnoses { get; } = [];
+
+    /// <summary>
+    /// Проход, когда процесса с тома не нашлось: устройство тома есть, с него — ни одного процесса (пути образов с него
+    /// нашлись бы), вне папки Windows — Steam с C: (такой и держит файлы на G:) и служба NVIDIA. Не открылся один
+    /// процесс (Idle: OpenProcess отвечает ошибкой 87).
+    /// </summary>
+    public Task<ProcessScanReport> DiagnoseAsync(char driveLetter, CancellationToken ct)
+    {
+        Diagnoses.Add(driveLetter);
+        var open = new ErrorTally();
+        open.Add(87);
+        ProcessImage[] samples =
+        [
+            new(3312, @"C:\Program Files (x86)\Steam\steam.exe", @"\Device\HarddiskVolume3\Program Files (x86)\Steam\steam.exe"),
+            new(2280, @"C:\Program Files\NVIDIA Corporation\NvContainer\nvcontainer.exe", @"\Device\HarddiskVolume3\Program Files\NVIDIA Corporation\NvContainer\nvcontainer.exe"),
+        ];
+        return Task.FromResult(new ProcessScanReport(
+            driveLetter, @"\Device\HarddiskVolume12", null, 180, 0, open, new ErrorTally(), new ErrorTally(), @"C:\Windows", samples.Length, samples));
+    }
 }
 
 public sealed class FakeIdentity(string hwid) : IMachineIdentity
