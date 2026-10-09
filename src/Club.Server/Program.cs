@@ -22,6 +22,8 @@ var keaOptions = builder.Configuration.GetSection("Kea").Get<KeaOptions>() ?? ne
 var imagingOptions = builder.Configuration.GetSection("Imaging").Get<ImagingOptions>() ?? new ImagingOptions();
 var machineFeedOptions = builder.Configuration.GetSection("MachineFeed").Get<MachineFeedOptions>() ?? new MachineFeedOptions();
 machineFeedOptions.Validate();
+var disklessOptions = builder.Configuration.GetSection("Diskless").Get<DisklessOptions>() ?? new DisklessOptions();
+disklessOptions.Validate();
 
 builder.Services.ConfigureHttpJsonOptions(o => ApiJson.Configure(o.SerializerOptions));
 builder.Services.AddSingleton(TimeProvider.System);
@@ -64,6 +66,10 @@ builder.Services.AddSingleton<TargetVerifier>();
 builder.Services.AddSingleton<MasterRepository>();
 builder.Services.AddSingleton<MasterEditor>();
 builder.Services.AddSingleton<LibraryPublisher>();
+builder.Services.AddSingleton(disklessOptions);
+builder.Services.AddSingleton<DisklessRepository>();
+builder.Services.AddSingleton<DisklessImages>();
+builder.Services.AddSingleton<SeatDisks>();
 if (libraryOptions.Enabled && libraryOptions.RunWorker)
 {
     builder.Services.AddHostedService<StorageWorker>();
@@ -87,6 +93,7 @@ app.MapLibraryPanelEndpoints();
 app.MapMachinesPanelEndpoints();
 app.MapNetworkPanelEndpoints();
 app.MapImagesPanelEndpoints();
+app.MapDisklessPanelEndpoints();
 app.MapPxeEndpoints();
 app.MapDeployEndpoints();
 app.MapGet("/", () => Results.Redirect("/panel/"));

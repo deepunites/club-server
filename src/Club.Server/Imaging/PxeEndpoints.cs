@@ -40,12 +40,20 @@ public static class PxeEndpoints
 
             """.Replace("\r\n", "\n", StringComparison.Ordinal), "text/plain"));
 
-        pxe.MapGet("/machines/{mac}/boot.ipxe", async (string mac, ImageRepository images, Data.MachineRepository machines, ReimageService reimage, ILoggerFactory logs) =>
+        pxe.MapGet("/machines/{mac}/boot.ipxe", async (string mac, ImageRepository images, Data.MachineRepository machines, ReimageService reimage,
+            Diskless.DisklessOptions diskless, Diskless.DisklessRepository disklessRepository, Diskless.SeatDisks seats, ILoggerFactory logs, CancellationToken ct) =>
         {
             var normalized = ReimageService.NormalizeMac(mac);
             var job = normalized is null ? null : await images.ArmedJobForMacsAsync([normalized]);
             if (job is null)
             {
+                // Бездиск: личный диск места (или эталон в режиме мастера) — загрузка по iSCSI.
+                if (diskless.Enabled && normalized is not null && await machines.FindByMacAsync(normalized) is { Approved: true } candidate
+                    && (candidate.BootMode == "diskless" || (await disklessRepository.GetImageAsync()).MasterMachineId == candidate.Id))
+                {
+                    return Results.Text((await seats.PrepareBootAsync(candidate, ct)).Script, "text/plain");
+                }
+
                 // Флага нет (Kea ещё не обновилась или ПК загрузился в iPXE сам) — только локальная загрузка.
                 return Results.Text(LocalBootScript.Replace("\r\n", "\n", StringComparison.Ordinal), "text/plain");
             }

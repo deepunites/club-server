@@ -33,6 +33,9 @@ public sealed class MachineRow
     public string? MasterState { get; init; }
     public string? MasterError { get; init; }
     public int CredentialsVersion { get; init; }
+
+    /// <summary><c>local</c> — Windows на диске ПК (гибрид), <c>diskless</c> — загрузка по сети с личного диска места.</summary>
+    public string BootMode { get; init; } = "local";
     public DateTimeOffset CreatedAt { get; init; }
 }
 
@@ -54,7 +57,7 @@ public sealed class MachineRepository(NpgsqlDataSource db)
         id, number, name, zone_id AS ZoneId, hwid, hostname, mac_addresses AS MacAddresses, ip_address AS IpAddress,
         approved, maintenance, helper_version AS HelperVersion, os_version AS OsVersion, last_seen_at AS LastSeenAt,
         boot_time AS BootTime, volume_state AS VolumeState, volume_iqn AS VolumeIqn, volume_version AS VolumeVersion,
-        volume_ro_verified AS VolumeRoVerified, volume_error AS VolumeError, dhcp_servers AS DhcpServers, image_version AS ImageVersion, system_disk::text AS SystemDiskJson, secure_boot::text AS SecureBootJson, initiator_iqn AS InitiatorIqn, master_state AS MasterState, master_error AS MasterError, credentials_version AS CredentialsVersion,
+        volume_ro_verified AS VolumeRoVerified, volume_error AS VolumeError, dhcp_servers AS DhcpServers, image_version AS ImageVersion, system_disk::text AS SystemDiskJson, secure_boot::text AS SecureBootJson, initiator_iqn AS InitiatorIqn, master_state AS MasterState, master_error AS MasterError, credentials_version AS CredentialsVersion, boot_mode AS BootMode,
         created_at AS CreatedAt
         """;
 

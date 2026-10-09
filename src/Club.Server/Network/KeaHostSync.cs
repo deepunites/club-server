@@ -27,7 +27,7 @@ public sealed record KeaSyncResult(bool SchemaOk, string? SchemaVersion, int Des
 /// Наши строки помечены <c>user_context.clubsrv</c>; строки без метки (ручные) не трогаются никогда —
 /// конфликт с ними (тот же MAC или IP в подсети) становится предупреждением, а машина остаётся без резервации.
 /// </summary>
-public sealed class KeaHostSync(KeaOptions options, MachineRepository machines, NetworkRepository network, Imaging.ImageRepository images, ILogger<KeaHostSync> logger)
+public sealed class KeaHostSync(KeaOptions options, MachineRepository machines, NetworkRepository network, Imaging.ImageRepository images, Diskless.DisklessRepository diskless, ILogger<KeaHostSync> logger)
 {
     private const short HwAddress = 0;
 
@@ -81,7 +81,9 @@ public sealed class KeaHostSync(KeaOptions options, MachineRepository machines, 
         }
 
         var plan = new IpPlan(settings);
-        var (desired, conflicts) = Plan(await machines.AllAsync(), plan, await images.ArmedMachinesAsync());
+        // PXE-флаг: перезаливка (снимается после заливки) и бездиск/режим мастера (держится всегда).
+        var networkBoot = (await images.ArmedMachinesAsync()).Union(await diskless.NetworkBootMachinesAsync()).ToHashSet();
+        var (desired, conflicts) = Plan(await machines.AllAsync(), plan, networkBoot);
         var conflictList = conflicts.ToList();
 
         await using var db = new NpgsqlConnection(options.ConnectionString);
