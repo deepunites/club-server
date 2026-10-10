@@ -38,7 +38,11 @@ internal sealed record RefreshRequest(string RefreshToken, string Hwid);
 internal sealed record RefreshResponse(string AccessToken, string RefreshToken, DateTimeOffset ExpiresAt);
 
 /// <summary>Сервер недоступен или ответил ошибкой: том не трогаем, повторим на следующем такте.</summary>
-public sealed class ServerUnavailableException(string message, Exception? inner = null) : Exception(message, inner);
+public sealed class ServerUnavailableException(string message, Exception? inner = null) : Exception(message, inner)
+{
+    /// <summary>До сервера не дошли (сеть, отказ соединения), а не «ответил ошибкой» или «не успел».</summary>
+    public bool Unreachable => InnerException is HttpRequestException;
+}
 
 /// <summary>Машина в реестре, но ждёт одобрения администратора.</summary>
 public sealed class PendingApprovalException() : Exception("Machine is waiting for administrator approval");
@@ -104,7 +108,20 @@ public sealed class DisklessApiClient(HttpClient http, HelperOptions options, IC
 
     private async Task EnsureCredentialsAsync(CancellationToken ct)
     {
-        _credentials ??= await store.LoadAsync(ct);
+        if (_credentials is null && await store.LoadAsync(ct) is { } stored)
+        {
+            if (stored.Hwid == (await identity.ReadAsync(ct)).Hwid)
+            {
+                _credentials = stored;
+            }
+            else
+            {
+                // Токены другого ПК: файл приехал с диском (эталон бездиска снят с ПК мастера, клон диска). С ними этот ПК
+                // выдавал бы себя за чужую машину — регистрируемся сами (сервер узнает ПК по HWID).
+                await store.ClearAsync(ct);
+            }
+        }
+
         if (_credentials is null)
         {
             await RegisterAsync(ct);
@@ -162,7 +179,7 @@ public sealed class DisklessApiClient(HttpClient http, HelperOptions options, IC
         }
 
         var registered = await ReadAsync<RegisterResponse>(response, ct);
-        _credentials = new StoredCredentials(registered.MachineId, registered.AccessToken, registered.RefreshToken, registered.ExpiresAt);
+        _credentials = new StoredCredentials(registered.MachineId, registered.AccessToken, registered.RefreshToken, registered.ExpiresAt, facts.Hwid);
         await store.SaveAsync(_credentials, ct);
     }
 

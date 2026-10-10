@@ -75,11 +75,11 @@ public sealed class PersonalGamesTests : IAsyncLifetime
         Assert.Equal("published", (await _repository.FindVersionAsync(label))!.State);
     }
 
-    private static async Task<JsonElement?> ReportAsync(TestMachine machine, string helperVersion = "1.5.0", string? iqn = Iqn)
+    private static async Task<JsonElement?> ReportAsync(TestMachine machine, string helperVersion = "1.5.0", string? iqn = Iqn, DateTimeOffset? bootTime = null)
     {
         using var response = await machine.SendAsync(HttpMethod.Put, $"/diskless/v1/machines/{machine.MachineId}/status", new
         {
-            helperVersion, volume = new { state = "none" }, initiatorIqn = iqn,
+            helperVersion, volume = new { state = "none" }, initiatorIqn = iqn, bootTime,
         });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
@@ -142,6 +142,40 @@ public sealed class PersonalGamesTests : IAsyncLifetime
         _nas.AddSession(Iqn, "games-seat-01"); // служба помощника перезапущена, ПК работает с диском
         Assert.NotNull(await VolumeAtBootAsync(machine));
         Assert.Equal(1, _nas.Rollbacks($"{Seats}/games-seat-01"));
+    }
+
+    [Fact]
+    public async Task Disk_not_reset_since_windows_boot_is_reset_by_the_report_unless_connected()
+    {
+        await PublishAsync("v1");
+        var (machine, _) = await TestMachine.RegisterAsync(_server.CreateClient());
+        await ReportAsync(machine, bootTime: DateTimeOffset.UtcNow.AddMinutes(-5));
+        await Task.Delay(50);
+
+        // Запрос при старте помощника не дошёл до сервера: Windows загрузилась позже последнего сброса.
+        var boot = DateTimeOffset.UtcNow;
+        _nas.AddSession(Iqn, "games-seat-01");
+        Assert.NotNull(await ReportAsync(machine, bootTime: boot));
+        Assert.Equal(0, _nas.Rollbacks($"{Seats}/games-seat-01")); // подключён — не трогаем
+
+        _nas.ClearSessions();
+        Assert.NotNull(await ReportAsync(machine, bootTime: boot));
+        Assert.Equal(1, _nas.Rollbacks($"{Seats}/games-seat-01"));
+        Assert.NotNull(await ReportAsync(machine, bootTime: boot));
+        Assert.Equal(1, _nas.Rollbacks($"{Seats}/games-seat-01")); // уже сброшен после загрузки
+    }
+
+    [Fact]
+    public async Task Disk_connected_from_another_initiator_is_not_reset_or_shared()
+    {
+        await PublishAsync("v1");
+        var (machine, _) = await TestMachine.RegisterAsync(_server.CreateClient());
+        await ReportAsync(machine);
+        _nas.AddSession("iqn.1991-05.com.microsoft:someone-else", "games-seat-01");
+
+        using var response = await machine.SendAsync(HttpMethod.Get, $"/diskless/v1/machines/{machine.MachineId}/volume?attached=false");
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal(0, _nas.Rollbacks($"{Seats}/games-seat-01"));
     }
 
     [Fact]

@@ -21,6 +21,7 @@ public sealed class M0009_Diskless : Migration
                 rollback_version   text NULL,
                 master_machine_id  uuid NULL REFERENCES machines (id) ON DELETE SET NULL,
                 master_install     boolean NOT NULL DEFAULT false,
+                master_install_at  timestamptz NULL,
                 updated_at         timestamptz NOT NULL DEFAULT now()
             );
             INSERT INTO diskless_image DEFAULT VALUES;

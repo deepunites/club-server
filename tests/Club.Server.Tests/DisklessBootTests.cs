@@ -100,7 +100,7 @@ public sealed class DisklessBootTests : IAsyncLifetime
         await DisklessSeatAsync();
         var script = await BootScriptAsync();
         Assert.Contains("no system image is published yet", script);
-        Assert.Contains("chain --autofree /pxe/v1/machines/${netX/mac:hexhyp}/boot.ipxe", script);
+        Assert.Contains("chain --autofree --replace /pxe/v1/machines/${netX/mac:hexhyp}/boot.ipxe", script); // повтор не вкладывается в стек iPXE
         Assert.DoesNotContain("sanboot", script);
     }
 
@@ -195,6 +195,18 @@ public sealed class DisklessBootTests : IAsyncLifetime
         Assert.Contains("set initiator-iqn iqn.2026-10.local.club:master\n", script);
         Assert.Contains($"sanhook --drive 0x80 iscsi:192.168.77.10::3260::{Basename}:diskless-master || goto failed", script);
         Assert.Contains("initrd /pxe/v1/files/winsetup/sources/boot.wim boot.wim", script);
+        Assert.Contains("initrd /pxe/v1/files/winsetup/install.cmd install.cmd", script); // setup.exe с SMB-шары: в boot.wim нет install.wim
+        Assert.Contains("initrd /pxe/v1/files/winsetup/winpeshl.ini winpeshl.ini", script);
+        Assert.Contains("initrd /pxe/v1/files/winsetup/sources/boot.wim boot.wim", await BootScriptAsync()); // повтор сразу — снова установщик
+
+        // Установщик скопировал файлы и перезагрузился: дальше — с диска эталона, иначе установка начиналась бы заново.
+        await using (var db = await _server.Services.GetRequiredService<Npgsql.NpgsqlDataSource>().OpenConnectionAsync())
+        await using (var cmd = new Npgsql.NpgsqlCommand("UPDATE diskless_image SET master_install_at = now() - interval '10 minutes'", db))
+        {
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        Assert.Contains($"sanboot iscsi:192.168.77.10::3260::{Basename}:diskless-master", await BootScriptAsync());
         var extent = _nas.Find("extent", e => e["name"]!.GetValue<string>() == "diskless-master")!;
         Assert.Equal(($"zvol/{Image}", false), (extent["disk"]!.GetValue<string>(), extent["ro"]!.GetValue<bool>()));
 
@@ -210,6 +222,69 @@ public sealed class DisklessBootTests : IAsyncLifetime
         }
 
         Assert.Contains($"sanboot iscsi:192.168.77.10::3260::{Basename}:diskless-master", await BootScriptAsync());
+    }
+
+    private async Task RenumberAsync(Guid machineId, int number)
+    {
+        using var response = await Panel().PatchAsJsonAsync($"/panel/api/v1/machines/{machineId}", new { number });
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Swapped_seat_numbers_rebuild_both_disks()
+    {
+        var a = await DisklessSeatAsync();
+        var b = await DisklessSeatAsync("02:00:00:00:20:02");
+        await PublishAsync("v1");
+        Assert.Contains(":seat-01 ", await BootScriptAsync());
+        Assert.Contains(":seat-02 ", await BootScriptAsync("02-00-00-00-20-02"));
+
+        await RenumberAsync(a.MachineId, 99);
+        await RenumberAsync(b.MachineId, 1);
+        await RenumberAsync(a.MachineId, 2);
+
+        Assert.Contains($"{Basename}:seat-01 || goto failed", await BootScriptAsync("02-00-00-00-20-02"));
+        Assert.Contains($"{Basename}:seat-02 || goto failed", await BootScriptAsync());
+        var seats = (await _server.Services.GetRequiredService<Diskless.DisklessRepository>().SeatsAsync()).ToDictionary(x => x.MachineId, x => (x.TargetName, x.State));
+        Assert.Equal(("seat-02", "ready"), seats[a.MachineId]);
+        Assert.Equal(("seat-01", "ready"), seats[b.MachineId]);
+        Assert.Equal(2, _nas.Count("auth"));
+    }
+
+    [Fact]
+    public async Task Seat_number_of_a_running_pc_is_not_taken_over()
+    {
+        var a = await DisklessSeatAsync();
+        await PublishAsync("v1");
+        await BootScriptAsync();
+        _nas.AddSession("iqn.2026-10.local.club:seat-01", "seat-01"); // ПК A работает со своего диска
+        await RenumberAsync(a.MachineId, 30);
+
+        var c = await DisklessSeatAsync("02:00:00:00:20:03");
+        await RenumberAsync(c.MachineId, 1);
+        var script = await BootScriptAsync("02-00-00-00-20-03");
+        Assert.Contains("is in use by another PC", script);
+        Assert.NotNull(await _storage.GetDatasetAsync($"{Seats}/seat-01")); // диск работающего ПК цел
+        Assert.NotNull(await _storage.GetTargetAsync("seat-01"));
+    }
+
+    [Fact]
+    public async Task Master_mode_moves_to_another_machine()
+    {
+        var first = await DisklessSeatAsync();
+        var second = await DisklessSeatAsync("02:00:00:00:20:02");
+        async Task MasterAsync(Guid id)
+        {
+            using var response = await Panel().PutAsJsonAsync("/panel/api/v1/diskless/master", new { machineId = id, install = false });
+            Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        }
+
+        await MasterAsync(first.MachineId);
+        Assert.Contains(":diskless-master", await BootScriptAsync());
+        await MasterAsync(second.MachineId);
+        var script = await BootScriptAsync("02-00-00-00-20-02");
+        Assert.Contains($"sanboot iscsi:192.168.77.10::3260::{Basename}:diskless-master", script);
+        Assert.Equal(1, _nas.Count("auth"));
     }
 
     [Fact]

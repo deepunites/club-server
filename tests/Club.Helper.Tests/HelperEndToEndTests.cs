@@ -86,6 +86,23 @@ public sealed class HelperEndToEndTests : IAsyncLifetime
         (await _server.Services.GetRequiredService<MachineRepository>().FindAsync(_credentials.Current!.MachineId))!;
 
     [Fact]
+    public async Task Credentials_copied_from_another_pc_are_dropped_and_the_pc_registers_itself()
+    {
+        // ПК мастера зарегистрировался; его токены попали в эталон, эталон загрузило место с другим HWID.
+        var master = new FakeIdentity("hwid-of-the-master-pc");
+        await Helper(identity: master).TickAsync(CancellationToken.None);
+        var masterId = _credentials.Current!.MachineId;
+        Assert.Equal("hwid-of-the-master-pc", _credentials.Current.Hwid);
+
+        var seat = new FakeIdentity("hwid-of-seat-07");
+        await Helper(identity: seat).TickAsync(CancellationToken.None);
+        Assert.NotEqual(masterId, _credentials.Current!.MachineId);
+        Assert.Equal("hwid-of-seat-07", _credentials.Current.Hwid);
+        var machines = _server.Services.GetRequiredService<MachineRepository>();
+        Assert.Equal("hwid-of-seat-07", (await machines.FindAsync(_credentials.Current.MachineId))!.Hwid);
+    }
+
+    [Fact]
     public async Task Helper_follows_published_versions_and_never_yanks_a_running_game()
     {
         var helper = Helper();

@@ -2,25 +2,31 @@ using Microsoft.Extensions.Logging;
 
 namespace Club.Helper.Core;
 
-/// <summary>Последнее назначение тома, сохранённое на ПК: сервер недоступен при загрузке — игры всё равно есть.</summary>
+/// <summary>
+/// Последнее назначение тома, сохранённое на ПК: сервер недоступен при загрузке — игры всё равно есть. Привязано к
+/// HWID: назначение, приехавшее с диском другого ПК (эталон бездиска), не используется.
+/// </summary>
 public interface IAssignmentCache
 {
-    Task<VolumeAssignment?> LoadAsync(CancellationToken ct);
+    Task<VolumeAssignment?> LoadAsync(string hwid, CancellationToken ct);
 
-    Task SaveAsync(VolumeAssignment? assignment, CancellationToken ct);
+    Task SaveAsync(string hwid, VolumeAssignment? assignment, CancellationToken ct);
 }
 
 public sealed class InMemoryAssignmentCache : IAssignmentCache
 {
     public VolumeAssignment? Current { get; set; }
 
+    public string? Hwid { get; set; }
+
     public bool HasValue { get; private set; }
 
-    public Task<VolumeAssignment?> LoadAsync(CancellationToken ct) => Task.FromResult(HasValue ? Current : null);
+    public Task<VolumeAssignment?> LoadAsync(string hwid, CancellationToken ct) => Task.FromResult(HasValue && Hwid == hwid ? Current : null);
 
-    public Task SaveAsync(VolumeAssignment? assignment, CancellationToken ct)
+    public Task SaveAsync(string hwid, VolumeAssignment? assignment, CancellationToken ct)
     {
         Current = assignment;
+        Hwid = hwid;
         HasValue = true;
         return Task.CompletedTask;
     }
@@ -85,7 +91,7 @@ public sealed class HelperLoop(
             logger.LogInformation("Assignment changed: {Old} -> {New}", _desired?.LibraryVersion, reply.Volume?.LibraryVersion);
             _desired = reply.Volume;
             _known = true;
-            await cache.SaveAsync(_desired, ct);
+            await cache.SaveAsync((await identity.ReadAsync(ct)).Hwid, _desired, ct);
             report = await ApplyAsync(ct);
             changed = true;
         }
@@ -162,12 +168,20 @@ public sealed class HelperLoop(
         {
             _desired = await api.GetVolumeAsync(await volumes.PersonalAttachedAsync(ct), ct);
             _known = true;
-            await cache.SaveAsync(_desired, ct);
+            await cache.SaveAsync((await identity.ReadAsync(ct)).Hwid, _desired, ct);
         }
         catch (Exception ex) when (ex is ServerUnavailableException or PendingApprovalException)
         {
             // Сервер клуба недоступен (или машина не одобрена): монтируем то, что было назначено в прошлый раз.
-            _desired = await cache.LoadAsync(ct);
+            _desired = await cache.LoadAsync((await identity.ReadAsync(ct)).Hwid, ct);
+            if (_desired is not null && VolumeManager.IsPersonal(_desired) && ex is not ServerUnavailableException { Unreachable: true })
+            {
+                // Личный диск без сброса сервером — с данными прошлого игрока. Сервер отвечает (ошибкой или не успел):
+                // ждём назначения в ответе на отчёт — сервер сбросит диск сам. Сервер недоступен вовсе — монтируем как есть.
+                logger.LogWarning("Server did not give the assignment ({Reason}); waiting for it instead of mounting the cached personal disk", ex.Message);
+                _desired = null;
+            }
+
             _known = _desired is not null;
             logger.LogWarning("Server unavailable ({Reason}); using cached assignment {Version}", ex.Message, _desired?.LibraryVersion);
         }

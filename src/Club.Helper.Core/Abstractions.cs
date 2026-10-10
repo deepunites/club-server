@@ -96,7 +96,44 @@ public interface IMachineIdentity
     Task<MachineFacts> ReadAsync(CancellationToken ct);
 }
 
-public sealed record StoredCredentials(Guid MachineId, string AccessToken, string RefreshToken, DateTimeOffset ExpiresAt);
+/// <summary>
+/// Токены машины. <paramref name="Hwid"/> — чьи: файл на диске мог приехать с другого ПК (эталон бездиска снят с ПК
+/// мастера, клон диска), такие токены не используются.
+/// </summary>
+public sealed record StoredCredentials(Guid MachineId, string AccessToken, string RefreshToken, DateTimeOffset ExpiresAt, string? Hwid = null);
+
+/// <summary>HWID машины из SMBIOS: UUID и серийник платы, а при заводской заглушке вместо UUID — ещё и MAC.</summary>
+public static class MachineHwid
+{
+    /// <summary>
+    /// Заглушки UUID, одинаковые у множества плат (AMI по умолчанию, нули, FF): с ними два ПК получили бы один HWID и
+    /// слились бы в одну машину на сервере.
+    /// </summary>
+    private static readonly HashSet<string> PlaceholderUuids = new(StringComparer.Ordinal)
+    {
+        "03000200040005000006000700080009",
+        "00020003000400050006000700080009",
+        "12345678123456781234567812345678",
+    };
+
+    public static bool IsPlaceholderUuid(string uuid)
+    {
+        var hex = new string(uuid.Where(Uri.IsHexDigit).Select(char.ToLowerInvariant).ToArray());
+        return hex.Length != 32 || hex.All(c => c == hex[0]) || PlaceholderUuids.Contains(hex);
+    }
+
+    /// <summary>SHA-256 от «uuid|серийник» (как раньше); при заглушке UUID — «uuid|серийник|наименьший MAC».</summary>
+    public static string Compute(string uuid, string boardSerial, IEnumerable<string> macs)
+    {
+        var key = $"{uuid.Trim().ToLowerInvariant()}|{boardSerial.Trim()}";
+        if (IsPlaceholderUuid(uuid) && macs.Select(m => m.ToLowerInvariant()).Order(StringComparer.Ordinal).FirstOrDefault() is { } mac)
+        {
+            key += $"|{mac}";
+        }
+
+        return Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(key)));
+    }
+}
 
 /// <summary>Хранилище токенов машины (в службе — DPAPI, доступно только SYSTEM).</summary>
 public interface ICredentialStore

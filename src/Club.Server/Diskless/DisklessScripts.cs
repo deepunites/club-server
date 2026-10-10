@@ -9,7 +9,11 @@ namespace Club.Server.Diskless;
 /// </summary>
 public static class DisklessScripts
 {
-    private const string Retry = "chain --autofree /pxe/v1/machines/${netX/mac:hexhyp}/boot.ipxe";
+    /// <summary>
+    /// Повтор — заменой текущего скрипта (<c>--replace</c>): без него каждый повтор вкладывается в предыдущий, стек iPXE
+    /// мал, и после десятка повторов (ожидание публикации, подготовка диска) iPXE падает или зависает.
+    /// </summary>
+    private const string Retry = "chain --autofree --replace /pxe/v1/machines/${netX/mac:hexhyp}/boot.ipxe";
 
     public static string SanBoot(int seat, string initiatorIqn, SeatDiskRow disk, string portalAddress, string what) => Script($"""
         echo Club server: seat {seat}, {Ascii(what)}
@@ -23,13 +27,17 @@ public static class DisklessScripts
 
     /// <summary>
     /// Установка Windows прямо на zvol эталона: диск подключается (<c>sanhook</c>, описан в iBFT), затем установщик
-    /// Windows через wimboot из <c>Imaging:PxeRoot/&lt;каталог&gt;</c> (boot/BCD, boot/boot.sdi, sources/boot.wim из ISO).
+    /// Windows через wimboot из <c>Imaging:PxeRoot/&lt;каталог&gt;</c> (boot/BCD, boot/boot.sdi, sources/boot.wim из ISO)
+    /// с двумя файлами, которые wimboot кладёт в X:\Windows\System32 (ipxe.org/howto/winpe): winpeshl.ini запускает
+    /// install.cmd — сеть, SMB-шара с ISO (в boot.wim нет install.wim), setup.exe. Всё готовит extract-winsetup.sh.
     /// </summary>
     public static string Install(int seat, string initiatorIqn, SeatDiskRow disk, string portalAddress, string setupDirectory) => Script($"""
         echo Club server: seat {seat}, installing Windows onto the system image (master mode)
         {Connection(initiatorIqn, disk)}
         sanhook --drive 0x80 {Uri(portalAddress, disk.TargetIqn!)} || goto failed
         kernel /pxe/v1/files/wimboot gui || goto failed
+        initrd /pxe/v1/files/{setupDirectory}/install.cmd install.cmd || goto failed
+        initrd /pxe/v1/files/{setupDirectory}/winpeshl.ini winpeshl.ini || goto failed
         initrd /pxe/v1/files/{setupDirectory}/boot/bcd BCD || goto failed
         initrd /pxe/v1/files/{setupDirectory}/boot/boot.sdi boot.sdi || goto failed
         initrd /pxe/v1/files/{setupDirectory}/sources/boot.wim boot.wim || goto failed

@@ -104,8 +104,22 @@ public sealed class DisklessRepository(NpgsqlDataSource db)
     {
         await using var c = await db.OpenConnectionAsync();
         await c.ExecuteAsync(
-            "UPDATE diskless_image SET master_machine_id = @machineId, master_install = @install, updated_at = @now",
+            "UPDATE diskless_image SET master_machine_id = @machineId, master_install = @install, master_install_at = NULL, updated_at = @now",
             new { machineId, install = machineId is not null && install, now });
+    }
+
+    /// <summary>
+    /// Отдать ли мастеру установщик Windows: да при первой загрузке после «Установка с нуля» (время запоминается) и при
+    /// повторах в течение <paramref name="window"/> (установщик не загрузился); позже — нет: это перезагрузка самого
+    /// установщика, он продолжает с диска эталона.
+    /// </summary>
+    public async Task<bool> TakeInstallAsync(DateTimeOffset now, TimeSpan window)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        return await c.ExecuteAsync("""
+            UPDATE diskless_image SET master_install_at = COALESCE(master_install_at, @now)
+            WHERE master_install AND (master_install_at IS NULL OR master_install_at > @since)
+            """, new { now, since = now - window }) == 1;
     }
 
     public async Task<bool> SetBootModeAsync(Guid machineId, string mode)
@@ -128,6 +142,13 @@ public sealed class DisklessRepository(NpgsqlDataSource db)
     {
         await using var c = await db.OpenConnectionAsync();
         return await c.QuerySingleOrDefaultAsync<SeatDiskRow>($"SELECT {SeatColumns} FROM seat_disks WHERE machine_id = @machineId", new { machineId });
+    }
+
+    /// <summary>Чей диск носит это имя таргета (номер места или мастер-таргет).</summary>
+    public async Task<SeatDiskRow?> FindSeatByTargetAsync(string targetName)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        return await c.QuerySingleOrDefaultAsync<SeatDiskRow>($"SELECT {SeatColumns} FROM seat_disks WHERE target_name = @targetName", new { targetName });
     }
 
     public async Task<IReadOnlyList<SeatDiskRow>> SeatsAsync()

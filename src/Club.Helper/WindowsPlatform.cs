@@ -231,7 +231,6 @@ public sealed class WindowsMachineFacts : IMachineFactsSource
         using var doc = JsonDocument.Parse(json);
         var uuid = doc.RootElement.GetProperty("uuid").GetString() ?? "";
         var board = doc.RootElement.GetProperty("board").GetString() ?? "";
-        var hwid = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"{uuid.Trim().ToLowerInvariant()}|{board.Trim()}")));
         // Основная карта (поднята, есть IPv4-шлюз) — первой: по первому MAC сервер резервирует адрес места в Kea.
         var macs = EthernetInterfaces()
             .OrderByDescending(n => n.OperationalStatus == OperationalStatus.Up && n.GetIPProperties().GatewayAddresses.Any(g => g.Address.AddressFamily == AddressFamily.InterNetwork))
@@ -241,6 +240,7 @@ public sealed class WindowsMachineFacts : IMachineFactsSource
             .Select(b => string.Join(':', b.Select(x => x.ToString("x2"))))
             .Distinct()
             .ToList();
+        var hwid = MachineHwid.Compute(uuid, board, macs);
         var root = doc.RootElement;
         var systemDisk = root.TryGetProperty("diskSize", out var size) && size.TryGetInt64(out var bytes) && bytes > 0
             ? new SystemDiskFacts(root.GetProperty("diskSerial").GetString(), root.GetProperty("diskModel").GetString(), bytes, root.GetProperty("diskBus").GetString() ?? "")
@@ -376,11 +376,16 @@ public sealed class FileAssignmentCache : IAssignmentCache
 {
     private readonly string _file = System.IO.Path.Combine(StateDirectory.Ensure(), "assignment.json");
 
-    public async Task<VolumeAssignment?> LoadAsync(CancellationToken ct)
+    /// <summary>Назначение и HWID ПК, которому оно выдано (файл прежнего формата, без HWID, не используется).</summary>
+    private sealed record Cached(string? Hwid, VolumeAssignment? Assignment);
+
+    public async Task<VolumeAssignment?> LoadAsync(string hwid, CancellationToken ct)
     {
         try
         {
-            return File.Exists(_file) ? JsonSerializer.Deserialize<VolumeAssignment>(await File.ReadAllTextAsync(_file, ct)) : null;
+            return File.Exists(_file) && JsonSerializer.Deserialize<Cached>(await File.ReadAllTextAsync(_file, ct)) is { } cached && cached.Hwid == hwid
+                ? cached.Assignment
+                : null;
         }
         catch (JsonException)
         {
@@ -388,7 +393,7 @@ public sealed class FileAssignmentCache : IAssignmentCache
         }
     }
 
-    public async Task SaveAsync(VolumeAssignment? assignment, CancellationToken ct)
+    public async Task SaveAsync(string hwid, VolumeAssignment? assignment, CancellationToken ct)
     {
         if (assignment is null)
         {
@@ -397,7 +402,7 @@ public sealed class FileAssignmentCache : IAssignmentCache
         }
 
         var temp = _file + ".tmp";
-        await File.WriteAllTextAsync(temp, JsonSerializer.Serialize(assignment), ct);
+        await File.WriteAllTextAsync(temp, JsonSerializer.Serialize(new Cached(hwid, assignment)), ct);
         File.Move(temp, _file, overwrite: true);
     }
 }

@@ -75,6 +75,26 @@ public sealed class SeatGamesRepository(NpgsqlDataSource db)
         await c.ExecuteAsync("UPDATE seat_games SET state = 'failed', last_error = @error, updated_at = @now WHERE machine_id = @machineId", new { machineId, error, now });
     }
 
+    /// <summary>Чей личный диск носит это имя таргета (номер места).</summary>
+    public async Task<SeatGameRow?> FindByTargetAsync(string targetName)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        return await c.QuerySingleOrDefaultAsync<SeatGameRow>($"SELECT {Columns} FROM seat_games WHERE target_name = @targetName", new { targetName });
+    }
+
+    /// <summary>Перед разборкой: запись больше не «ready», даже если разборка оборвётся на середине.</summary>
+    public async Task MarkRebuildingAsync(Guid machineId, DateTimeOffset now)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        await c.ExecuteAsync("UPDATE seat_games SET state = 'new', updated_at = @now WHERE machine_id = @machineId", new { machineId, now });
+    }
+
+    public async Task DeleteAsync(Guid machineId)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        await c.ExecuteAsync("DELETE FROM seat_games WHERE machine_id = @machineId", new { machineId });
+    }
+
     public async Task RecordResetAsync(Guid machineId, DateTimeOffset now)
     {
         await using var c = await db.OpenConnectionAsync();
@@ -89,6 +109,9 @@ public sealed class SeatGamesRepository(NpgsqlDataSource db)
 /// помощника (загрузка ПК): если к диску никто не подключён, клон откатывается к <c>@clean</c>, а при новой версии —
 /// пересоздаётся. Пока ПК работает (отчёты), назначение не меняется: новая версия — со следующей загрузки.
 /// Read-only устройств нет вовсе — ошибка SCST TrueNAS 25.10 с ними не возникает.
+/// Подготовка (сброс, пересборка — десятки секунд при перезагрузках SCST) идёт отдельной задачей на машину, не в
+/// запросе помощника: ответ — в пределах <see cref="AnswerWithin"/>, иначе «пока нет» (null), назначение придёт в
+/// ответе на отчёт. Обрыв запроса подготовку не прерывает.
 /// </summary>
 public sealed class SeatGames(
     SeatGamesRepository repository,
@@ -100,7 +123,7 @@ public sealed class SeatGames(
     TimeProvider clock,
     ILogger<SeatGames> logger)
 {
-    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _locks = new();
+    private readonly ConcurrentDictionary<Guid, Lazy<Task<VolumeAssignment?>>> _inFlight = new();
 
     public const string TargetPrefix = "games-seat-";
 
@@ -109,6 +132,9 @@ public sealed class SeatGames(
     /// <summary>После сбоя сборки отчёты (каждые 15–30 с) не повторяют её раньше этого срока; запуск помощника — сразу.</summary>
     public static readonly TimeSpan RetryAfter = TimeSpan.FromMinutes(2);
 
+    /// <summary>Сколько запрос помощника ждёт подготовки диска (HTTP-таймаут помощника — 20 с).</summary>
+    public static readonly TimeSpan AnswerWithin = TimeSpan.FromSeconds(12);
+
     /// <summary>Помощник умеет личный слой (подключение на запись с CHAP).</summary>
     public bool Supports(string helperVersion) =>
         Version.TryParse(helperVersion.Split('-', '+')[0], out var have) && Version.TryParse(options.PersonalMinHelper, out var need) && have >= need;
@@ -116,9 +142,8 @@ public sealed class SeatGames(
     /// <summary>
     /// Назначение личного тома игр. <paramref name="atBoot"/> — запрос при старте помощника: можно сбросить диск и
     /// перейти на новую версию (если к диску никто не подключён). <paramref name="detachedHere"/> — помощник сообщил, что
-    /// на ПК диск не подключён: сессия на сервере осталась от прошлой загрузки и сбросу не мешает. null — режим выключен,
-    /// помощник старый, версии нет или IQN ПК ещё неизвестен (помощник сообщит его в отчёте — тогда назначение придёт в
-    /// ответе на отчёт).
+    /// на ПК диск не подключён: сессия с IQN этого ПК осталась от прошлой загрузки и сбросу не мешает. null — режим
+    /// выключен, помощник старый, версии нет, IQN ПК ещё неизвестен (помощник сообщит его в отчёте) или диск ещё готовится.
     /// </summary>
     public async Task<VolumeAssignment?> AssignmentAsync(MachineRow machine, bool atBoot, CancellationToken ct, bool detachedHere = false)
     {
@@ -133,52 +158,93 @@ public sealed class SeatGames(
             return null;
         }
 
-        var gate = _locks.GetOrAdd(machine.Id, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(ct);
+        // Отчёт работающего ПК: готовый диск — сразу, без TrueNAS. Но не пока идёт подготовка (сброс под смонтированным
+        // томом недопустим: назначение — только после её окончания) и не если диск не сбрасывали с загрузки Windows
+        // (запрос при старте помощника не дошёл или оборвался): тогда сброс здесь, если диск никто не подключил.
+        var seat = await repository.FindAsync(machine.Id);
+        var dirty = seat is not null && NotResetSinceBoot(seat, machine);
+        if (!atBoot && !dirty && !_inFlight.ContainsKey(machine.Id) && seat is not null && Usable(seat, machine, initiators))
+        {
+            return Assignment(seat);
+        }
+
+        var reset = atBoot || dirty;
+        var lazy = _inFlight.GetOrAdd(machine.Id, _ => new Lazy<Task<VolumeAssignment?>>(() => RunAsync(machine, atBoot, reset, detachedHere, initiators, current)));
+        var task = lazy.Value;
+        var finished = await Task.WhenAny(task, Task.Delay(AnswerWithin, clock, ct));
+        return finished == task ? await task : null;
+    }
+
+    /// <summary>
+    /// Готовый диск не сбрасывался после загрузки Windows этого ПК (время загрузки — из отчёта помощника; из будущего —
+    /// сбитые часы, не учитывается).
+    /// </summary>
+    private bool NotResetSinceBoot(SeatGameRow seat, MachineRow machine) =>
+        seat.State == "ready" && machine.BootTime is { } boot && boot <= clock.GetUtcNow() && seat.UpdatedAt < boot;
+
+    private async Task<VolumeAssignment?> RunAsync(MachineRow machine, bool atBoot, bool reset, bool detachedHere, List<string> initiators, LibraryVersion current)
+    {
         try
         {
-            var seat = await repository.FindAsync(machine.Id);
-            var name = TargetName(machine.Number);
-            var usable = seat is { State: "ready" } && seat.TargetName == name && seat.InitiatorIqn == string.Join(' ', initiators);
-            if (usable && !atBoot)
-            {
-                return Assignment(seat!);
-            }
-
-            if (!atBoot && seat is { State: "failed" } && clock.GetUtcNow() - seat.UpdatedAt < RetryAfter)
-            {
-                return null;
-            }
-
-            if (!(atBoot && detachedHere) && await IsConnectedAsync(seat?.TargetName ?? name, ct))
-            {
-                // Диском пользуются (служба помощника перезапущена без перезагрузки ПК): не сбрасываем и не меняем версию.
-                return usable ? Assignment(seat!) : null;
-            }
-
-            if (usable && seat!.BaseSnapshot == current.SnapshotId)
-            {
-                await storage.RollbackSnapshotAsync($"{seat.Zvol}@{DisklessOptions.CleanSnapshot}", ct);
-                await repository.RecordResetAsync(machine.Id, clock.GetUtcNow());
-                return Assignment(seat);
-            }
-
-            try
-            {
-                return Assignment(await RebuildAsync(machine, seat, current, initiators, ct));
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                logger.LogError(ex, "Personal games disk of seat {Seat} failed", machine.Number);
-                await repository.MarkFailedAsync(machine.Id, ex.Message, clock.GetUtcNow());
-                return null;
-            }
+            return await PrepareAsync(machine, atBoot, reset, detachedHere, initiators, current, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Personal games disk of seat {Seat} failed", machine.Number);
+            await repository.MarkFailedAsync(machine.Id, ex.Message, clock.GetUtcNow());
+            return null;
         }
         finally
         {
-            gate.Release();
+            _inFlight.TryRemove(machine.Id, out _);
         }
     }
+
+    /// <summary>
+    /// <paramref name="reset"/> — диск можно сбросить (старт помощника или диск не сбрасывали с загрузки Windows), если к
+    /// нему никто не подключён; <paramref name="atBoot"/> — запрос при старте помощника.
+    /// </summary>
+    private async Task<VolumeAssignment?> PrepareAsync(
+        MachineRow machine, bool atBoot, bool reset, bool detachedHere, List<string> initiators, LibraryVersion current, CancellationToken ct)
+    {
+        var seat = await repository.FindAsync(machine.Id);
+        var name = TargetName(machine.Number);
+        var usable = seat is not null && Usable(seat, machine, initiators);
+        if (usable && !reset)
+        {
+            return Assignment(seat!);
+        }
+
+        if (!atBoot && seat is { State: "failed" } && clock.GetUtcNow() - seat.UpdatedAt < RetryAfter)
+        {
+            return null;
+        }
+
+        var sessions = (await storage.GetSessionsAsync(ct)).Where(s => s.Target.EndsWith($":{seat?.TargetName ?? name}", StringComparison.Ordinal)).ToList();
+        if (sessions.Any(s => !initiators.Contains(s.Initiator, StringComparer.OrdinalIgnoreCase)))
+        {
+            // Диск подключён с чужого IQN (прежний владелец номера ещё работает): не трогаем и не делим.
+            return null;
+        }
+
+        if (sessions.Count > 0 && !(atBoot && detachedHere))
+        {
+            // Диском пользуется этот ПК (служба помощника перезапущена без перезагрузки): не сбрасываем и не меняем версию.
+            return usable ? Assignment(seat!) : null;
+        }
+
+        if (usable && seat!.BaseSnapshot == current.SnapshotId)
+        {
+            await storage.RollbackSnapshotAsync($"{seat.Zvol}@{DisklessOptions.CleanSnapshot}", ct);
+            await repository.RecordResetAsync(machine.Id, clock.GetUtcNow());
+            return Assignment(seat);
+        }
+
+        return Assignment(await RebuildAsync(machine, seat, current, initiators, ct));
+    }
+
+    private static bool Usable(SeatGameRow seat, MachineRow machine, List<string> initiators) =>
+        seat.State == "ready" && seat.TargetName == TargetName(machine.Number) && seat.InitiatorIqn == string.Join(' ', initiators);
 
     /// <summary>IQN, которым ПК подключается: сообщённый помощником; у бездискового — ещё и имя места из iBFT.</summary>
     private List<string> Initiators(MachineRow machine)
@@ -197,16 +263,19 @@ public sealed class SeatGames(
         return list.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToList();
     }
 
-    private async Task<bool> IsConnectedAsync(string targetName, CancellationToken ct) =>
-        (await storage.GetSessionsAsync(ct)).Any(s => s.Target.EndsWith($":{targetName}", StringComparison.Ordinal));
-
     private VolumeAssignment Assignment(SeatGameRow seat) =>
         new(seat.LibraryVersion ?? "", options.PortalAddress, seat.TargetIqn!, ReadOnly: false, options.DriveLetter, seat.ChapUser, seat.ChapSecret);
 
     private async Task<SeatGameRow> RebuildAsync(MachineRow machine, SeatGameRow? old, LibraryVersion version, IReadOnlyList<string> initiators, CancellationToken ct)
     {
         var name = TargetName(machine.Number);
-        await TearDownAsync(old ?? new SeatGameRow { MachineId = machine.Id, Zvol = $"{options.PersonalParent}/{name}", TargetName = name, ChapUser = name }, ct);
+        if (old is not null)
+        {
+            await repository.MarkRebuildingAsync(machine.Id, clock.GetUtcNow());
+            await TearDownAsync(old, keepAuth: true, ct);
+        }
+
+        await ClaimNameAsync(machine, name, initiators, ct);
         if (await storage.GetDatasetAsync(options.PersonalParent, ct) is null)
         {
             throw new InvalidOperationException($"{options.PersonalParent} does not exist: create the dataset in TrueNAS (Library:PersonalParent)");
@@ -231,6 +300,12 @@ public sealed class SeatGames(
         await storage.EnsureSnapshotAsync(seat.Zvol, DisklessOptions.CleanSnapshot, labels, ct);
 
         var tag = await ChapTags.EnsureAsync(storage, seat.AuthTag, seat.ChapUser, seat.ChapSecret, ct);
+        if (old is { AuthTag: { } oldTag } && old.ChapUser != seat.ChapUser)
+        {
+            // Номер места сменился: прежний пользователь — только после нового в той же группе (tag не освобождается).
+            await storage.DeleteAuthAsync(oldTag, old.ChapUser, ct);
+        }
+
         var group = await storage.EnsureInitiatorGroupAsync(GroupComment(name), initiators, ct);
         var extent = await storage.EnsureWritableExtentAsync(name, seat.Zvol, $"clubsrv personal games seat {machine.Number:D2}", ct);
         var target = await storage.EnsureChapTargetAsync(name, $"games seat {machine.Number}", options.PortalId, group.Id, tag, ct);
@@ -250,10 +325,43 @@ public sealed class SeatGames(
         return (await repository.FindAsync(machine.Id))!;
     }
 
+    /// <summary>
+    /// Имя таргета должно быть свободно: диск другой машины с этим именем (её номер сменили) освобождается, объекты без
+    /// записи — сносятся. Если к таргету подключён кто-то, кроме этого ПК, — ничего не трогаем, сборка ждёт.
+    /// </summary>
+    private async Task ClaimNameAsync(MachineRow machine, string name, IReadOnlyList<string> initiators, CancellationToken ct)
+    {
+        var holder = await repository.FindByTargetAsync(name);
+        if (holder?.MachineId == machine.Id)
+        {
+            return;
+        }
+
+        var foreign = (await storage.GetSessionsAsync(ct))
+            .FirstOrDefault(s => s.Target.EndsWith($":{name}", StringComparison.Ordinal) && !initiators.Contains(s.Initiator, StringComparer.OrdinalIgnoreCase));
+        if (foreign is not null)
+        {
+            throw new InvalidOperationException($"{name} is in use by another PC ({foreign.Initiator}): turn that PC off or give one of them another seat number");
+        }
+
+        if (holder is null)
+        {
+            await TearDownAsync(new SeatGameRow { MachineId = machine.Id, Zvol = $"{options.PersonalParent}/{name}", TargetName = name, ChapUser = name }, keepAuth: false, ct);
+            return;
+        }
+
+        logger.LogWarning("Personal games disk {Target} belonged to another machine {Machine}; removed for seat {Seat}", name, holder.MachineId, machine.Number);
+        await TearDownAsync(holder, keepAuth: false, ct);
+        await repository.DeleteAsync(holder.MachineId);
+    }
+
     private static string GroupComment(string targetName) => $"clubsrv {targetName}";
 
-    /// <summary>Таргет (force — ПК не подключён, висящая сессия не нужна), экстент, группа, CHAP, затем @clean и клон.</summary>
-    private async Task TearDownAsync(SeatGameRow seat, CancellationToken ct)
+    /// <summary>
+    /// Таргет (force — ПК не подключён, висящая сессия не нужна), экстент, группа, CHAP, затем @clean и клон.
+    /// <paramref name="keepAuth"/> — диск сейчас же пересоздаётся с тем же tag: CHAP остаётся, tag не освобождается.
+    /// </summary>
+    private async Task TearDownAsync(SeatGameRow seat, bool keepAuth, CancellationToken ct)
     {
         await storage.DeleteTargetAsync(seat.TargetName, force: true, ct);
         var extent = await storage.DeleteExtentAsync(seat.TargetName, ct);
@@ -263,7 +371,7 @@ public sealed class SeatGames(
         }
 
         await storage.DeleteInitiatorGroupAsync(GroupComment(seat.TargetName), ct);
-        if (seat.AuthTag is { } tag)
+        if (!keepAuth && seat.AuthTag is { } tag)
         {
             await storage.DeleteAuthAsync(tag, seat.ChapUser, ct);
         }
