@@ -273,7 +273,7 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
                 case "pool.dataset.attachments":
                     return Attachments(args[0]!.GetValue<string>());
                 case "pool.dataset.delete":
-                    return DeleteDataset(args[0]!.GetValue<string>());
+                    return DeleteDataset(args[0]!.GetValue<string>(), args.Count > 1 && args[1]?["recursive"]?.GetValue<bool>() == true);
 
                 case "pool.snapshot.query":
                     return Query(_snapshots.Values, args);
@@ -282,7 +282,7 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
                 case "pool.snapshot.clone":
                     return Clone(args[0]!.AsObject());
                 case "pool.snapshot.rollback":
-                    return Rollback(args[0]!.GetValue<string>());
+                    return Rollback(args[0]!.GetValue<string>(), args.Count > 1 && args[1]?["recursive"]?.GetValue<bool>() == true);
                 case "pool.snapshot.delete":
                     return DeleteSnapshot(args[0]!.GetValue<string>(), args.Count > 1 ? args[1]!.AsObject() : new JsonObject());
 
@@ -384,11 +384,24 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
             : new JsonArray(new JsonObject { ["type"] = "iSCSI Extent", ["service"] = "iscsitarget", ["attachments"] = new JsonArray(extents.Select(x => (JsonNode)x).ToArray()) });
     }
 
-    private JsonNode DeleteDataset(string id)
+    private JsonNode DeleteDataset(string id, bool recursive = false)
     {
         if (!_datasets.ContainsKey(id))
         {
             throw NotFound(id);
+        }
+
+        if (recursive)
+        {
+            foreach (var own in _snapshots.Values.Where(s => s["dataset"]!.GetValue<string>() == id).Select(s => s["id"]!.GetValue<string>()).ToList())
+            {
+                if (ClonesOf(own).Any())
+                {
+                    throw CallError(14, "EFAULT", $"Failed to delete dataset: cannot destroy '{own}': snapshot has dependent clones");
+                }
+
+                _snapshots.Remove(own);
+            }
         }
 
         if (_snapshots.Values.Any(s => s["dataset"]!.GetValue<string>() == id))
@@ -455,7 +468,7 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
     }
 
     /// <summary>Как ZFS: откат только к последнему снапшоту тома (без recursive); настройки iSCSI не трогает.</summary>
-    private JsonNode? Rollback(string id)
+    private JsonNode? Rollback(string id, bool recursive = false)
     {
         if (!_snapshots.TryGetValue(id, out var snapshot))
         {
@@ -464,7 +477,16 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
 
         var dataset = snapshot["dataset"]!.GetValue<string>();
         var seq = _snapshotSeq.GetValueOrDefault(id);
-        if (_snapshots.Values.Any(s => s["dataset"]!.GetValue<string>() == dataset && _snapshotSeq.GetValueOrDefault(s["id"]!.GetValue<string>()) > seq))
+        var newer = _snapshots.Values.Where(s => s["dataset"]!.GetValue<string>() == dataset && _snapshotSeq.GetValueOrDefault(s["id"]!.GetValue<string>()) > seq)
+            .Select(s => s["id"]!.GetValue<string>()).ToList();
+        if (recursive)
+        {
+            // zfs rollback -r: более новые снапшоты удаляются.
+            newer.ForEach(n => _snapshots.Remove(n));
+            newer.Clear();
+        }
+
+        if (newer.Count > 0)
         {
             throw CallError(17, "EEXIST", $"cannot rollback to '{id}': more recent snapshots or bookmarks exist");
         }

@@ -91,6 +91,11 @@
 1. [удалённо] В TrueNAS: файловые системы `ssd/club/diskless` и `ssd/club/diskless/seats`, zvol эталона
    `ssd/club/diskless/win11` (sparse, 64 ГиБ, volblocksize 16K). В настройках сервера `Diskless__Enabled=true`
    (и `Diskless__ImageZvol`/`SeatsParent`, если пул называется не `ssd`), перезапуск службы.
+   Место под личные слои — квотами, иначе один ПК (обновление игры, установка на G:) может заполнить пул, и тогда
+   встают все бездисковые ПК: `ssd/club/diskless/seats` — reservation 28 × 10 ГиБ и quota 28 × 25 ГиБ,
+   `ssd/club/seats` (личные слои игр) — quota так, чтобы в пуле оставалось ≥ 20 % свободного. Периодические задачи
+   снапшотов на `ssd/club/diskless/seats` и `ssd/club/seats` не ставить (клоны одноразовые; сервер их всё равно
+   откатывает с `-r` и удаляет вместе со снапшотами).
 2. [удалённо] Установщик Windows для режима мастера. ISO Windows 11 — прямо на сервер (ссылка Microsoft
    действует 24 ч; страница загрузки из сети клуба может не открываться — ссылку берём с телефона через мобильный
    интернет): `sudo install -d /srv/club/iso && sudo wget -c -O /srv/club/iso/Win11.iso '<ссылка>'`, затем

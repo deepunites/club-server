@@ -486,6 +486,18 @@ public sealed class VolumeManagerTests
     }
 
     [Fact]
+    public async Task Reconnecting_personal_session_counts_as_attached_and_is_not_logged_in_again()
+    {
+        _storage.RecoveringSessions.Add(Seat); // Windows восстанавливает связь: сессия есть, но IsConnected = false
+        Assert.True(await _volumes.PersonalAttachedAsync(CancellationToken.None));
+
+        var report = await _volumes.ApplyAsync(Personal(), CancellationToken.None);
+        Assert.Equal("mounting", report.State);
+        Assert.Empty(_storage.ChapLogins);
+        Assert.DoesNotContain(_storage.Log, l => l.StartsWith("disconnect", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Writable_assignment_without_chap_or_for_another_target_is_refused()
     {
         Assert.Equal("failed", (await _volumes.ApplyAsync(Personal() with { ChapSecret = null }, CancellationToken.None)).State);

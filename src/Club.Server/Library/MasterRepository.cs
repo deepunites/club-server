@@ -130,7 +130,7 @@ public sealed class MasterRepository(NpgsqlDataSource db)
         await c.ExecuteAsync(
             """
             WITH closed AS (
-                UPDATE library_master SET state = 'closed', dirty = force_close, machine_id = NULL, chap_secret = NULL, target_iqn = NULL,
+                UPDATE library_master SET state = 'closed', dirty = force_close, machine_id = NULL, chap_secret = NULL, target_iqn = NULL, auth_tag = NULL,
                        closed_at = @now, last_error = NULL, updated_at = @now
                 WHERE state = 'closing'
                 RETURNING 1)

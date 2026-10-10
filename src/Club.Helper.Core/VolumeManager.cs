@@ -40,7 +40,8 @@ public sealed class VolumeManager(IWindowsStorage storage, IProcessInspector pro
     {
         try
         {
-            return (await ManagedTargetsAsync(ct)).Any(t => t.Contains(PersonalTargetMarker, StringComparison.OrdinalIgnoreCase));
+            // Все сессии, и восстанавливающие связь: такая всё ещё держит смонтированный том — сбрасывать его нельзя.
+            return (await storage.SessionTargetsAsync(ct)).Any(t => t.Contains(PersonalTargetMarker, StringComparison.OrdinalIgnoreCase));
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
@@ -143,6 +144,13 @@ public sealed class VolumeManager(IWindowsStorage storage, IProcessInspector pro
             return WindowsTimedOut
                 ? new MountedVolume("failed", desired.TargetIqn, desired.LibraryVersion, letter.ToString(), ReadOnlyVerified: false, Error: "not checked: timeout on the old version")
                 : await VerifyAsync(desired, letter, ct);
+        }
+
+        if (IsPersonal(desired) && (await storage.SessionTargetsAsync(ct)).Contains(desired.TargetIqn, StringComparer.OrdinalIgnoreCase))
+        {
+            // Сессия личного диска есть, но Windows восстанавливает связь: том всё ещё смонтирован. Новый вход (а при его
+            // сбое — отключение) сорвал бы запись на него; ждём следующего такта.
+            return new MountedVolume("mounting", desired.TargetIqn, desired.LibraryVersion, letter.ToString(), Error: "iSCSI session is reconnecting");
         }
 
         var inUse = await ReleaseAsync(old, keepGoing: false, letter, ct);

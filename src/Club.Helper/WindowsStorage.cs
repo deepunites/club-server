@@ -24,6 +24,16 @@ public sealed class WindowsStorage : IWindowsStorage
         return ParseStrings(json);
     }
 
+    public async Task<IReadOnlyList<string>> SessionTargetsAsync(CancellationToken ct)
+    {
+        var json = await PowerShell.RunAsync(
+            """
+            $targets = @(Get-IscsiSession -ErrorAction SilentlyContinue | ForEach-Object { $_.TargetNodeAddress })
+            ConvertTo-Json -InputObject $targets -Compress
+            """, null, ct);
+        return ParseStrings(json);
+    }
+
     public Task ConnectAsync(string targetIqn, string portalHost, int portalPort, CancellationToken ct) =>
         PowerShell.RunAsync(
             """

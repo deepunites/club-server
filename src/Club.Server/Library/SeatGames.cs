@@ -141,11 +141,13 @@ public sealed class SeatGames(
 
     /// <summary>
     /// Назначение личного тома игр. <paramref name="atBoot"/> — запрос при старте помощника: можно сбросить диск и
-    /// перейти на новую версию (если к диску никто не подключён). <paramref name="detachedHere"/> — помощник сообщил, что
-    /// на ПК диск не подключён: сессия с IQN этого ПК осталась от прошлой загрузки и сбросу не мешает. null — режим
+    /// перейти на новую версию (если к диску никто не подключён). <paramref name="attached"/> — что помощник сказал о диске
+    /// на ПК: false — не подключён (сессия с IQN этого ПК осталась от прошлой загрузки и сбросу не мешает), true —
+    /// подключён (даже если TrueNAS сессии сейчас не видит — например, после перезапуска iSCSI, — не сбрасываем). Помощник
+    /// 1.5 монтирует личный диск только из ответа на запрос при старте, поэтому отчёты его не сбрасывают. null — режим
     /// выключен, помощник старый, версии нет, IQN ПК ещё неизвестен (помощник сообщит его в отчёте) или диск ещё готовится.
     /// </summary>
-    public async Task<VolumeAssignment?> AssignmentAsync(MachineRow machine, bool atBoot, CancellationToken ct, bool detachedHere = false)
+    public async Task<VolumeAssignment?> AssignmentAsync(MachineRow machine, bool atBoot, CancellationToken ct, bool? attached = null)
     {
         if (!options.Enabled || !options.PersonalGames || !Supports(machine.HelperVersion))
         {
@@ -159,34 +161,23 @@ public sealed class SeatGames(
         }
 
         // Отчёт работающего ПК: готовый диск — сразу, без TrueNAS. Но не пока идёт подготовка (сброс под смонтированным
-        // томом недопустим: назначение — только после её окончания) и не если диск не сбрасывали с загрузки Windows
-        // (запрос при старте помощника не дошёл или оборвался): тогда сброс здесь, если диск никто не подключил.
-        var seat = await repository.FindAsync(machine.Id);
-        var dirty = seat is not null && NotResetSinceBoot(seat, machine);
-        if (!atBoot && !dirty && !_inFlight.ContainsKey(machine.Id) && seat is not null && Usable(seat, machine, initiators))
+        // томом недопустим: назначение — только после её окончания).
+        if (!atBoot && !_inFlight.ContainsKey(machine.Id) && await repository.FindAsync(machine.Id) is { } seat && Usable(seat, machine, initiators))
         {
             return Assignment(seat);
         }
 
-        var reset = atBoot || dirty;
-        var lazy = _inFlight.GetOrAdd(machine.Id, _ => new Lazy<Task<VolumeAssignment?>>(() => RunAsync(machine, atBoot, reset, detachedHere, initiators, current)));
+        var lazy = _inFlight.GetOrAdd(machine.Id, _ => new Lazy<Task<VolumeAssignment?>>(() => RunAsync(machine, atBoot, attached, initiators, current)));
         var task = lazy.Value;
         var finished = await Task.WhenAny(task, Task.Delay(AnswerWithin, clock, ct));
         return finished == task ? await task : null;
     }
 
-    /// <summary>
-    /// Готовый диск не сбрасывался после загрузки Windows этого ПК (время загрузки — из отчёта помощника; из будущего —
-    /// сбитые часы, не учитывается).
-    /// </summary>
-    private bool NotResetSinceBoot(SeatGameRow seat, MachineRow machine) =>
-        seat.State == "ready" && machine.BootTime is { } boot && boot <= clock.GetUtcNow() && seat.UpdatedAt < boot;
-
-    private async Task<VolumeAssignment?> RunAsync(MachineRow machine, bool atBoot, bool reset, bool detachedHere, List<string> initiators, LibraryVersion current)
+    private async Task<VolumeAssignment?> RunAsync(MachineRow machine, bool atBoot, bool? attached, List<string> initiators, LibraryVersion current)
     {
         try
         {
-            return await PrepareAsync(machine, atBoot, reset, detachedHere, initiators, current, CancellationToken.None);
+            return await PrepareAsync(machine, atBoot, attached, initiators, current, CancellationToken.None);
         }
         catch (Exception ex)
         {
@@ -200,24 +191,15 @@ public sealed class SeatGames(
         }
     }
 
-    /// <summary>
-    /// <paramref name="reset"/> — диск можно сбросить (старт помощника или диск не сбрасывали с загрузки Windows), если к
-    /// нему никто не подключён; <paramref name="atBoot"/> — запрос при старте помощника.
-    /// </summary>
     private async Task<VolumeAssignment?> PrepareAsync(
-        MachineRow machine, bool atBoot, bool reset, bool detachedHere, List<string> initiators, LibraryVersion current, CancellationToken ct)
+        MachineRow machine, bool atBoot, bool? attached, List<string> initiators, LibraryVersion current, CancellationToken ct)
     {
         var seat = await repository.FindAsync(machine.Id);
         var name = TargetName(machine.Number);
         var usable = seat is not null && Usable(seat, machine, initiators);
-        if (usable && !reset)
+        if (usable && !atBoot)
         {
             return Assignment(seat!);
-        }
-
-        if (!atBoot && seat is { State: "failed" } && clock.GetUtcNow() - seat.UpdatedAt < RetryAfter)
-        {
-            return null;
         }
 
         var sessions = (await storage.GetSessionsAsync(ct)).Where(s => s.Target.EndsWith($":{seat?.TargetName ?? name}", StringComparison.Ordinal)).ToList();
@@ -227,15 +209,22 @@ public sealed class SeatGames(
             return null;
         }
 
-        if (sessions.Count > 0 && !(atBoot && detachedHere))
+        if ((sessions.Count > 0 && !(atBoot && attached == false)) || (atBoot && attached == true))
         {
             // Диском пользуется этот ПК (служба помощника перезапущена без перезагрузки): не сбрасываем и не меняем версию.
-            return usable ? Assignment(seat!) : null;
+            // Отдаём и «неготовый» (failed после сбоя TrueNAS) — таргет живой, раз к нему подключены: иначе помощник отпустил
+            // бы диск игрока, а сервер потом пересоздал бы его посреди сеанса.
+            return seat is { TargetIqn: not null } && (sessions.Count > 0 || seat.TargetName == name) ? Assignment(seat) : null;
+        }
+
+        if (!atBoot && seat is { State: "failed" } && clock.GetUtcNow() - seat.UpdatedAt < RetryAfter)
+        {
+            return null; // недавний сбой сборки: отчёты не повторяют её чаще раза в RetryAfter
         }
 
         if (usable && seat!.BaseSnapshot == current.SnapshotId)
         {
-            await storage.RollbackSnapshotAsync($"{seat.Zvol}@{DisklessOptions.CleanSnapshot}", ct);
+            await storage.RollbackSnapshotAsync($"{seat.Zvol}@{DisklessOptions.CleanSnapshot}", ct, discardNewer: true);
             await repository.RecordResetAsync(machine.Id, clock.GetUtcNow());
             return Assignment(seat);
         }
@@ -377,7 +366,7 @@ public sealed class SeatGames(
         }
 
         await storage.DeleteSnapshotAsync($"{seat.Zvol}@{DisklessOptions.CleanSnapshot}", ct);
-        var zvol = await storage.DeleteDatasetAsync(seat.Zvol, ct);
+        var zvol = await storage.DeleteDatasetAsync(seat.Zvol, ct, withSnapshots: true);
         if (zvol.Outcome == DeleteOutcome.Blocked)
         {
             throw new InvalidOperationException($"personal games disk {seat.Zvol} not deleted: {zvol.Reason}");

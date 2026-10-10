@@ -70,10 +70,10 @@ public sealed class PersonalGamesEndToEndTests : IAsyncLifetime
     }
 
     /// <summary>Помощник, только что запущенный на ПК с Windows <paramref name="windows"/>.</summary>
-    private HelperLoop Helper(FakeWindowsStorage windows)
+    private HelperLoop Helper(FakeWindowsStorage windows, DelegatingHandler? handler = null)
     {
         var options = new HelperOptions { ClubKey = ServerFixture.ClubKey, DiskWaitSec = 1, HelperVersion = "1.5.0" };
-        var api = new DisklessApiClient(_server.CreateClient(), options, _credentials, _identity);
+        var api = new DisklessApiClient(handler is null ? _server.CreateClient() : _server.CreateDefaultClient(handler), options, _credentials, _identity);
         var volumes = new VolumeManager(windows, _processes, options, TimeProvider.System, NullLogger<VolumeManager>.Instance);
         return new HelperLoop(api, volumes, _cache, _identity, options, NullLogger<HelperLoop>.Instance, new MasterManager(windows, options, TimeProvider.System, NullLogger<MasterManager>.Instance));
     }
@@ -101,10 +101,14 @@ public sealed class PersonalGamesEndToEndTests : IAsyncLifetime
         var machine = await MachineAsync();
         Assert.Equal(("mounted", "v1"), (machine.VolumeState, machine.VolumeVersion));
 
+        // Личный диск монтируется только из ответа на запрос при старте (со сбросом), а не из ответа на отчёт.
+        var resets = _nas.Rollbacks($"{Seats}/games-seat-01");
+        Assert.Equal(1, resets);
+
         // Перезапуск одной службы: диск подключён — сервер его не сбрасывает.
         _nas.AddSession(_identity.InitiatorIqn!, "games-seat-01");
         await Helper(windows).TickAsync(CancellationToken.None);
-        Assert.Equal(0, _nas.Rollbacks($"{Seats}/games-seat-01"));
+        Assert.Equal(resets, _nas.Rollbacks($"{Seats}/games-seat-01"));
 
         // ПК выключили кнопкой: у новой Windows сессий нет, а на сервере висит старая — сброс всё равно.
         await PublishAsync("v2");
@@ -115,6 +119,60 @@ public sealed class PersonalGamesEndToEndTests : IAsyncLifetime
         Assert.True(rebooted.Sessions[SeatTarget] is { ReadOnly: false, Offline: false, Letter: 'G' });
 
         await Helper(new FakeWindowsStorage()).TickAsync(CancellationToken.None);
-        Assert.Equal(1, _nas.Rollbacks($"{Seats}/games-seat-01"));
+        Assert.Equal(resets + 1, _nas.Rollbacks($"{Seats}/games-seat-01"));
+    }
+
+    [Fact]
+    public async Task Empty_reply_does_not_take_the_personal_disk_away()
+    {
+        await PublishAsync("v1");
+        var windows = new FakeWindowsStorage();
+        var dropVolume = new DropVolume();
+        var helper = Helper(windows, dropVolume);
+        await helper.TickAsync(CancellationToken.None);
+        Assert.True(windows.Sessions.ContainsKey(SeatTarget));
+
+        dropVolume.Enabled = true; // сервер ответил на отчёт без назначения (диск готовится, сбой TrueNAS)
+        await helper.TickAsync(CancellationToken.None);
+        Assert.True(windows.Sessions.ContainsKey(SeatTarget));
+        Assert.Equal("mounted", helper.LastReport!.State);
+    }
+
+    [Fact]
+    public async Task Cached_personal_disk_is_not_mounted_while_the_server_is_briefly_unreachable()
+    {
+        await PublishAsync("v1");
+        await Helper(new FakeWindowsStorage()).TickAsync(CancellationToken.None);
+        Assert.True(VolumeManager.IsPersonal(_cache.Current!));
+
+        // Перезагрузка, сервер перезапускается: соединение отклонено. Диск без сброса (с данными прошлого игрока) не берём.
+        var rebooted = new FakeWindowsStorage();
+        var options = new HelperOptions { ClubKey = ServerFixture.ClubKey, DiskWaitSec = 1, HelperVersion = "1.5.0" };
+        var down = new HttpClient { BaseAddress = new Uri("http://127.0.0.1:9/") };
+        var api = new DisklessApiClient(down, options, _credentials, _identity);
+        var helper = new HelperLoop(api, new VolumeManager(rebooted, _processes, options, TimeProvider.System, NullLogger<VolumeManager>.Instance), _cache, _identity, options,
+            NullLogger<HelperLoop>.Instance);
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Empty(rebooted.Sessions);
+        Assert.Equal("none", helper.LastReport!.State);
+    }
+
+    /// <summary>Убирает назначение из ответов на отчёт (<c>PUT …/status</c>), когда включён.</summary>
+    private sealed class DropVolume : DelegatingHandler
+    {
+        public bool Enabled { get; set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var response = await base.SendAsync(request, cancellationToken);
+            if (Enabled && request.Method == HttpMethod.Put && request.RequestUri!.AbsolutePath.EndsWith("/status", StringComparison.Ordinal))
+            {
+                var body = System.Text.Json.Nodes.JsonNode.Parse(await response.Content.ReadAsStringAsync(cancellationToken))!.AsObject();
+                body.Remove("volume");
+                response.Content = new StringContent(body.ToJsonString(), System.Text.Encoding.UTF8, "application/json");
+            }
+
+            return response;
+        }
     }
 }

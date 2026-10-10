@@ -24,10 +24,11 @@ public sealed class DisklessOptions
     public string SetupDirectory { get; set; } = "winsetup";
 
     /// <summary>
-    /// Сколько секунд после последнего отчёта помощника машина считается работающей: пока она работает и подключена к
-    /// своему диску, откат диска запрещён (защита от чужого запроса загрузки с тем же MAC).
+    /// Убрать шлюз из iBFT (<c>set netX/gateway 0.0.0.0</c> перед sanboot/sanhook): инициатор Windows может вести трафик
+    /// к TrueNAS через роутер даже в одной подсети. Включается, если на пилоте <c>route print</c> показал маршрут к порталу
+    /// через роутер (docs/diskless-pilot.md).
     /// </summary>
-    public int RunningWindowSec { get; set; } = 60;
+    public bool ClearIbftGateway { get; set; }
 
     public const string SnapshotPrefix = "img-";
     public const string CleanSnapshot = "clean";
@@ -50,11 +51,6 @@ public sealed class DisklessOptions
         if (!InitiatorPrefix.StartsWith("iqn.", StringComparison.Ordinal) || InitiatorPrefix.Contains(':'))
         {
             throw new InvalidOperationException("Diskless:InitiatorPrefix must look like 'iqn.2026-10.local.club' (no ':')");
-        }
-
-        if (RunningWindowSec < 10)
-        {
-            throw new InvalidOperationException("Diskless:RunningWindowSec must be at least 10");
         }
     }
 

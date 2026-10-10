@@ -222,7 +222,10 @@ public sealed class WindowsMachineFacts : IMachineFactsSource
                     pca2011Revoked = $dbx -match 'Microsoft Windows Production PCA 2011'
                 }
             } catch { }
+            # MAC физических Ethernet-карт (без Hyper-V, TAP, Bluetooth, RNDIS): для HWID плат с заглушкой SMBIOS UUID.
+            $physical = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.MediaType -eq '802.3' } | ForEach-Object { [string]$_.MacAddress })
             [pscustomobject]@{
+                physicalMacs = $physical
                 secureBoot = $sb
                 uuid = [string]$product.UUID; board = [string]$board.SerialNumber; os = "$($os.Caption) $($os.Version)"
                 diskSerial = ([string]$disk.SerialNumber).Trim(); diskModel = [string]$disk.FriendlyName; diskSize = [long]$disk.Size; diskBus = [string]$disk.BusType
@@ -240,7 +243,10 @@ public sealed class WindowsMachineFacts : IMachineFactsSource
             .Select(b => string.Join(':', b.Select(x => x.ToString("x2"))))
             .Distinct()
             .ToList();
-        var hwid = MachineHwid.Compute(uuid, board, macs);
+        var physical = doc.RootElement.TryGetProperty("physicalMacs", out var pm) && pm.ValueKind == JsonValueKind.Array
+            ? pm.EnumerateArray().Select(m => (m.GetString() ?? "").Replace('-', ':').ToLowerInvariant()).Where(m => m.Length == 17).ToList()
+            : [];
+        var hwid = MachineHwid.Compute(uuid, board, physical.Count > 0 ? physical : macs);
         var root = doc.RootElement;
         var systemDisk = root.TryGetProperty("diskSize", out var size) && size.TryGetInt64(out var bytes) && bytes > 0
             ? new SystemDiskFacts(root.GetProperty("diskSerial").GetString(), root.GetProperty("diskModel").GetString(), bytes, root.GetProperty("diskBus").GetString() ?? "")

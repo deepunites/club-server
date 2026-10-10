@@ -86,6 +86,7 @@ TFTP_ROOT=/srv/tftp PXE_ROOT=/srv/club/pxe sh "$PKG/scripts/pxe/install-boot-fil
 step "7/8 image upload share (Samba, user clubimg; password: sudo smbpasswd -a clubimg)"
 id clubimg >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin --groups clubsrv clubimg
 install -d -o clubsrv -g clubsrv -m 2770 /srv/club/images /srv/club/images/incoming
+install -d -m 755 /srv/club/winsetup
 [ -f /etc/samba/smb.conf.orig ] || cp /etc/samba/smb.conf /etc/samba/smb.conf.orig
 NET=$(echo "$SERVER_IP" | cut -d. -f1-3).0/24
 cat > /etc/samba/smb.conf <<CONF
@@ -113,13 +114,26 @@ cat > /etc/samba/smb.conf <<CONF
    force group = clubsrv
    create mask = 0660
    directory mask = 2770
+
+# Windows ISO for the diskless master install (extract-winsetup.sh mounts it here and creates the user winsetup)
+[winsetup]
+   path = /srv/club/winsetup
+   valid users = winsetup
+   read only = yes
+   browseable = no
 CONF
 testparm -s >/dev/null 2>&1
 systemctl restart smbd
 
 step "8/8 club-server service"
-systemctl enable --now club-server
-sleep 10
+# restart, not just start: on a re-run with a new tarball the old process would keep running from deleted files
+systemctl enable club-server
+systemctl restart club-server
+for i in $(seq 1 30); do
+    curl -fs http://127.0.0.1:5080/health >/dev/null 2>&1 && break
+    [ "$i" = 30 ] && { echo "club-server is not healthy after 60 s: journalctl -u club-server -n 50" >&2; exit 1; }
+    sleep 2
+done
 systemctl is-active club-server
 curl -s http://127.0.0.1:5080/health; echo
 curl -s --cacert /etc/club-server/tls/club-ca.crt "https://$SERVER_IP:5443/health"; echo

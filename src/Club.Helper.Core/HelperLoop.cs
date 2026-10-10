@@ -67,6 +67,21 @@ public sealed class HelperLoop(
     /// </summary>
     private bool _windowsTimedOut;
 
+    /// <summary>
+    /// Личный диск игр (таргет), который сервер выдал на запрос при старте помощника — значит, сбросил его для этой
+    /// загрузки (или подтвердил, что он уже подключён здесь). Только такой личный диск монтируется.
+    /// </summary>
+    private string? _personalConfirmed;
+
+    /// <summary>С какого момента (Environment.TickCount64) сервер недоступен при запросе назначения; null — доступен.</summary>
+    private long? _unreachableSince;
+
+    /// <summary>
+    /// Сколько ждать недоступный сервер, прежде чем смонтировать сохранённый личный диск без сброса (с данными прошлого
+    /// игрока): перезапуск службы сервера или поздний DHCP при старте Windows — секунды, а без игр клуб не работает.
+    /// </summary>
+    public static readonly TimeSpan CachedPersonalAfter = TimeSpan.FromMinutes(3);
+
     public MountedVolume? LastReport { get; private set; }
 
     public async Task TickAsync(CancellationToken ct)
@@ -85,7 +100,21 @@ public sealed class HelperLoop(
         }
 
         var changed = false;
-        if (!Equals(reply.Volume, _desired))
+        if (reply.Volume is null && _desired is not null && VolumeManager.IsPersonal(_desired))
+        {
+            // Личный диск не отпускаем из-за пустого ответа (диск готовится, сбой TrueNAS): на нём сессия игрока. Он
+            // сменится при следующем старте помощника.
+            logger.LogDebug("Server sent no assignment; keeping the personal games disk until the next helper start");
+        }
+        else if (reply.Volume is { } offered && VolumeManager.IsPersonal(offered) && offered.TargetIqn != _personalConfirmed)
+        {
+            // Личный диск в ответе на отчёт: сервер не сбрасывал его для этой загрузки. Берём только из запроса при старте.
+            logger.LogInformation("Personal games disk offered in a status reply; asking for it at boot to get it reset first");
+            await LearnAssignmentAsync(ct);
+            report = await ApplyAsync(ct);
+            changed = true;
+        }
+        else if (!Equals(reply.Volume, _desired))
         {
             // Новая версия или откат: применяем сразу, не дожидаясь следующего такта.
             logger.LogInformation("Assignment changed: {Old} -> {New}", _desired?.LibraryVersion, reply.Volume?.LibraryVersion);
@@ -168,18 +197,37 @@ public sealed class HelperLoop(
         {
             _desired = await api.GetVolumeAsync(await volumes.PersonalAttachedAsync(ct), ct);
             _known = true;
+            _unreachableSince = null;
+            _personalConfirmed = _desired is not null && VolumeManager.IsPersonal(_desired) ? _desired.TargetIqn : null;
             await cache.SaveAsync((await identity.ReadAsync(ct)).Hwid, _desired, ct);
         }
         catch (Exception ex) when (ex is ServerUnavailableException or PendingApprovalException)
         {
             // Сервер клуба недоступен (или машина не одобрена): монтируем то, что было назначено в прошлый раз.
             _desired = await cache.LoadAsync((await identity.ReadAsync(ct)).Hwid, ct);
-            if (_desired is not null && VolumeManager.IsPersonal(_desired) && ex is not ServerUnavailableException { Unreachable: true })
+            if (ex is ServerUnavailableException { Unreachable: true })
             {
-                // Личный диск без сброса сервером — с данными прошлого игрока. Сервер отвечает (ошибкой или не успел):
-                // ждём назначения в ответе на отчёт — сервер сбросит диск сам. Сервер недоступен вовсе — монтируем как есть.
-                logger.LogWarning("Server did not give the assignment ({Reason}); waiting for it instead of mounting the cached personal disk", ex.Message);
-                _desired = null;
+                _unreachableSince ??= Environment.TickCount64;
+            }
+            else
+            {
+                _unreachableSince = null;
+            }
+
+            if (_desired is not null && VolumeManager.IsPersonal(_desired))
+            {
+                // Личный диск без сброса сервером — с данными прошлого игрока. Пока сервер отвечает ошибкой или недоступен
+                // недолго (перезапуск службы, DHCP ещё не выдал адрес), спрашиваем снова каждый такт; дольше
+                // CachedPersonalAfter — монтируем как есть: без игр клуб не работает.
+                if (_unreachableSince is not { } since || Environment.TickCount64 - since < (long)CachedPersonalAfter.TotalMilliseconds)
+                {
+                    logger.LogWarning("Server did not give the assignment ({Reason}); asking again instead of mounting the cached personal disk", ex.Message);
+                    _desired = null;
+                    _known = false;
+                    return;
+                }
+
+                _personalConfirmed = _desired.TargetIqn;
             }
 
             _known = _desired is not null;

@@ -67,13 +67,23 @@ testparm -s >/dev/null 2>&1
 systemctl reload smbd 2>/dev/null || systemctl restart smbd
 
 # Batch and ini files for WinPE: CRLF line endings. Setup is started from sources\ (the "previous version" of Setup:
-# it honours LabConfig and finds install.wim next to itself).
+# it honours LabConfig, finds install.wim next to itself and, unlike the 24H2 UI, lists iSCSI disks).
+# NIC drivers for WinPE (docs/diskless-pilot.md): files put into $DEST/drv/ are added by the server as wimboot initrd
+# (they land in X:\Windows\System32); every *.inf there is loaded with drvload before the network starts — without the
+# NIC driver Setup refuses the iSCSI disk. After Setup's first phase (/noreboot) the installed Windows is prepared for
+# its first iSCSI boot (research: NiKiZe/wimboot-install, MS iSCSI boot): the same drivers are added with DISM, NIC
+# services and iScsiPrt get boot-start + BootFlags=1 (only services that exist), crash dumps, device encryption and
+# Fast Startup are off.
+install -d -m 755 "$DEST/drv"
 SETUP_REL=$(printf '%s' "${SETUP#"$SHARE"/}" | tr '/' '\\')
 printf '%s\r\n' \
     '@echo off' \
     'echo Club server: Windows setup onto the diskless system image' \
+    'for %%i in (%SystemRoot%\System32\*.inf) do drvload "%%i"' \
     'wpeinit' \
+    'wpeutil InitializeNetwork' \
     'wpeutil WaitForNetwork' \
+    'iscsicli SessionList' \
     'reg add HKLM\SYSTEM\Setup\LabConfig /v BypassTPMCheck /t REG_DWORD /d 1 /f >nul' \
     'reg add HKLM\SYSTEM\Setup\LabConfig /v BypassSecureBootCheck /t REG_DWORD /d 1 /f >nul' \
     'reg add HKLM\SYSTEM\Setup\LabConfig /v BypassCPUCheck /t REG_DWORD /d 1 /f >nul' \
@@ -85,7 +95,21 @@ printf '%s\r\n' \
     '  ping -n 6 127.0.0.1 >nul' \
     '  goto share' \
     ')' \
-    "W:\\$SETUP_REL" \
+    "W:\\$SETUP_REL /noreboot" \
+    'echo Preparing the installed Windows for booting over iSCSI' \
+    'set T=' \
+    'for %%d in (C D E F G H I J K L M N O P Q R S T U V Y Z) do if exist %%d:\Windows\System32\config\SYSTEM set T=%%d' \
+    'if not defined T goto reboot' \
+    'for %%i in (%SystemRoot%\System32\*.inf) do dism /Image:%T%:\ /Add-Driver /Driver:"%%i"' \
+    'reg load HKLM\CLUBT %T%:\Windows\System32\config\SYSTEM' \
+    'for %%s in (rt640x64 rtcx21x64 e1dexpress e1iexpress e2fexpress) do reg query HKLM\CLUBT\ControlSet001\Services\%%s >nul 2>&1 && reg add HKLM\CLUBT\ControlSet001\Services\%%s /v Start /t REG_DWORD /d 0 /f && reg add HKLM\CLUBT\ControlSet001\Services\%%s /v BootFlags /t REG_DWORD /d 1 /f' \
+    'reg add HKLM\CLUBT\ControlSet001\Services\iScsiPrt /v BootFlags /t REG_DWORD /d 1 /f' \
+    'reg add HKLM\CLUBT\ControlSet001\Control\CrashControl /v CrashDumpEnabled /t REG_DWORD /d 0 /f' \
+    'reg add HKLM\CLUBT\ControlSet001\Control\BitLocker /v PreventDeviceEncryption /t REG_DWORD /d 1 /f' \
+    'reg add "HKLM\CLUBT\ControlSet001\Control\Session Manager\Power" /v HiberbootEnabled /t REG_DWORD /d 0 /f' \
+    'reg unload HKLM\CLUBT' \
+    ':reboot' \
+    'wpeutil reboot' \
     > "$DEST/install.cmd.partial"
 mv "$DEST/install.cmd.partial" "$DEST/install.cmd"
 printf '%s\r\n' '[LaunchApps]' '"install.cmd"' > "$DEST/winpeshl.ini"

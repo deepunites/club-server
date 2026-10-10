@@ -33,6 +33,12 @@ public interface IWindowsStorage
 
     Task<IReadOnlyList<string>> ConnectedTargetsAsync(CancellationToken ct);
 
+    /// <summary>
+    /// Таргеты всех сессий, и подключённых, и восстанавливающих связь (IsConnected = false): такая сессия всё ещё держит
+    /// смонтированный том, переподключать или сбрасывать его диск нельзя.
+    /// </summary>
+    Task<IReadOnlyList<string>> SessionTargetsAsync(CancellationToken ct);
+
     /// <summary>Портал и вход в таргет (без persistent: при загрузке подключает сам помощник, по актуальной версии).</summary>
     Task ConnectAsync(string targetIqn, string portalHost, int portalPort, CancellationToken ct);
 

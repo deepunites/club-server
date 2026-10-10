@@ -94,7 +94,8 @@ public sealed class TrueNasStorage(TrueNasClient client)
     /// Удаление zvol/клона. Предохранители: <c>pool.dataset.attachments</c> должен быть пуст — иначе middleware каскадно
     /// удалит iSCSI-экстенты под подключёнными клиентами; force не передаётся никогда.
     /// </summary>
-    public async Task<DeleteResult> DeleteDatasetAsync(string id, CancellationToken ct = default)
+    /// <param name="withSnapshots">Удалить вместе со снапшотами и дочерними наборами (одноразовые клоны мест).</param>
+    public async Task<DeleteResult> DeleteDatasetAsync(string id, CancellationToken ct = default, bool withSnapshots = false)
     {
         if (await GetDatasetAsync(id, ct) is null)
         {
@@ -109,7 +110,7 @@ public sealed class TrueNasStorage(TrueNasClient client)
 
         try
         {
-            await client.CallAsync("pool.dataset.delete", [id, new { recursive = false, force = false }], ct);
+            await client.CallAsync("pool.dataset.delete", [id, new { recursive = withSnapshots, force = false }], ct);
         }
         catch (TrueNasRpcException ex)
         {
@@ -237,8 +238,12 @@ public sealed class TrueNasStorage(TrueNasClient client)
     /// Откат zvol к его снапшоту — сброс личного диска места перед загрузкой. Настройки iSCSI не меняются (таргет,
     /// экстент и LUN те же), меняется только содержимое тома. Снапшот должен быть последним у тома.
     /// </summary>
-    public async Task RollbackSnapshotAsync(string snapshotId, CancellationToken ct = default) =>
-        await client.CallAsync("pool.snapshot.rollback", [snapshotId, new { }], ct);
+    /// <summary>
+    /// Откат к снапшоту. <paramref name="discardNewer"/> — более новые снапшоты удаляются (<c>zfs rollback -r</c>): для
+    /// одноразовых клонов мест, где их могла создать периодическая задача снапшотов (иначе откат невозможен).
+    /// </summary>
+    public async Task RollbackSnapshotAsync(string snapshotId, CancellationToken ct = default, bool discardNewer = false) =>
+        await client.CallAsync("pool.snapshot.rollback", [snapshotId, new { recursive = discardNewer }], ct);
 
     /// <summary>
     /// Удаление снапшота всегда с <c>defer=true</c>: без клонов ZFS удаляет сразу, с клонами — сам, когда уйдёт последний

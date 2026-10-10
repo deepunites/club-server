@@ -145,24 +145,30 @@ public sealed class PersonalGamesTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Disk_not_reset_since_windows_boot_is_reset_by_the_report_unless_connected()
+    public async Task Disk_the_pc_says_it_has_is_not_reset_even_if_truenas_lost_the_session()
     {
         await PublishAsync("v1");
         var (machine, _) = await TestMachine.RegisterAsync(_server.CreateClient());
-        await ReportAsync(machine, bootTime: DateTimeOffset.UtcNow.AddMinutes(-5));
-        await Task.Delay(50);
+        await ReportAsync(machine);
 
-        // Запрос при старте помощника не дошёл до сервера: Windows загрузилась позже последнего сброса.
-        var boot = DateTimeOffset.UtcNow;
+        // Служба помощника перезапущена, диск смонтирован, а TrueNAS сессии не показывает (перезапуск iSCSI).
+        using var response = await machine.SendAsync(HttpMethod.Get, $"/diskless/v1/machines/{machine.MachineId}/volume?attached=true");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(0, _nas.Rollbacks($"{Seats}/games-seat-01"));
+    }
+
+    [Fact]
+    public async Task Connected_disk_is_still_assigned_after_a_failed_preparation()
+    {
+        await PublishAsync("v1");
+        var (machine, _) = await TestMachine.RegisterAsync(_server.CreateClient());
+        await ReportAsync(machine);
         _nas.AddSession(Iqn, "games-seat-01");
-        Assert.NotNull(await ReportAsync(machine, bootTime: boot));
-        Assert.Equal(0, _nas.Rollbacks($"{Seats}/games-seat-01")); // подключён — не трогаем
+        await _server.Services.GetRequiredService<SeatGamesRepository>().MarkFailedAsync(machine.MachineId, "TrueNAS hiccup", DateTimeOffset.UtcNow);
 
-        _nas.ClearSessions();
-        Assert.NotNull(await ReportAsync(machine, bootTime: boot));
-        Assert.Equal(1, _nas.Rollbacks($"{Seats}/games-seat-01"));
-        Assert.NotNull(await ReportAsync(machine, bootTime: boot));
-        Assert.Equal(1, _nas.Rollbacks($"{Seats}/games-seat-01")); // уже сброшен после загрузки
+        // Пустой ответ заставил бы помощник отпустить диск игрока посреди сеанса.
+        Assert.NotNull(await ReportAsync(machine));
+        Assert.Equal(0, _nas.Rollbacks($"{Seats}/games-seat-01"));
     }
 
     [Fact]

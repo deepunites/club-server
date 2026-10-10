@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Net;
 using System.Security.Cryptography;
 using Club.Server.Data;
 using Club.Server.Library;
@@ -21,6 +22,7 @@ public sealed class SeatDisks(
     TargetVerifier verifier,
     DisklessOptions options,
     LibraryOptions library,
+    Imaging.ImagingOptions imaging,
     TimeProvider clock,
     ILogger<SeatDisks> logger)
 {
@@ -35,19 +37,20 @@ public sealed class SeatDisks(
 
     private readonly ConcurrentDictionary<Guid, Lazy<Task<SeatBoot>>> _inFlight = new();
 
-    public async Task<SeatBoot> PrepareBootAsync(MachineRow machine, CancellationToken ct)
+    /// <param name="clientIp">Адрес, с которого пришёл запрос iPXE: сессия к диску места с другого адреса — место работает.</param>
+    public async Task<SeatBoot> PrepareBootAsync(MachineRow machine, string? clientIp, CancellationToken ct)
     {
-        var lazy = _inFlight.GetOrAdd(machine.Id, _ => new Lazy<Task<SeatBoot>>(() => RunAsync(machine)));
+        var lazy = _inFlight.GetOrAdd(machine.Id, _ => new Lazy<Task<SeatBoot>>(() => RunAsync(machine, clientIp)));
         var task = lazy.Value;
         var finished = await Task.WhenAny(task, Task.Delay(AnswerWithin, clock, ct));
         return finished == task ? await task : new SeatBoot(DisklessScripts.Wait(machine.Number, "preparing the seat disk"));
     }
 
-    private async Task<SeatBoot> RunAsync(MachineRow machine)
+    private async Task<SeatBoot> RunAsync(MachineRow machine, string? clientIp)
     {
         try
         {
-            return await PrepareAsync(machine, CancellationToken.None);
+            return await PrepareAsync(machine, clientIp, CancellationToken.None);
         }
         catch (Exception ex)
         {
@@ -61,8 +64,16 @@ public sealed class SeatDisks(
         }
     }
 
-    private async Task<SeatBoot> PrepareAsync(MachineRow machine, CancellationToken ct)
+    private async Task<SeatBoot> PrepareAsync(MachineRow machine, string? clientIp, CancellationToken ct)
     {
+        // Диск этой машины подключён с другого адреса — на нём работает Windows (запрос загрузки чужой: MAC виден всем в
+        // сети, адрес boot.ipxe открыт). Ни сброса, ни пересборки: синий экран и потерянная сессия. С того же адреса — это
+        // сам ПК после перезагрузки кнопкой (адрес по резервации Kea), сессия висит до таймаута — она не мешает.
+        if (await repository.FindSeatAsync(machine.Id) is { } own && await InUseElsewhereAsync(own.TargetName, clientIp, ct))
+        {
+            return new SeatBoot(DisklessScripts.Wait(machine.Number, "this seat is still running from its disk"));
+        }
+
         var image = await repository.GetImageAsync();
         if (image.MasterMachineId == machine.Id)
         {
@@ -72,8 +83,8 @@ public sealed class SeatDisks(
             logger.LogInformation("Diskless: seat {Seat} boots the system image in master mode ({How})", machine.Number,
                 install ? "Windows setup" : image.MasterInstall ? "setup continues from the disk" : "editing");
             return new SeatBoot(install
-                ? DisklessScripts.Install(machine.Number, options.MasterInitiator, master, library.PortalAddress, options.SetupDirectory)
-                : DisklessScripts.SanBoot(machine.Number, options.MasterInitiator, master, library.PortalAddress, "system image (master mode)"));
+                ? DisklessScripts.Install(machine.Number, options.MasterInitiator, master, library.PortalAddress, options.SetupDirectory, SetupDrivers(), options.ClearIbftGateway)
+                : DisklessScripts.SanBoot(machine.Number, options.MasterInitiator, master, library.PortalAddress, "system image (master mode)", options.ClearIbftGateway));
         }
 
         if (image.CurrentVersion is null || await repository.FindVersionAsync(image.CurrentVersion) is not { } version)
@@ -86,13 +97,7 @@ public sealed class SeatDisks(
         var current = seat is { Kind: "seat", State: "ready" } && seat.TargetName == label && seat.BaseSnapshot == version.Snapshot;
         if (current)
         {
-            if (await IsRunningAsync(machine, seat!, ct))
-            {
-                // Windows этого места работает с диском: запрос загрузки — не от него (или ПК ещё не отключился).
-                return new SeatBoot(DisklessScripts.Wait(machine.Number, "this seat is still running from its disk"));
-            }
-
-            await storage.RollbackSnapshotAsync($"{seat!.Zvol}@{DisklessOptions.CleanSnapshot}", ct);
+            await storage.RollbackSnapshotAsync($"{seat!.Zvol}@{DisklessOptions.CleanSnapshot}", ct, discardNewer: true);
         }
         else
         {
@@ -101,22 +106,30 @@ public sealed class SeatDisks(
 
         await repository.RecordBootAsync(machine.Id, clock.GetUtcNow());
         logger.LogInformation("Diskless: seat {Seat} boots image {Version} ({How})", machine.Number, version.Version, current ? "reset" : "new disk");
-        return new SeatBoot(DisklessScripts.SanBoot(machine.Number, seat!.InitiatorIqn, seat, library.PortalAddress, $"image {version.Version}"));
+        return new SeatBoot(DisklessScripts.SanBoot(machine.Number, seat!.InitiatorIqn, seat, library.PortalAddress, $"image {version.Version}", options.ClearIbftGateway));
     }
 
-    /// <summary>
-    /// Работает ли Windows места прямо сейчас: помощник отчитался недавно и сессия к диску есть. Только вместе:
-    /// после перезагрузки сессия может висеть до таймаута iSCSI, а свежий отчёт без сессии — ПК уже в iPXE.
-    /// </summary>
-    private async Task<bool> IsRunningAsync(MachineRow machine, SeatDiskRow seat, CancellationToken ct)
-    {
-        if (machine.LastSeenAt is not { } seen || clock.GetUtcNow() - seen > TimeSpan.FromSeconds(options.RunningWindowSec))
-        {
-            return false;
-        }
+    /// <summary>Есть ли сессия к таргету с адреса, отличного от <paramref name="clientIp"/> (адрес неизвестен — любая).</summary>
+    private async Task<bool> InUseElsewhereAsync(string targetName, string? clientIp, CancellationToken ct) =>
+        (await storage.GetSessionsAsync(ct)).Any(s => s.Target.EndsWith($":{targetName}", StringComparison.Ordinal) && !SameAddress(s.InitiatorAddress, clientIp));
 
-        var sessions = await storage.GetSessionsAsync(ct);
-        return sessions.Any(s => s.Target.EndsWith($":{seat.TargetName}", StringComparison.Ordinal));
+    public static bool SameAddress(string sessionAddress, string? clientIp) =>
+        clientIp is not null && IPAddress.TryParse(sessionAddress, out var a) && IPAddress.TryParse(clientIp, out var b) && Plain(a).Equals(Plain(b));
+
+    private static IPAddress Plain(IPAddress ip) => ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip;
+
+    /// <summary>
+    /// Драйверы для WinPE установщика: файлы в <c>Imaging:PxeRoot/&lt;SetupDirectory&gt;/drv/</c> (только простые имена —
+    /// они попадают в скрипт iPXE и в X:\Windows\System32).
+    /// </summary>
+    private IReadOnlyList<string> SetupDrivers()
+    {
+        var directory = Path.Combine(imaging.PxeRoot, options.SetupDirectory, "drv");
+        return Directory.Exists(directory)
+            ? Directory.EnumerateFiles(directory).Select(Path.GetFileName).OfType<string>()
+                .Where(name => name.Length <= 64 && name.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '_'))
+                .Order(StringComparer.Ordinal).ToList()
+            : [];
     }
 
     /// <summary>
@@ -284,7 +297,7 @@ public sealed class SeatDisks(
         if (seat.Kind == "seat")
         {
             await storage.DeleteSnapshotAsync($"{seat.Zvol}@{DisklessOptions.CleanSnapshot}", ct);
-            var zvol = await storage.DeleteDatasetAsync(seat.Zvol, ct);
+            var zvol = await storage.DeleteDatasetAsync(seat.Zvol, ct, withSnapshots: true);
             if (zvol.Outcome == DeleteOutcome.Blocked)
             {
                 throw new InvalidOperationException($"seat disk {seat.Zvol} not deleted: {zvol.Reason}");

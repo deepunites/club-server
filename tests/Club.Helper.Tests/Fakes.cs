@@ -53,6 +53,12 @@ public sealed class FakeWindowsStorage : IWindowsStorage
             : Task.FromResult<IReadOnlyList<string>>(_sessions.Keys.ToList());
     }
 
+    /// <summary>Сессии, которые Windows восстанавливает (IsConnected = false): в ConnectedTargets их нет.</summary>
+    public HashSet<string> RecoveringSessions { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public Task<IReadOnlyList<string>> SessionTargetsAsync(CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<string>>([.. _sessions.Keys, .. RecoveringSessions]);
+
     public Task ConnectAsync(string targetIqn, string portalHost, int portalPort, CancellationToken ct)
     {
         Log.Add($"connect {targetIqn} {portalHost}:{portalPort}");

@@ -30,17 +30,27 @@ public static class PxeEndpoints
     {
         var pxe = app.MapGroup(Prefix);
 
-        // Первый скрипт: iPXE узнаёт свой MAC и спрашивает, что делать именно этой машине.
+        // Первый скрипт: iPXE узнаёт свой MAC и спрашивает, что делать именно этой машине. Скрипт машины заменяет этот
+        // (--replace): его exit 1 — выход в прошивку. Сервер не ответил (перезапуск) — до минуты повторов, потом локальный
+        // диск: бездисковый ПК иначе ушёл бы в прошивку с первой же неудачи.
         pxe.MapGet("/boot.ipxe", () => Results.Text("""
             #!ipxe
-            chain --autofree /pxe/v1/machines/${netX/mac:hexhyp}/boot.ipxe || goto local
+            set tries:int32 0
+            :retry
+            chain --autofree --replace /pxe/v1/machines/${netX/mac:hexhyp}/boot.ipxe || goto unreachable
+            :unreachable
+            inc tries
+            iseq ${tries} 12 && goto local ||
+            echo Club server unreachable, retrying in 5 s
+            sleep 5
+            goto retry
             :local
             echo Club server unreachable, booting from local disk
             iseq ${platform} efi && exit 1 || sanboot --no-describe --drive 0x80
 
             """.Replace("\r\n", "\n", StringComparison.Ordinal), "text/plain"));
 
-        pxe.MapGet("/machines/{mac}/boot.ipxe", async (string mac, ImageRepository images, Data.MachineRepository machines, ReimageService reimage,
+        pxe.MapGet("/machines/{mac}/boot.ipxe", async (string mac, HttpContext context, ImageRepository images, Data.MachineRepository machines, ReimageService reimage,
             Diskless.DisklessOptions diskless, Diskless.DisklessRepository disklessRepository, Diskless.SeatDisks seats, ILoggerFactory logs, CancellationToken ct) =>
         {
             var normalized = ReimageService.NormalizeMac(mac);
@@ -51,7 +61,7 @@ public static class PxeEndpoints
                 if (diskless.Enabled && normalized is not null && await machines.FindByMacAsync(normalized) is { Approved: true } candidate
                     && (candidate.BootMode == "diskless" || (await disklessRepository.GetImageAsync()).MasterMachineId == candidate.Id))
                 {
-                    return Results.Text((await seats.PrepareBootAsync(candidate, ct)).Script, "text/plain");
+                    return Results.Text((await seats.PrepareBootAsync(candidate, context.Connection.RemoteIpAddress?.ToString(), ct)).Script, "text/plain");
                 }
 
                 // Флага нет (Kea ещё не обновилась или ПК загрузился в iPXE сам) — только локальная загрузка.

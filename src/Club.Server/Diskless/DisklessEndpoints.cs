@@ -74,7 +74,7 @@ public static partial class DisklessEndpoints
         {
             RequireSelf(context, machineId);
             var volume = options.PersonalGames
-                ? await machines.FindAsync(machineId) is { } machine ? await seatGames.AssignmentAsync(machine, atBoot: true, ct, detachedHere: attached == false) : null
+                ? await machines.FindAsync(machineId) is { } machine ? await seatGames.AssignmentAsync(machine, atBoot: true, ct, attached) : null
                 : await AssignmentAsync(library, options);
             return volume is not null ? Results.Json(volume, ApiJson.Options) : Results.NoContent();
         });

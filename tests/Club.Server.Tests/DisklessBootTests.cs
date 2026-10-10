@@ -183,6 +183,66 @@ public sealed class DisklessBootTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Request_by_mac_never_rebuilds_or_resets_a_running_seat()
+    {
+        await DisklessSeatAsync();
+        await PublishAsync("v1");
+        await BootScriptAsync();
+        _nas.AddSession("iqn.2026-10.local.club:seat-01", "seat-01"); // Windows места работает с диска
+        await PublishAsync("v2");
+
+        // Чужой запрос по MAC (браузер игрока): версия устарела, но диск работающего места не трогаем.
+        Assert.Contains("still running from its disk", await BootScriptAsync());
+        Assert.Equal($"{Image}@img-v1", (await _storage.GetDatasetAsync($"{Seats}/seat-01"))!.Origin);
+        Assert.Equal(0, _nas.Rollbacks($"{Seats}/seat-01"));
+    }
+
+    [Fact]
+    public async Task Seat_resets_even_with_newer_snapshots_on_its_clone()
+    {
+        await DisklessSeatAsync();
+        await PublishAsync("v1");
+        await BootScriptAsync();
+        // Периодическая задача снапшотов TrueNAS захватила клон места.
+        await _storage.EnsureSnapshotAsync($"{Seats}/seat-01", "auto-2026-10-11", new Dictionary<string, string> { ["clubsrv:role"] = "test" });
+
+        Assert.Contains("sanboot iscsi:", await BootScriptAsync());
+        Assert.Equal(1, _nas.Rollbacks($"{Seats}/seat-01"));
+        Assert.Null(await _storage.GetSnapshotAsync($"{Seats}/seat-01@auto-2026-10-11"));
+
+        await PublishAsync("v2"); // пересборка удаляет клон вместе со снапшотами
+        await _storage.EnsureSnapshotAsync($"{Seats}/seat-01", "auto-2026-10-12", new Dictionary<string, string> { ["clubsrv:role"] = "test" });
+        Assert.Contains("sanboot iscsi:", await BootScriptAsync());
+        Assert.Equal($"{Image}@img-v2", (await _storage.GetDatasetAsync($"{Seats}/seat-01"))!.Origin);
+    }
+
+    [Fact]
+    public void Scripts_retry_without_growing_the_stack_and_unhook_before_hooking()
+    {
+        var disk = new Diskless.SeatDiskRow { ChapUser = "seat-01", ChapSecret = "Secret0123456789", TargetIqn = $"{Basename}:seat-01" };
+        var install = Diskless.DisklessScripts.Install(1, "iqn.2026-10.local.club:master", disk, "192.168.1.200:3260", "winsetup", ["rt640x64.cat", "rt640x64.inf", "rt640x64.sys"], clearGateway: true);
+        Assert.Contains("initrd /pxe/v1/files/winsetup/drv/rt640x64.inf rt640x64.inf || goto failed\n", install);
+        Assert.Contains("set netX/gateway 0.0.0.0\n", install);
+        Assert.True(install.IndexOf("sanunhook --drive 0x80 ||", StringComparison.Ordinal) < install.IndexOf("sanhook --drive 0x80", StringComparison.Ordinal));
+        Assert.Contains("chain --autofree --replace /pxe/v1/machines/${netX/mac:hexhyp}/boot.ipxe || goto unreachable\n", install);
+        Assert.Contains("goto retry\n", install);
+
+        var boot = Diskless.DisklessScripts.SanBoot(1, "iqn.2026-10.local.club:seat-01", disk, "192.168.1.200:3260", "image v1");
+        Assert.DoesNotContain("netX/gateway", boot);
+        Assert.Contains("sanunhook --drive 0x80 ||\nsanboot", boot);
+        Assert.True(Diskless.SeatDisks.SameAddress("192.168.1.106", "::ffff:192.168.1.106"));
+        Assert.False(Diskless.SeatDisks.SameAddress("192.168.1.106", null));
+    }
+
+    [Fact]
+    public async Task First_script_retries_an_unreachable_server_then_replaces_itself()
+    {
+        var script = await (await _server.CreateClient().GetAsync("/pxe/v1/boot.ipxe")).Content.ReadAsStringAsync();
+        Assert.Contains("chain --autofree --replace /pxe/v1/machines/${netX/mac:hexhyp}/boot.ipxe || goto unreachable\n", script);
+        Assert.Contains("iseq ${tries} 12 && goto local ||\n", script);
+    }
+
+    [Fact]
     public async Task Master_install_hooks_the_image_and_starts_windows_setup()
     {
         var machine = await DisklessSeatAsync();
