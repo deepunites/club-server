@@ -1,0 +1,290 @@
+using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using Club.Server.Data;
+using Club.Server.Diskless;
+using Club.TrueNas;
+using Dapper;
+using Npgsql;
+
+namespace Club.Server.Library;
+
+public sealed class SeatGameRow
+{
+    public Guid MachineId { get; init; }
+    public string Zvol { get; init; } = "";
+    public string TargetName { get; init; } = "";
+    public string InitiatorIqn { get; init; } = "";
+    public string? BaseSnapshot { get; init; }
+    public string? LibraryVersion { get; init; }
+    public string ChapUser { get; init; } = "";
+    public string ChapSecret { get; init; } = "";
+    public int? AuthTag { get; init; }
+    public string? TargetIqn { get; init; }
+    public string State { get; init; } = "new";
+    public string? LastError { get; init; }
+    public int Resets { get; init; }
+    public DateTimeOffset? LastResetAt { get; init; }
+    public DateTimeOffset UpdatedAt { get; init; }
+}
+
+public sealed class SeatGamesRepository(NpgsqlDataSource db)
+{
+    private const string Columns = """
+        machine_id AS MachineId, zvol, target_name AS TargetName, initiator_iqn AS InitiatorIqn, base_snapshot AS BaseSnapshot,
+        library_version AS LibraryVersion, chap_user AS ChapUser, chap_secret AS ChapSecret, auth_tag AS AuthTag, target_iqn AS TargetIqn,
+        state, last_error AS LastError, resets, last_reset_at AS LastResetAt, updated_at AS UpdatedAt
+        """;
+
+    static SeatGamesRepository() => DapperSetup.Ensure();
+
+    public async Task<SeatGameRow?> FindAsync(Guid machineId)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        return await c.QuerySingleOrDefaultAsync<SeatGameRow>($"SELECT {Columns} FROM seat_games WHERE machine_id = @machineId", new { machineId });
+    }
+
+    public async Task<IReadOnlyList<SeatGameRow>> AllAsync()
+    {
+        await using var c = await db.OpenConnectionAsync();
+        return (await c.QueryAsync<SeatGameRow>($"SELECT {Columns} FROM seat_games ORDER BY target_name")).ToList();
+    }
+
+    public async Task UpsertAsync(SeatGameRow seat, DateTimeOffset now)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        await c.ExecuteAsync("""
+            INSERT INTO seat_games (machine_id, zvol, target_name, initiator_iqn, base_snapshot, library_version, chap_user, chap_secret, auth_tag, state, updated_at)
+            VALUES (@MachineId, @Zvol, @TargetName, @InitiatorIqn, @BaseSnapshot, @LibraryVersion, @ChapUser, @ChapSecret, @AuthTag, 'new', @now)
+            ON CONFLICT (machine_id) DO UPDATE SET zvol = EXCLUDED.zvol, target_name = EXCLUDED.target_name, initiator_iqn = EXCLUDED.initiator_iqn,
+                base_snapshot = EXCLUDED.base_snapshot, library_version = EXCLUDED.library_version, chap_user = EXCLUDED.chap_user,
+                chap_secret = EXCLUDED.chap_secret, auth_tag = EXCLUDED.auth_tag, state = 'new', last_error = NULL, updated_at = @now
+            """, new { seat.MachineId, seat.Zvol, seat.TargetName, seat.InitiatorIqn, seat.BaseSnapshot, seat.LibraryVersion, seat.ChapUser, seat.ChapSecret, seat.AuthTag, now });
+    }
+
+    public async Task MarkReadyAsync(Guid machineId, int authTag, string targetIqn, DateTimeOffset now)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        await c.ExecuteAsync(
+            "UPDATE seat_games SET state = 'ready', auth_tag = @authTag, target_iqn = @targetIqn, last_error = NULL, updated_at = @now WHERE machine_id = @machineId",
+            new { machineId, authTag, targetIqn, now });
+    }
+
+    public async Task MarkFailedAsync(Guid machineId, string error, DateTimeOffset now)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        await c.ExecuteAsync("UPDATE seat_games SET state = 'failed', last_error = @error, updated_at = @now WHERE machine_id = @machineId", new { machineId, error, now });
+    }
+
+    public async Task RecordResetAsync(Guid machineId, DateTimeOffset now)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        await c.ExecuteAsync(
+            "UPDATE seat_games SET resets = resets + 1, last_reset_at = @now, updated_at = @now WHERE machine_id = @machineId", new { machineId, now });
+    }
+}
+
+/// <summary>
+/// Личный слой игр места (<see cref="LibraryOptions.PersonalGames"/>, docs/diskless-full.md §2): записываемый клон
+/// снапшота текущей версии библиотеки, CHAP места и группа из его IQN. Точка сброса — запрос назначения при старте
+/// помощника (загрузка ПК): если к диску никто не подключён, клон откатывается к <c>@clean</c>, а при новой версии —
+/// пересоздаётся. Пока ПК работает (отчёты), назначение не меняется: новая версия — со следующей загрузки.
+/// Read-only устройств нет вовсе — ошибка SCST TrueNAS 25.10 с ними не возникает.
+/// </summary>
+public sealed class SeatGames(
+    SeatGamesRepository repository,
+    LibraryRepository library,
+    TrueNasStorage storage,
+    TargetVerifier verifier,
+    LibraryOptions options,
+    DisklessOptions diskless,
+    TimeProvider clock,
+    ILogger<SeatGames> logger)
+{
+    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _locks = new();
+
+    public const string TargetPrefix = "games-seat-";
+
+    public static string TargetName(int number) => $"{TargetPrefix}{number:D2}";
+
+    /// <summary>После сбоя сборки отчёты (каждые 15–30 с) не повторяют её раньше этого срока; запуск помощника — сразу.</summary>
+    public static readonly TimeSpan RetryAfter = TimeSpan.FromMinutes(2);
+
+    /// <summary>Помощник умеет личный слой (подключение на запись с CHAP).</summary>
+    public bool Supports(string helperVersion) =>
+        Version.TryParse(helperVersion.Split('-', '+')[0], out var have) && Version.TryParse(options.PersonalMinHelper, out var need) && have >= need;
+
+    /// <summary>
+    /// Назначение личного тома игр. <paramref name="atBoot"/> — запрос при старте помощника: можно сбросить диск и
+    /// перейти на новую версию (если к диску никто не подключён). <paramref name="detachedHere"/> — помощник сообщил, что
+    /// на ПК диск не подключён: сессия на сервере осталась от прошлой загрузки и сбросу не мешает. null — режим выключен,
+    /// помощник старый, версии нет или IQN ПК ещё неизвестен (помощник сообщит его в отчёте — тогда назначение придёт в
+    /// ответе на отчёт).
+    /// </summary>
+    public async Task<VolumeAssignment?> AssignmentAsync(MachineRow machine, bool atBoot, CancellationToken ct, bool detachedHere = false)
+    {
+        if (!options.Enabled || !options.PersonalGames || !Supports(machine.HelperVersion))
+        {
+            return null;
+        }
+
+        var initiators = Initiators(machine);
+        if (initiators.Count == 0 || (await library.PointersAsync()).Current is not { } current)
+        {
+            return null;
+        }
+
+        var gate = _locks.GetOrAdd(machine.Id, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
+        try
+        {
+            var seat = await repository.FindAsync(machine.Id);
+            var name = TargetName(machine.Number);
+            var usable = seat is { State: "ready" } && seat.TargetName == name && seat.InitiatorIqn == string.Join(' ', initiators);
+            if (usable && !atBoot)
+            {
+                return Assignment(seat!);
+            }
+
+            if (!atBoot && seat is { State: "failed" } && clock.GetUtcNow() - seat.UpdatedAt < RetryAfter)
+            {
+                return null;
+            }
+
+            if (!(atBoot && detachedHere) && await IsConnectedAsync(seat?.TargetName ?? name, ct))
+            {
+                // Диском пользуются (служба помощника перезапущена без перезагрузки ПК): не сбрасываем и не меняем версию.
+                return usable ? Assignment(seat!) : null;
+            }
+
+            if (usable && seat!.BaseSnapshot == current.SnapshotId)
+            {
+                await storage.RollbackSnapshotAsync($"{seat.Zvol}@{DisklessOptions.CleanSnapshot}", ct);
+                await repository.RecordResetAsync(machine.Id, clock.GetUtcNow());
+                return Assignment(seat);
+            }
+
+            try
+            {
+                return Assignment(await RebuildAsync(machine, seat, current, initiators, ct));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogError(ex, "Personal games disk of seat {Seat} failed", machine.Number);
+                await repository.MarkFailedAsync(machine.Id, ex.Message, clock.GetUtcNow());
+                return null;
+            }
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>IQN, которым ПК подключается: сообщённый помощником; у бездискового — ещё и имя места из iBFT.</summary>
+    private List<string> Initiators(MachineRow machine)
+    {
+        var list = new List<string>();
+        if (!string.IsNullOrWhiteSpace(machine.InitiatorIqn))
+        {
+            list.Add(machine.InitiatorIqn);
+        }
+
+        if (machine.BootMode == "diskless")
+        {
+            list.Add(diskless.SeatInitiator(machine.Number));
+        }
+
+        return list.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToList();
+    }
+
+    private async Task<bool> IsConnectedAsync(string targetName, CancellationToken ct) =>
+        (await storage.GetSessionsAsync(ct)).Any(s => s.Target.EndsWith($":{targetName}", StringComparison.Ordinal));
+
+    private VolumeAssignment Assignment(SeatGameRow seat) =>
+        new(seat.LibraryVersion ?? "", options.PortalAddress, seat.TargetIqn!, ReadOnly: false, options.DriveLetter, seat.ChapUser, seat.ChapSecret);
+
+    private async Task<SeatGameRow> RebuildAsync(MachineRow machine, SeatGameRow? old, LibraryVersion version, IReadOnlyList<string> initiators, CancellationToken ct)
+    {
+        var name = TargetName(machine.Number);
+        await TearDownAsync(old ?? new SeatGameRow { MachineId = machine.Id, Zvol = $"{options.PersonalParent}/{name}", TargetName = name, ChapUser = name }, ct);
+        if (await storage.GetDatasetAsync(options.PersonalParent, ct) is null)
+        {
+            throw new InvalidOperationException($"{options.PersonalParent} does not exist: create the dataset in TrueNAS (Library:PersonalParent)");
+        }
+
+        var seat = new SeatGameRow
+        {
+            MachineId = machine.Id,
+            Zvol = $"{options.PersonalParent}/{name}",
+            TargetName = name,
+            InitiatorIqn = string.Join(' ', initiators),
+            BaseSnapshot = version.SnapshotId,
+            LibraryVersion = version.Label,
+            ChapUser = name,
+            ChapSecret = NewSecret(),
+            AuthTag = old?.AuthTag,
+        };
+        await repository.UpsertAsync(seat, clock.GetUtcNow());
+
+        var labels = new Dictionary<string, string> { ["clubsrv:role"] = "seat-games", ["clubsrv:libver"] = version.Label };
+        await storage.EnsureWritableCloneAsync(version.SnapshotId, seat.Zvol, labels, ct);
+        await storage.EnsureSnapshotAsync(seat.Zvol, DisklessOptions.CleanSnapshot, labels, ct);
+
+        var tag = await ChapTags.EnsureAsync(storage, seat.AuthTag, seat.ChapUser, seat.ChapSecret, ct);
+        var group = await storage.EnsureInitiatorGroupAsync(GroupComment(name), initiators, ct);
+        var extent = await storage.EnsureWritableExtentAsync(name, seat.Zvol, $"clubsrv personal games seat {machine.Number:D2}", ct);
+        var target = await storage.EnsureChapTargetAsync(name, $"games seat {machine.Number}", options.PortalId, group.Id, tag, ct);
+        await storage.EnsureLunAsync(target.Id, extent.Id, ct);
+
+        switch (await verifier.EnsureVisibleAsync(name, initiators[0], ct))
+        {
+            case TargetCheck.Hidden:
+                throw new InvalidOperationException($"target {name} is not visible to {initiators[0]} even after re-applying the iSCSI configuration");
+            case TargetCheck.ProbeDenied:
+                throw new InvalidOperationException($"the initiator group of {name} does not admit {initiators[0]}");
+        }
+
+        var targetIqn = $"{await storage.GetIscsiBasenameAsync(ct)}:{name}";
+        await repository.MarkReadyAsync(machine.Id, tag, targetIqn, clock.GetUtcNow());
+        logger.LogInformation("Seat {Seat}: personal games disk on library {Version}", machine.Number, version.Label);
+        return (await repository.FindAsync(machine.Id))!;
+    }
+
+    private static string GroupComment(string targetName) => $"clubsrv {targetName}";
+
+    /// <summary>Таргет (force — ПК не подключён, висящая сессия не нужна), экстент, группа, CHAP, затем @clean и клон.</summary>
+    private async Task TearDownAsync(SeatGameRow seat, CancellationToken ct)
+    {
+        await storage.DeleteTargetAsync(seat.TargetName, force: true, ct);
+        var extent = await storage.DeleteExtentAsync(seat.TargetName, ct);
+        if (extent.Outcome == DeleteOutcome.Blocked)
+        {
+            throw new InvalidOperationException($"extent {seat.TargetName} not deleted: {extent.Reason}");
+        }
+
+        await storage.DeleteInitiatorGroupAsync(GroupComment(seat.TargetName), ct);
+        if (seat.AuthTag is { } tag)
+        {
+            await storage.DeleteAuthAsync(tag, seat.ChapUser, ct);
+        }
+
+        await storage.DeleteSnapshotAsync($"{seat.Zvol}@{DisklessOptions.CleanSnapshot}", ct);
+        var zvol = await storage.DeleteDatasetAsync(seat.Zvol, ct);
+        if (zvol.Outcome == DeleteOutcome.Blocked)
+        {
+            throw new InvalidOperationException($"personal games disk {seat.Zvol} not deleted: {zvol.Reason}");
+        }
+    }
+
+    private static string NewSecret()
+    {
+        const string alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+        return string.Create(16, 0, (span, _) =>
+        {
+            for (var i = 0; i < span.Length; i++)
+            {
+                span[i] = alphabet[RandomNumberGenerator.GetInt32(alphabet.Length)];
+            }
+        });
+    }
+}

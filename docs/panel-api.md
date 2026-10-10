@@ -90,7 +90,9 @@ ru/uz/en; узбекский перевод — черновой, провери
 | `PATCH /machines/{id}` `{ number?, name?, zone?, maintenance? }` | Номер места (1…9999, уникален), имя, зона, режим обслуживания | 204; 400; 404; 409 (`numberTaken`) |
 
 Машина: `id, number, name, zone, status, hostname, ipAddress, macAddresses, helperVersion, osVersion, lastSeenAt,
-bootTime, volume { state, libraryVersion, readOnlyVerified, outdated, error }, registeredAt`.
+bootTime, volume { state, libraryVersion, readOnlyVerified, outdated, error, personal }, registeredAt`.
+`volume.personal` — подключён личный диск игр места (`games-seat-NN`, Library:PersonalGames): он на запись по замыслу,
+`readOnlyVerified` у него нет.
 
 `status`: `pendingApproval` → `maintenance` → `neverSeen` / `online` (отчёт помощника не старше 90 с) / `offline`.
 Время из будущего (сбитые часы) считается невменяемым: в ответе `null`, на экране прочерк, в логе предупреждение.

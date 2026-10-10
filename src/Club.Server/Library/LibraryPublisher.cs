@@ -53,6 +53,12 @@ public sealed partial class LibraryPublisher(
             throw new LibraryRequestException("label", "Version label must match ^[a-z0-9][a-z0-9-]{0,39}$");
         }
 
+        if (label.StartsWith("seat-", StringComparison.Ordinal))
+        {
+            // games-seat-NN — личные диски игр мест (SeatGames); по имени таргета помощник отличает их от версий.
+            throw new LibraryRequestException("label", "Version labels starting with seat- are reserved");
+        }
+
         // Снапшот мастер-тома, открытого на запись, — снимок посреди правки (NTFS может быть недописана).
         var masterState = await master.GetAsync();
         if (masterState.State != "closed")
@@ -182,6 +188,15 @@ public sealed partial class LibraryPublisher(
         await Step(operation, "snapshot");
         var snapshotName = version.SnapshotId[(version.SnapshotId.IndexOf('@') + 1)..];
         var snapshot = await storage.EnsureSnapshotAsync(options.MasterZvol, snapshotName, Labels(version, operation.Id, "snapshot"), ct);
+
+        if (options.PersonalGames)
+        {
+            // Личный слой игр: версия — только снапшот; клоны на каждое место делает SeatGames при загрузке ПК.
+            await Step(operation, "promote");
+            var promotedRetiring = await repository.PromoteAsync(version.Id, clock.GetUtcNow());
+            logger.LogInformation("Library {Label} published as current (personal games: snapshot only); retiring {Retiring}", version.Label, promotedRetiring);
+            return;
+        }
 
         await Step(operation, "clone");
         var clone = await storage.EnsureReadOnlyCloneAsync(snapshot.Id, version.CloneId, Labels(version, operation.Id, "published"), ct);
@@ -320,6 +335,21 @@ public sealed partial class LibraryPublisher(
         var warnings = new List<(string Kind, string Subject, string Message)>();
         var pointers = await repository.PointersAsync();
         var versions = new[] { pointers.Current, pointers.Rollback }.OfType<LibraryVersion>().ToList();
+
+        if (options.PersonalGames)
+        {
+            // Личный слой игр: у версии только снапшот (клоны и таргеты — у мест).
+            foreach (var version in versions)
+            {
+                if (await storage.GetSnapshotAsync(version.SnapshotId, ct) is null)
+                {
+                    var role = version.Id == pointers.Current?.Id ? "current" : "rollback";
+                    warnings.Add(("missingSnapshot", version.SnapshotId, $"Снапшот {role}-версии {version.Label} отсутствует в TrueNAS"));
+                }
+            }
+
+            return warnings;
+        }
 
         // Видят ли ПК таргеты версий: конфиг в TrueNAS может быть верным, а рантайм SCST — нет (сорвавшийся reload).
         IReadOnlyList<string>? discovered = versions.Count == 0 ? [] : await verifier.DiscoverAsync(verifier.ProbeInitiator, ct);

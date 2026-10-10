@@ -160,7 +160,7 @@ public sealed class HelperLoop(
     {
         try
         {
-            _desired = await api.GetVolumeAsync(ct);
+            _desired = await api.GetVolumeAsync(await volumes.PersonalAttachedAsync(ct), ct);
             _known = true;
             await cache.SaveAsync(_desired, ct);
         }

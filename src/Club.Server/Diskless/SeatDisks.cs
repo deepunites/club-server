@@ -189,8 +189,7 @@ public sealed class SeatDisks(
     /// <summary>CHAP, группа инициаторов из одного IQN, записываемый экстент, таргет, LUN и проверка видимости.</summary>
     private async Task<SeatDiskRow> ExposeAsync(SeatDiskRow seat, string groupComment, CancellationToken ct)
     {
-        var tag = seat.AuthTag ?? await FreeAuthTagAsync(ct);
-        await storage.EnsureChapAsync(tag, seat.ChapUser, seat.ChapSecret, ct);
+        var tag = await ChapTags.EnsureAsync(storage, seat.AuthTag, seat.ChapUser, seat.ChapSecret, ct);
         var group = await storage.EnsureInitiatorGroupAsync(groupComment, seat.InitiatorIqn, ct);
         var extent = await storage.EnsureWritableExtentAsync(seat.TargetName, seat.Zvol, $"{groupComment} disk", ct);
         var target = await storage.EnsureChapTargetAsync(seat.TargetName, seat.TargetName, library.PortalId, group.Id, tag, ct);
@@ -234,12 +233,6 @@ public sealed class SeatDisks(
                 throw new InvalidOperationException($"seat disk {seat.Zvol} not deleted: {zvol.Reason}");
             }
         }
-    }
-
-    private async Task<int> FreeAuthTagAsync(CancellationToken ct)
-    {
-        var tags = (await storage.ListAuthAsync(ct)).Select(a => a.Tag).ToList();
-        return tags.Count == 0 ? 1 : tags.Max() + 1;
     }
 
     /// <summary>16 символов из букв и цифр: предел TrueNAS (12..16) и инициатора; iPXE передаёт его как есть.</summary>

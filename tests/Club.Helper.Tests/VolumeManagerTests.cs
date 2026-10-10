@@ -448,6 +448,52 @@ public sealed class VolumeManagerTests
         Assert.False(_storage.Sessions.ContainsKey(V1));
     }
 
+    private const string Seat = "iqn.2005-10.org.freenas.ctl:games-seat-07";
+
+    private static VolumeAssignment Personal() => new("v1", "192.168.77.10:3260", Seat, ReadOnly: false, "G", "games-seat-07", "Secret0123456789");
+
+    [Fact]
+    public async Task Personal_disk_is_mounted_writable_with_chap()
+    {
+        var report = await _volumes.ApplyAsync(Personal(), CancellationToken.None);
+
+        Assert.Equal(("mounted", (bool?)null), (report.State, report.ReadOnlyVerified));
+        Assert.Equal([(Seat, "games-seat-07", "Secret0123456789")], _storage.ChapLogins);
+        Assert.Equal(["san", $"connect {Seat} 192.168.77.10:3260", "online 2", "letter 2 G"], _storage.Log);
+        Assert.True(_storage.Sessions[Seat] is { ReadOnly: false, Offline: false, Letter: 'G' });
+
+        _storage.Log.Clear();
+        Assert.Equal("mounted", (await _volumes.ApplyAsync(Personal(), CancellationToken.None)).State);
+        Assert.Empty(_storage.Log); // проверка не делает его read-only и ничего не трогает
+        Assert.True(await _volumes.PersonalAttachedAsync(CancellationToken.None));
+        Assert.Null(VolumeManager.VersionOfTarget(Seat));
+    }
+
+    [Fact]
+    public async Task Shared_version_gives_way_to_the_personal_disk_when_free()
+    {
+        await _volumes.ApplyAsync(Assign(V1, "v1"), CancellationToken.None);
+        _processes.Running['G'] = [@"G:\Steam\steam.exe"];
+
+        var report = await _volumes.ApplyAsync(Personal(), CancellationToken.None);
+        Assert.Equal(("switchPending", "v1"), (report.State, report.LibraryVersion));
+        Assert.False(_storage.Sessions.ContainsKey(Seat));
+
+        _processes.Running.Clear();
+        report = await _volumes.ApplyAsync(Personal(), CancellationToken.None);
+        Assert.Equal("mounted", report.State);
+        Assert.False(_storage.Sessions.ContainsKey(V1));
+    }
+
+    [Fact]
+    public async Task Writable_assignment_without_chap_or_for_another_target_is_refused()
+    {
+        Assert.Equal("failed", (await _volumes.ApplyAsync(Personal() with { ChapSecret = null }, CancellationToken.None)).State);
+        Assert.Equal("failed", (await _volumes.ApplyAsync(Assign(V1, "v1") with { ReadOnly = false, ChapUser = "u", ChapSecret = "s" }, CancellationToken.None)).State);
+        Assert.Empty(_storage.Log);
+        Assert.False(await _volumes.PersonalAttachedAsync(CancellationToken.None));
+    }
+
     [Theory]
     [InlineData("192.168.77.10:3260", "192.168.77.10", 3260)]
     [InlineData("nas.club.lan:3261", "nas.club.lan", 3261)]

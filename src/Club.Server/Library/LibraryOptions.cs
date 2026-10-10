@@ -71,6 +71,19 @@ public sealed class LibraryOptions
     public string MasterDriveLetter { get; set; } = "M";
 
     /// <summary>
+    /// Личный слой игр (docs/diskless-full.md §2): каждое место получает записываемый клон текущей версии со своим
+    /// CHAP; при старте помощника (загрузка ПК) клон сбрасывается к <c>@clean</c>, новая версия — новый клон.
+    /// Публикация — только снапшот: общих read-only томов нет. Помощники старше <see cref="PersonalMinHelper"/>
+    /// назначения не получают (они не подключают том на запись).
+    /// </summary>
+    public bool PersonalGames { get; set; }
+
+    /// <summary>Родитель личных клонов игр (файловая система; создаётся администратором в TrueNAS).</summary>
+    public string PersonalParent { get; set; } = "tank/club/seats";
+
+    public string PersonalMinHelper { get; set; } = "1.5.0";
+
+    /// <summary>
     /// Ошибки настройки — при старте сервера: иначе неверный адрес портала всплыл бы только на шаге verify первой
     /// публикации. Выключенный модуль не проверяется.
     /// </summary>
@@ -90,6 +103,18 @@ public sealed class LibraryOptions
         if (DiscoveryTimeoutMs < 1 || VerifyDelayMs < 0)
         {
             throw new InvalidOperationException("Library:DiscoveryTimeoutMs must be positive and Library:VerifyDelayMs must not be negative");
+        }
+
+        if (PersonalGames && (string.IsNullOrWhiteSpace(PersonalParent) || !PersonalParent.Contains('/') || PersonalParent.Contains('@')
+            || PersonalParent.StartsWith('/') || PersonalParent.EndsWith('/') || !Version.TryParse(PersonalMinHelper, out _)))
+        {
+            throw new InvalidOperationException("Library:PersonalParent must be a dataset path like 'ssd/club/seats' and Library:PersonalMinHelper a version like 1.5.0");
+        }
+
+        if (PersonalGames && PersonalParent.Split('/')[0] != MasterZvol.Split('/')[0])
+        {
+            // Клон ZFS живёт только в пуле своего снапшота.
+            throw new InvalidOperationException($"Library:PersonalParent ({PersonalParent}) must be in the pool of Library:MasterZvol ({MasterZvol})");
         }
 
         if (!Diskless.DisklessEndpoints.IsInitiatorIqn(ProbeInitiatorIqn))

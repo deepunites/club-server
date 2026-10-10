@@ -134,7 +134,8 @@
     const [kind, key] = VOLUME[volume.state] || ["idle", volume.state];
     const badges = [badge(kind, volume.libraryVersion ? `${volume.libraryVersion} · ${t(key)}` : t(key), volume.error || "")];
     if (volume.outdated) badges.push(badge("warn", t("volOutdated")));
-    if (volume.state === "mounted" && volume.readOnlyVerified !== true) badges.push(badge("bad", t("volNotVerified")));
+    if (volume.personal) badges.push(badge("idle", t("volPersonal"), t("volPersonalHint")));
+    else if (volume.state === "mounted" && volume.readOnlyVerified !== true) badges.push(badge("bad", t("volNotVerified")));
     return el("div", { class: "badges" }, badges);
   }
 

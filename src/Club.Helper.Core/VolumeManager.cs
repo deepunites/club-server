@@ -12,7 +12,10 @@ namespace Club.Helper.Core;
 /// остаётся, повтор в следующем такте; насильно не отключается никогда;</item>
 /// <item>Windows не ответила (таймаут PowerShell) при проверке подключённой версии — не повод её отключать: <c>failed</c>
 /// с причиной, сессия остаётся (кроме диска, оказавшегося на запись, — тогда fail-closed);</item>
-/// <item>нет назначения (сервер ничего не опубликовал) — том отключается, когда освободится.</item>
+/// <item>нет назначения (сервер ничего не опубликовал) — том отключается, когда освободится;</item>
+/// <item>личный диск игр места (<c>games-seat-NN</c>, помощник 1.5+): единственный том, который подключается на запись, —
+/// с CHAP места; сервер сбрасывает его при каждой загрузке ПК. Read-only тут не проверяется (ReadOnlyVerified = null).
+/// Любое другое назначение на запись не выполняется.</item>
 /// </list>
 /// Недоступность сервера сюда не доходит: цикл просто не вызывает <see cref="ApplyAsync"/> с новым назначением.
 /// </summary>
@@ -20,6 +23,31 @@ public sealed class VolumeManager(IWindowsStorage storage, IProcessInspector pro
 {
     /// <summary>Таргеты версий библиотеки называются <c>games-&lt;версия&gt;</c>; чужие iSCSI-подключения ПК не трогаем.</summary>
     public const string ManagedTargetMarker = ":games-";
+
+    /// <summary>Личный диск игр места: <c>games-seat-NN</c> (SeatGames на сервере; версии с меткой seat-* сервер не публикует).</summary>
+    public const string PersonalTargetMarker = ":games-seat-";
+
+    /// <summary>Назначение — личный диск места: на запись, с CHAP, таргет <c>games-seat-NN</c>.</summary>
+    public static bool IsPersonal(VolumeAssignment desired) =>
+        !desired.ReadOnly && desired.ChapUser is { Length: > 0 } && desired.ChapSecret is { Length: > 0 }
+        && desired.TargetIqn.Contains(PersonalTargetMarker, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Подключён ли на ПК личный диск игр — для запроса назначения при старте (сервер сбрасывает диск, только если нет);
+    /// опрос не удался — <c>null</c>: сервер решит по своим сессиям.
+    /// </summary>
+    public async Task<bool?> PersonalAttachedAsync(CancellationToken ct)
+    {
+        try
+        {
+            return (await ManagedTargetsAsync(ct)).Any(t => t.Contains(PersonalTargetMarker, StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            logger.LogWarning("Could not list iSCSI sessions before asking for the assignment: {Reason}", ex.Message);
+            return null;
+        }
+    }
 
     /// <summary>Старые версии, которые не удалось отпустить в прошлый раз, и почему: в журнал — смена причины, а не каждый такт.</summary>
     private Dictionary<string, string> _held = new(StringComparer.OrdinalIgnoreCase);
@@ -56,6 +84,11 @@ public sealed class VolumeManager(IWindowsStorage storage, IProcessInspector pro
         }
 
         var label = iqn[(at + ManagedTargetMarker.Length)..].ToLowerInvariant();
+        if (label.StartsWith("seat-", StringComparison.Ordinal))
+        {
+            return null; // личный диск места: версия не в имени таргета
+        }
+
         return label.Length is > 0 and <= 40 && label[0] != '-' && label.All(c => c is (>= 'a' and <= 'z') or (>= '0' and <= '9') or '-') ? label : null;
     }
 
@@ -89,9 +122,10 @@ public sealed class VolumeManager(IWindowsStorage storage, IProcessInspector pro
             return busy is null ? new MountedVolume("none") : new MountedVolume("switchPending", busy.Iqn, VersionOfTarget(busy.Iqn), Error: busy.Reason);
         }
 
-        if (!desired.ReadOnly)
+        if (!desired.ReadOnly && !IsPersonal(desired))
         {
-            // Общий том всем ПК — только чтение; иное назначение считаем ошибкой сервера и не выполняем.
+            // Общий том всем ПК — только чтение; на запись — только личный диск места с CHAP. Иное назначение считаем
+            // ошибкой сервера и не выполняем.
             return new MountedVolume("failed", desired.TargetIqn, desired.LibraryVersion, Error: "assignment is not read-only");
         }
 
@@ -183,7 +217,15 @@ public sealed class VolumeManager(IWindowsStorage storage, IProcessInspector pro
         try
         {
             await storage.EnsureSanPolicyOfflineSharedAsync(ct);
-            await storage.ConnectAsync(desired.TargetIqn, host, port, ct);
+            if (IsPersonal(desired))
+            {
+                await storage.ConnectChapAsync(desired.TargetIqn, host, port, desired.ChapUser!, desired.ChapSecret!, ct);
+            }
+            else
+            {
+                await storage.ConnectAsync(desired.TargetIqn, host, port, ct);
+            }
+
             Connected(desired.TargetIqn);
             var disk = await WaitForDiskAsync(desired.TargetIqn, ct) ?? throw new InvalidOperationException("disk of the target did not appear");
             return await BringUpAsync(desired, disk, letter, ct);
@@ -203,7 +245,7 @@ public sealed class VolumeManager(IWindowsStorage storage, IProcessInspector pro
         try
         {
             seen = await storage.FindDiskAsync(desired.TargetIqn, ct) ?? throw new InvalidOperationException("session has no disk");
-            if (seen.IsReadOnly && !seen.IsOffline && seen.DriveLetter == letter)
+            if ((seen.IsReadOnly || IsPersonal(desired)) && !seen.IsOffline && seen.DriveLetter == letter)
             {
                 return Mounted(desired, letter);
             }
@@ -212,7 +254,7 @@ public sealed class VolumeManager(IWindowsStorage storage, IProcessInspector pro
             logger.LogWarning("Volume {Iqn} drifted (ro={Ro}, offline={Offline}, letter={Letter}); repairing", desired.TargetIqn, seen.IsReadOnly, seen.IsOffline, seen.DriveLetter);
             return await BringUpAsync(desired, seen, letter, ct);
         }
-        catch (Exception ex) when (IsTimeout(ex, ct) && seen is not { IsReadOnly: false })
+        catch (Exception ex) when (IsTimeout(ex, ct) && (IsPersonal(desired) || seen is not { IsReadOnly: false }))
         {
             // Windows не ответила (PowerShell дольше 120 с) — это не «том нездоров»: выдёргивать проверенный read-only том
             // из-под игры из-за медленной Windows нельзя. failed с причиной, сессия остаётся, повтор в следующем такте.
@@ -233,6 +275,11 @@ public sealed class VolumeManager(IWindowsStorage storage, IProcessInspector pro
     /// <summary>read-only с проверкой → online → буква. Порядок важен: online раньше read-only = NTFS на запись.</summary>
     private async Task<MountedVolume> BringUpAsync(VolumeAssignment desired, DiskInfo disk, char letter, CancellationToken ct)
     {
+        if (IsPersonal(desired))
+        {
+            return await BringUpPersonalAsync(desired, disk, letter, ct);
+        }
+
         if (!disk.IsReadOnly)
         {
             await storage.SetDiskReadOnlyAsync(disk.Number, ct);
@@ -260,6 +307,34 @@ public sealed class VolumeManager(IWindowsStorage storage, IProcessInspector pro
         }
 
         logger.LogInformation("Library {Version} mounted read-only at {Letter}:", desired.LibraryVersion, letter);
+        return Mounted(desired, letter);
+    }
+
+    /// <summary>Личный диск места: снять read-only (если Windows его помнит) → online → буква.</summary>
+    private async Task<MountedVolume> BringUpPersonalAsync(VolumeAssignment desired, DiskInfo disk, char letter, CancellationToken ct)
+    {
+        if (disk.IsReadOnly)
+        {
+            await storage.SetDiskWritableAsync(disk.Number, ct);
+        }
+
+        if (disk.IsOffline)
+        {
+            await storage.SetDiskOnlineAsync(disk.Number, ct);
+        }
+
+        if (disk.DriveLetter != letter)
+        {
+            await storage.AssignDriveLetterAsync(disk.Number, letter, ct);
+        }
+
+        var final = await storage.FindDiskAsync(desired.TargetIqn, ct) ?? throw new InvalidOperationException("disk disappeared");
+        if (final.IsOffline || final.DriveLetter != letter)
+        {
+            throw new InvalidOperationException($"volume not in expected state (offline={final.IsOffline}, letter={final.DriveLetter})");
+        }
+
+        logger.LogInformation("Personal games disk (library {Version}) mounted at {Letter}:", desired.LibraryVersion, letter);
         return Mounted(desired, letter);
     }
 
@@ -483,7 +558,7 @@ public sealed class VolumeManager(IWindowsStorage storage, IProcessInspector pro
         }
 
         _letters[desired.TargetIqn] = letter;
-        return new("mounted", desired.TargetIqn, desired.LibraryVersion, letter.ToString(), ReadOnlyVerified: true);
+        return new("mounted", desired.TargetIqn, desired.LibraryVersion, letter.ToString(), ReadOnlyVerified: IsPersonal(desired) ? null : true);
     }
 
     public static (string Host, int Port) ParsePortal(string portal)

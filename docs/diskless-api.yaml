@@ -73,11 +73,25 @@ paths:
     get:
       operationId: getVolume
       summary: Какой том библиотеки монтировать сейчас
+      description: >-
+        Запрос при старте помощника (загрузка ПК). С личным слоем игр (Library:PersonalGames, помощник 1.5+) это точка
+        сброса: если личный диск места никто не использует, сервер откатывает его к чистому состоянию, а при новой версии
+        библиотеки — пересоздаёт от неё. Пока ПК работает (отчёты status), назначение не меняется.
       security:
         - machineBearer: []
+      parameters:
+        - name: attached
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: >-
+            Подключён ли на ПК личный диск игр (помощник 1.5+ проверяет свои iSCSI-сессии). false — сессия на сервере,
+            если есть, осталась от прошлой загрузки (ПК выключили кнопкой), и сброс разрешён. Нет параметра (опрос не
+            удался, старый помощник) — сервер решает по своим сессиям: есть сессия — не сбрасывает.
       responses:
         '200':
-          description: Текущая опубликованная версия библиотеки.
+          description: Текущая опубликованная версия библиотеки (или личный диск места).
           content:
             application/json:
               schema:
@@ -260,10 +274,13 @@ components:
     VolumeAssignment:
       type: object
       required: [libraryVersion, portal, targetIqn, readOnly, driveLetter]
+      description: >-
+        Общий том версии — read-only, без CHAP, таргет games-<версия>. Личный диск места (Library:PersonalGames) —
+        таргет games-seat-NN, readOnly=false, chapUser и chapSecret обязательны; помощник подключает на запись только его.
       properties:
         libraryVersion:
           type: string
-          description: Метка версии библиотеки (например 2026-09).
+          description: Метка версии библиотеки (например 2026-09); у личного диска — версия, от которой он создан.
         portal:
           type: string
           description: Портал iSCSI, `host:port`.
@@ -271,11 +288,18 @@ components:
           type: string
         readOnly:
           type: boolean
-          const: true
-          description: Том общий для всех ПК — только чтение.
+          description: true — общий том всем ПК, только чтение; false — только личный диск места (games-seat-NN) с CHAP.
         driveLetter:
           type: string
           pattern: '^[D-Z]$'
+        chapUser:
+          type: string
+          description: Только у личного диска места.
+        chapSecret:
+          type: string
+          minLength: 12
+          maxLength: 16
+          description: Только у личного диска места. Не пишется в журналы.
     VolumeState:
       type: string
       enum: [none, mounting, mounted, switchPending, failed]
@@ -300,7 +324,9 @@ components:
           type: string
         readOnlyVerified:
           type: boolean
-          description: Диск на ПК подтверждённо read-only (атрибут диска), а не только по настройке.
+          description: >-
+            Диск на ПК подтверждённо read-only (атрибут диска), а не только по настройке. У личного диска места не
+            передаётся (он на запись по замыслу).
         error:
           type: string
         contents:
@@ -308,7 +334,8 @@ components:
           maxItems: 1000
           description: >-
             Папки верхнего уровня тома (без скрытых и системных) — «состав» версии библиотеки для панели. Помощник шлёт
-            их один раз после подключения версии. Сервер принимает только при state=mounted и readOnlyVerified=true.
+            их один раз после подключения версии. Сервер принимает только при state=mounted и readOnlyVerified=true (с личным
+            слоем игр — при state=mounted).
           items:
             type: string
             maxLength: 255

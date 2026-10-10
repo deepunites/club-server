@@ -5,7 +5,8 @@ using Club.Server.Library;
 namespace Club.Server.Panel;
 
 /// <summary>Том на ПК по последнему отчёту помощника.</summary>
-public sealed record MachineVolumeView(string State, string? LibraryVersion, bool? ReadOnlyVerified, bool Outdated, string? Error);
+/// <summary><paramref name="Personal"/> — подключён личный диск игр места (games-seat-NN): он на запись по замыслу.</summary>
+public sealed record MachineVolumeView(string State, string? LibraryVersion, bool? ReadOnlyVerified, bool Outdated, string? Error, bool Personal = false);
 
 /// <summary>
 /// Строка экрана «Рабочие станции». <c>status</c>: <c>pendingApproval</c> | <c>maintenance</c> | <c>online</c> |
@@ -160,7 +161,8 @@ public static class MachinesPanelEndpoints
         return new MachineView(
             m.Id, m.Number, m.Name, m.ZoneId, status, m.Hostname, string.IsNullOrEmpty(m.IpAddress) ? null : m.IpAddress,
             m.MacAddresses, string.IsNullOrEmpty(m.HelperVersion) ? null : m.HelperVersion, m.OsVersion, lastSeen, bootTime,
-            new MachineVolumeView(m.VolumeState, m.VolumeVersion, m.VolumeRoVerified, outdated, m.VolumeError), m.CreatedAt,
+            new MachineVolumeView(m.VolumeState, m.VolumeVersion, m.VolumeRoVerified, outdated, m.VolumeError,
+                m.VolumeIqn?.Contains($":{Library.SeatGames.TargetPrefix}", StringComparison.Ordinal) == true), m.CreatedAt,
             m.ImageVersion,
             job is not null && (activeJob || job.FinishedAt is null || now - job.FinishedAt < TimeSpan.FromDays(1))
                 ? new ReimageView(job.State, labels.GetValueOrDefault(job.ImageId, "?"), job.Step, job.Percent, job.Message, job.Failure,

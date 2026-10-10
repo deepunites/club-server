@@ -71,9 +71,8 @@ public sealed class MasterEditor(
         }
 
         await step("auth");
-        var tag = state.AuthTag ?? await FreeAuthTagAsync(ct);
+        var tag = await ChapTags.EnsureAsync(storage, state.AuthTag, state.ChapUser!, state.ChapSecret!, ct);
         await master.SetAuthTagAsync(tag);
-        await storage.EnsureChapAsync(tag, state.ChapUser!, state.ChapSecret!, ct);
 
         await step("initiator");
         var group = await storage.EnsureInitiatorGroupAsync(InitiatorComment, state.InitiatorIqn!, ct);
@@ -149,13 +148,6 @@ public sealed class MasterEditor(
 
         await master.MarkClosedAsync(clock.GetUtcNow());
         logger.LogInformation("Master volume closed (force: {Force})", state.ForceClose);
-    }
-
-    /// <summary>Tag для CHAP мастер-тома: следующий за занятыми (уникальность tag TrueNAS сам не проверяет).</summary>
-    private async Task<int> FreeAuthTagAsync(CancellationToken ct)
-    {
-        var tags = (await storage.ListAuthAsync(ct)).Select(a => a.Tag).ToList();
-        return tags.Count == 0 ? 1 : tags.Max() + 1;
     }
 
     /// <summary>16 символов из букв и цифр — предел и TrueNAS (12..16), и инициатора Windows.</summary>

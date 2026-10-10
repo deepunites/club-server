@@ -7,7 +7,7 @@ namespace Club.Server.Data.Migrations;
 /// и личные диски мест — записываемые клоны версии эталона со снапшотом <c>@clean</c>, к которому том откатывается
 /// перед каждой загрузкой. Режим мастера: одна машина грузится прямо с zvol эталона (без клона и отката).
 /// </summary>
-[Migration(2026101001, "diskless: boot mode, system image versions, seat disks")]
+[Migration(2026101001, "diskless: boot mode, system image versions, seat disks, personal games")]
 public sealed class M0009_Diskless : Migration
 {
     public override void Up()
@@ -50,12 +50,32 @@ public sealed class M0009_Diskless : Migration
                 last_boot_at   timestamptz NULL,
                 updated_at     timestamptz NOT NULL DEFAULT now()
             );
+
+            -- Личный слой игр места (Library:PersonalGames): записываемый клон снапшота версии библиотеки.
+            CREATE TABLE seat_games (
+                machine_id       uuid PRIMARY KEY REFERENCES machines (id) ON DELETE CASCADE,
+                zvol             text NOT NULL,
+                target_name      text NOT NULL UNIQUE,
+                initiator_iqn    text NOT NULL,
+                base_snapshot    text NULL,
+                library_version  text NULL,
+                chap_user        text NOT NULL,
+                chap_secret      text NOT NULL,
+                auth_tag         integer NULL,
+                target_iqn       text NULL,
+                state            text NOT NULL DEFAULT 'new' CHECK (state IN ('new', 'ready', 'failed')),
+                last_error       text NULL,
+                resets           integer NOT NULL DEFAULT 0,
+                last_reset_at    timestamptz NULL,
+                updated_at       timestamptz NOT NULL DEFAULT now()
+            );
             """);
     }
 
     public override void Down()
     {
         Execute.Sql("""
+            DROP TABLE seat_games;
             DROP TABLE seat_disks;
             DROP TABLE diskless_versions;
             DROP TABLE diskless_image;

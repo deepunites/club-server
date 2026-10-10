@@ -7,7 +7,12 @@ using System.Text.Json.Serialization;
 namespace Club.Helper.Core;
 
 // DTO по docs/diskless-api.yaml.
-public sealed record VolumeAssignment(string LibraryVersion, string Portal, string TargetIqn, bool ReadOnly, string DriveLetter);
+/// <summary>
+/// Назначение тома игр. Общий том версии — read-only, без CHAP. Личный диск места (сервер с Library:PersonalGames,
+/// помощник 1.5+) — таргет <c>games-seat-NN</c>, на запись, с CHAP.
+/// </summary>
+public sealed record VolumeAssignment(
+    string LibraryVersion, string Portal, string TargetIqn, bool ReadOnly, string DriveLetter, string? ChapUser = null, string? ChapSecret = null);
 
 public sealed record MountedVolume(
     string State, string? TargetIqn = null, string? LibraryVersion = null, string? DriveLetter = null, bool? ReadOnlyVerified = null, string? Error = null,
@@ -53,9 +58,14 @@ public sealed class DisklessApiClient(HttpClient http, HelperOptions options, IC
 
     public Guid? MachineId => _credentials?.MachineId;
 
-    public async Task<VolumeAssignment?> GetVolumeAsync(CancellationToken ct)
+    /// <summary>
+    /// Назначение при старте помощника. <paramref name="attached"/> — подключён ли на ПК личный диск игр (<c>null</c> —
+    /// неизвестно): <c>false</c> разрешает серверу сбросить диск, даже если на нём висит сессия прошлой загрузки.
+    /// </summary>
+    public async Task<VolumeAssignment?> GetVolumeAsync(bool? attached, CancellationToken ct)
     {
-        using var response = await SendAuthorizedAsync(id => new HttpRequestMessage(HttpMethod.Get, $"diskless/v1/machines/{id}/volume"), ct);
+        var query = attached is { } a ? $"?attached={(a ? "true" : "false")}" : "";
+        using var response = await SendAuthorizedAsync(id => new HttpRequestMessage(HttpMethod.Get, $"diskless/v1/machines/{id}/volume{query}"), ct);
         return response.StatusCode == HttpStatusCode.NoContent ? null : await ReadAsync<VolumeAssignment>(response, ct);
     }
 

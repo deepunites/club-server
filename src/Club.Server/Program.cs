@@ -66,6 +66,8 @@ builder.Services.AddSingleton<TargetVerifier>();
 builder.Services.AddSingleton<MasterRepository>();
 builder.Services.AddSingleton<MasterEditor>();
 builder.Services.AddSingleton<LibraryPublisher>();
+builder.Services.AddSingleton<SeatGamesRepository>();
+builder.Services.AddSingleton<SeatGames>();
 builder.Services.AddSingleton(disklessOptions);
 builder.Services.AddSingleton<DisklessRepository>();
 builder.Services.AddSingleton<DisklessImages>();

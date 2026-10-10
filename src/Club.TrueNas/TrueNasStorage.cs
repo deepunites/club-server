@@ -480,11 +480,16 @@ public sealed class TrueNasStorage(TrueNasClient client)
     /// Группа инициаторов из одного IQN. Пустой список в TrueNAS открывает таргет всем, поэтому IQN обязателен;
     /// существующая группа с другим IQN обновляется.
     /// </summary>
-    public async Task<IscsiInitiatorGroup> EnsureInitiatorGroupAsync(string comment, string initiatorIqn, CancellationToken ct = default)
+    public Task<IscsiInitiatorGroup> EnsureInitiatorGroupAsync(string comment, string initiatorIqn, CancellationToken ct = default) =>
+        EnsureInitiatorGroupAsync(comment, [initiatorIqn], ct);
+
+    /// <summary>Группа ровно из этих IQN (порядок не важен). Пустой список запрещён: пустая группа — доступ всем.</summary>
+    public async Task<IscsiInitiatorGroup> EnsureInitiatorGroupAsync(string comment, IReadOnlyList<string> initiatorIqns, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(initiatorIqn))
+        var wanted = initiatorIqns.Where(i => !string.IsNullOrWhiteSpace(i)).Distinct(StringComparer.Ordinal).ToArray();
+        if (wanted.Length == 0)
         {
-            throw new ArgumentException("initiator IQN is required: an empty group grants access to everyone", nameof(initiatorIqn));
+            throw new ArgumentException("initiator IQN is required: an empty group grants access to everyone", nameof(initiatorIqns));
         }
 
         var existing = await GetInitiatorGroupAsync(comment, ct);
@@ -493,7 +498,7 @@ public sealed class TrueNasStorage(TrueNasClient client)
             TrueNasRpcException? failure = null;
             try
             {
-                await client.CallAsync("iscsi.initiator.create", [new { initiators = new[] { initiatorIqn }, comment }], ct);
+                await client.CallAsync("iscsi.initiator.create", [new { initiators = wanted, comment }], ct);
             }
             catch (TrueNasRpcException ex)
             {
@@ -503,9 +508,9 @@ public sealed class TrueNasStorage(TrueNasClient client)
             return await GetInitiatorGroupAsync(comment, ct) ?? throw new InvalidOperationException($"initiator group {comment} was not created", failure);
         }
 
-        if (existing.Initiators.Count != 1 || existing.Initiators[0] != initiatorIqn)
+        if (!existing.Initiators.OrderBy(i => i, StringComparer.Ordinal).SequenceEqual(wanted.OrderBy(i => i, StringComparer.Ordinal)))
         {
-            await client.CallAsync("iscsi.initiator.update", [existing.Id, new { initiators = new[] { initiatorIqn } }], ct);
+            await client.CallAsync("iscsi.initiator.update", [existing.Id, new { initiators = wanted }], ct);
         }
 
         return await GetInitiatorGroupAsync(comment, ct) ?? throw new InvalidOperationException($"initiator group {comment} disappeared");

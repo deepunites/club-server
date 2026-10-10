@@ -15,7 +15,8 @@ public sealed record RefreshRequest(string RefreshToken, string Hwid);
 
 public sealed record RefreshResponse(string AccessToken, string RefreshToken, DateTimeOffset ExpiresAt);
 
-public sealed record VolumeAssignment(string LibraryVersion, string Portal, string TargetIqn, bool ReadOnly, string DriveLetter);
+/// <summary>Назначение тома игр. Личный слой места (Library:PersonalGames): <c>readOnly=false</c> и CHAP места.</summary>
+public sealed record VolumeAssignment(string LibraryVersion, string Portal, string TargetIqn, bool ReadOnly, string DriveLetter, string? ChapUser = null, string? ChapSecret = null);
 
 public sealed record MountedVolume(
     string State, string? TargetIqn, string? LibraryVersion, string? DriveLetter, bool? ReadOnlyVerified, string? Error,
@@ -65,10 +66,17 @@ public static partial class DisklessEndpoints
         var api = app.MapGroup(MachineAuthMiddleware.Prefix);
         api.MapPost("/machines/register", RegisterAsync);
         api.MapPost("/machines/refresh", RefreshAsync);
-        api.MapGet("/machines/{machineId:guid}/volume", async (Guid machineId, HttpContext context, LibraryRepository library, LibraryOptions options) =>
+        // Запрос при старте помощника (загрузка ПК): для личного слоя игр — точка сброса диска и перехода на новую версию.
+        // attached=false — помощник проверил: на этом ПК личный диск не подключён, сессия на сервере (если есть) осталась от
+        // прошлой загрузки (ПК выключили кнопкой) и сбросу не мешает.
+        api.MapGet("/machines/{machineId:guid}/volume", async (Guid machineId, bool? attached, HttpContext context, LibraryRepository library, LibraryOptions options,
+            MachineRepository machines, SeatGames seatGames, CancellationToken ct) =>
         {
             RequireSelf(context, machineId);
-            return await AssignmentAsync(library, options) is { } volume ? Results.Json(volume, ApiJson.Options) : Results.NoContent();
+            var volume = options.PersonalGames
+                ? await machines.FindAsync(machineId) is { } machine ? await seatGames.AssignmentAsync(machine, atBoot: true, ct, detachedHere: attached == false) : null
+                : await AssignmentAsync(library, options);
+            return volume is not null ? Results.Json(volume, ApiJson.Options) : Results.NoContent();
         });
         api.MapPut("/machines/{machineId:guid}/status", StatusAsync);
     }
@@ -156,7 +164,7 @@ public static partial class DisklessEndpoints
         return Results.Json(new RefreshResponse(access, refresh, expiresAt), ApiJson.Options);
     }
 
-    private static async Task<IResult> StatusAsync(Guid machineId, MachineStatus request, HttpContext context, MachineRepository machines, LibraryRepository library, LibraryOptions options, Imaging.ImageRepository images, MasterRepository master, TimeProvider clock)
+    private static async Task<IResult> StatusAsync(Guid machineId, MachineStatus request, HttpContext context, MachineRepository machines, LibraryRepository library, LibraryOptions options, Imaging.ImageRepository images, MasterRepository master, SeatGames seatGames, TimeProvider clock, CancellationToken ct)
     {
         RequireSelf(context, machineId);
         Require(request.HelperVersion, "helperVersion");
@@ -172,7 +180,9 @@ public static partial class DisklessEndpoints
             new VolumeReport(v.State, v.TargetIqn, v.LibraryVersion, v.ReadOnlyVerified, Truncate(v.Error, 2000)), dhcp, clock.GetUtcNow(),
             ImageVersionOrNull(request.ImageVersion), SystemDiskJson(request.SystemDisk),
             request.SecureBoot is { } sb ? System.Text.Json.JsonSerializer.Serialize(sb, System.Text.Json.JsonSerializerOptions.Web) : null);
-        if (v is { State: "mounted", ReadOnlyVerified: true, LibraryVersion: { } mountedVersion, Contents: { } contents })
+        // Состав версии — с тома, который точно версия: общий read-only (проверен) или свежий личный клон (сброшен при
+        // загрузке; запись игрока до отчёта о составе почти невозможна, а состав — только список папок верхнего уровня).
+        if (v is { State: "mounted", LibraryVersion: { } mountedVersion, Contents: { } contents } && (v.ReadOnlyVerified == true || options.PersonalGames))
         {
             await library.SetContentsAsync(mountedVersion, CleanFolders(contents), clock.GetUtcNow());
         }
@@ -208,7 +218,10 @@ public static partial class DisklessEndpoints
             await machines.RecordMasterAsync(machineId, iqn, null, null, keepMaster: true);
         }
 
-        return Results.Json(new StatusAccepted(clock.GetUtcNow(), await AssignmentAsync(library, options), await MasterAssignmentAsync(machineId, master, options)), ApiJson.Options);
+        var volume = options.PersonalGames
+            ? await machines.FindAsync(machineId) is { } machine ? await seatGames.AssignmentAsync(machine, atBoot: false, ct) : null
+            : await AssignmentAsync(library, options);
+        return Results.Json(new StatusAccepted(clock.GetUtcNow(), volume, await MasterAssignmentAsync(machineId, master, options)), ApiJson.Options);
     }
 
     /// <summary>Мастер-том на запись — только этой машине и только в состоянии «открыт». Закрытие — перестаём отдавать.</summary>
