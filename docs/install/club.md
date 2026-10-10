@@ -88,6 +88,9 @@
 
 ## 5. Бездиск: подготовка эталона [удалённо + руки] (когда сервер готов)
 
+Порядок пилота на 2–3 ПК, драйвер сетевой карты для установщика, проверки первой загрузки и настройка эталона перед
+каждой публикацией (`scripts/golden/prepare-golden.ps1`) — `docs/diskless-pilot.md`.
+
 1. [удалённо] В TrueNAS: файловые системы `ssd/club/diskless` и `ssd/club/diskless/seats`, zvol эталона
    `ssd/club/diskless/win11` (sparse, 64 ГиБ, volblocksize 16K). В настройках сервера `Diskless__Enabled=true`
    (и `Diskless__ImageZvol`/`SeatsParent`, если пул называется не `ssd`), перезапуск службы.
