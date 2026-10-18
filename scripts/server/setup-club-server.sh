@@ -4,10 +4,10 @@
 # What it does (each step is safe to repeat):
 #   PostgreSQL, service user clubsrv, database club; club-server in /opt/club-server; club CA and certificates
 #   (make-club-ca.sh); /etc/club-server/club-server.env with generated Panel__AdminToken and Auth__ClubApiKey (never
-#   printed — read them on the server when needed); systemd unit; Kea 3.0 with its database, grants and the AppArmor
-#   rule (service masked: DHCP stays with the router until the pilot); TFTP + iPXE/wimboot (install-boot-files.sh,
-#   pinned sha256); Samba share "incoming" for install.wim / WinPE uploads (user clubimg, password set by a person:
-#   sudo smbpasswd -a clubimg).
+#   printed — read them on the server when needed); systemd unit; Kea 3.0 with its database, grants, the AppArmor
+#   rule and a start-after-PostgreSQL drop-in (service masked until the DHCP cutover, docs/network.md); TFTP +
+#   iPXE/wimboot (install-boot-files.sh, pinned sha256); Samba share "incoming" for install.wim / WinPE uploads (user
+#   clubimg, password set by a person: sudo smbpasswd -a clubimg); club-set-truenas-key for the TrueNAS API key.
 # Not done here (needs TrueNAS first): TrueNas__ApiKey, Library__Enabled, Imaging__Enabled — see docs/install/club.md.
 set -euo pipefail
 
@@ -23,7 +23,7 @@ done
 export DEBIAN_FRONTEND=noninteractive
 step() { echo; echo "=== $*"; }
 
-step "1/8 packages (Kea and TFTP masked first: nothing serves DHCP/PXE before we say so)"
+step "1/8 packages (Kea masked first: nothing serves DHCP before we say so; TFTP is reached only via Kea PXE classes)"
 systemctl mask kea-dhcp4-server kea-dhcp6-server >/dev/null 2>&1 || true
 apt-get update -q
 apt-get install -y -q postgresql kea-dhcp4-server kea-admin tftpd-hpa samba openssl curl >/dev/null
@@ -57,6 +57,7 @@ sed -i "s|^Library__PortalAddress=.*|Library__PortalAddress=$TRUENAS_IP:3260|" "
 sed -i "s|^Imaging__PublicBaseUrl=.*|Imaging__PublicBaseUrl=http://$SERVER_IP:5080|" "$ENV"
 sed -i "s|^Kea__Enabled=.*|Kea__Enabled=true|" "$ENV"
 chown root:clubsrv "$ENV" && chmod 640 "$ENV"
+install -m 755 "$PKG/scripts/server/club-set-truenas-key" /usr/local/sbin/club-set-truenas-key
 grep -q "^Panel__AdminToken=ЗАМЕНИТЬ" "$ENV" && { echo "Panel__AdminToken not generated" >&2; exit 1; }
 install -m 644 "$PKG/deploy/club-server.service" /etc/systemd/system/club-server.service
 systemctl daemon-reload
@@ -76,6 +77,12 @@ SQL
 LOCAL=/etc/apparmor.d/local/usr.sbin.kea-dhcp4
 grep -q "PGSQL" "$LOCAL" 2>/dev/null || printf '%s\n' '# club-server: Kea hosts-database in PostgreSQL over the unix socket' '/run/postgresql/.s.PGSQL.* rw,' >> "$LOCAL"
 apparmor_parser -r /etc/apparmor.d/usr.sbin.kea-dhcp4
+# Kea exits at start when its hosts database is not up yet (VM boot) — the club would be left without DHCP.
+install -d /etc/systemd/system/kea-dhcp4-server.service.d
+printf '%s\n' '[Unit]' '# club: Kea reads reservations from PostgreSQL; without it Kea exits at boot' 'Wants=postgresql.service' \
+    'After=postgresql.service' 'StartLimitIntervalSec=0' '' '[Service]' 'Restart=on-failure' 'RestartSec=5' \
+    > /etc/systemd/system/kea-dhcp4-server.service.d/club.conf
+systemctl daemon-reload
 
 step "6/8 TFTP and iPXE/wimboot (pinned sha256)"
 install -d -m 755 /srv/tftp /srv/club/pxe
@@ -139,4 +146,5 @@ curl -s http://127.0.0.1:5080/health; echo
 curl -s --cacert /etc/club-server/tls/club-ca.crt "https://$SERVER_IP:5443/health"; echo
 echo
 echo "Done. Panel: https://$SERVER_IP:5443/panel/ — token: sudo grep ^Panel__AdminToken $ENV"
-echo "Next: TrueNAS API key into $ENV (TrueNas__ApiKey), then Library__Enabled=true; Kea stays masked until the pilot."
+echo "Next: TrueNAS API key (stty -echo; ssh <admin>@$SERVER_IP sudo club-set-truenas-key; stty echo), then"
+echo "Library__Enabled=true (docs/install/club.md §4); Kea stays masked until the DHCP cutover (docs/network.md)."

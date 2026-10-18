@@ -39,15 +39,40 @@
 2. [руки] На ноутбуке во встроенном браузере открыть `http://<адрес с консоли>`, войти под `truenas_admin`.
 3. [удалённо] Сеть: статический адрес TrueNAS и мост `br0` на порту SFP+ (Network → Interfaces, Test Changes с
    таймаутом 300 с — урок стенда), DNS, шлюз.
-4. [удалённо] Пулы:
-   - `ssd` — из 3 SSD: RAIDZ1 (2/3 объёма, переживает 1 диск) или зеркало из 2 + горячий резерв — решаем по
-     моделям и объёму;
-   - `hdd` — 6 × 1 ТБ тремя зеркалами (3 ТБ, быстрее RAIDZ на чтение) — одиночные игры.
+4. [удалённо] Пулы (как сделано в клубе 2026-10-16, все с Auto TRIM для NVMe):
+   - `ssd` — зеркало 2 × NVMe Samsung (~460 ГБ): ВМ сервера клуба, эталон и диски бездисковых мест, системный датасет;
+   - `games` — полоса NVMe 1 ТБ + 500 ГБ (~1,36 ТиБ): онлайн-игры (мастер библиотеки и личные слои мест). Без
+     избыточности — потеря диска = восстановление из копии на `hdd`;
+   - `hdd` — RAIDZ1 5 × 1 ТБ + кэш L2ARC (SSD 250 ГБ), ~3,5 ТиБ: копии и, позже, одиночные игры.
 5. [удалённо] Кэш ZFS: System → Advanced → Init/Shutdown Scripts, Post Init, команда
-   `echo 34359738368 > /sys/module/zfs/parameters/zfs_arc_max` (32 ГБ из 64; остальное — ВМ и система).
-6. [удалённо] Датасеты и iSCSI: `ssd/club`, `ssd/club/published`, мастер библиотеки `ssd/club/lib` (zvol, sparse,
-   volblocksize 64K), портал iSCSI 0.0.0.0:3260, служба iSCSI с автозапуском; пользователь `clubsrv` с привилегией
-   как на стенде (Readonly Admin, Dataset/Snapshot Write/Delete, Sharing iSCSI Write); `iso` — для образов.
+   `echo 34359738368 > /sys/module/zfs/parameters/zfs_arc_max` (32 ГБ из 64; остальное — ВМ и система). Часовой пояс:
+   `midclt call system.general.update '{"timezone":"Asia/Tashkent"}'` — по нему идут расписания копий.
+6. [удалённо] Датасеты и iSCSI (Shell TrueNAS под `truenas_admin`, `midclt` работает без sudo):
+
+   ```bash
+   mk(){ midclt call pool.dataset.create "$1" >/dev/null && echo OK; }
+   mk '{"name":"games/club","type":"FILESYSTEM"}'
+   mk '{"name":"games/club/lib","type":"VOLUME","volsize":1099511627776,"volblocksize":"64K","sparse":true}'
+   mk '{"name":"games/club/seats","type":"FILESYSTEM","quota":214748364800}'
+   mk '{"name":"games/club/published","type":"FILESYSTEM"}'
+   mk '{"name":"ssd/club","type":"FILESYSTEM"}'
+   mk '{"name":"ssd/club/diskless","type":"FILESYSTEM"}'
+   mk '{"name":"ssd/club/diskless/seats","type":"FILESYSTEM","quota":214748364800,"reservation":60129542144}'
+   mk '{"name":"ssd/club/diskless/win11","type":"VOLUME","volsize":68719476736,"volblocksize":"16K","sparse":true}'
+   midclt call iscsi.portal.create '{"listen":[{"ip":"0.0.0.0"}],"comment":"club"}'     # id → Library__PortalId
+   midclt call service.update iscsitarget '{"enable": true}'; midclt call service.start iscsitarget
+   ```
+
+   Мастер и личные слои игр — в **одном** пуле (клон ZFS живёт только в пуле снапшота), то же для эталона и дисков
+   мест. Квоты: личные слои игр 200 ГиБ (пул `games` держать ниже 80 %), диски мест 200 ГиБ + 56 ГиБ гарантии (на
+   `ssd` ещё ВМ 64 ГиБ и эталон). Сервер клуба сам ни датасеты, ни портал, ни службу не создаёт — только снапшоты,
+   клоны, таргеты, CHAP и группы инициаторов. В Shell TrueNAS (zsh) не называть переменные `GID`/`UID`.
+
+   Пользователь сервера: группа `clubsrv`, пользователь `clubsrv` (без пароля, shell `nologin`, без SMB), привилегия
+   `club-server` с ролями `READONLY_ADMIN`, `DATASET_WRITE`, `DATASET_DELETE`, `SNAPSHOT_WRITE`, `SNAPSHOT_DELETE`,
+   `SHARING_ISCSI_WRITE` (`privilege.create` с `local_groups` = GID группы; `user.create` с `group` = id группы).
+   Проверено по `core.get_methods` TrueNAS 25.10.7: этих ролей хватает на все 29 вызовов сервера (клоны мест, сброс
+   `rollback -r`, CHAP, группы инициаторов, сессии iSCSI).
 7. [удалённо] ВМ сервера клуба: 4 vCPU, **CPU Mode Host Passthrough**, 8 ГБ, диск 64 ГБ (zvol на `ssd`), сеть
    VirtIO на `br0`, **Autostart**, CD-ROM — `club-server-auto-201.iso` (п. 3), порядок загрузки: диск 1000, CD 1001.
 
@@ -76,15 +101,29 @@
 
 ## 4. Сервер ↔ TrueNAS [удалённо + руки]
 
-1. [удалённо] Импорт `truenas.crt/key` (из `/etc/club-server/tls` сервера) в TrueNAS → сертификат веб-интерфейса.
-2. [удалённо] Ключ API для `clubsrv` (Credentials → Users → clubsrv → API Key).
-3. [руки] Вставить ключ в настройки сервера скрытым вводом (команду даст администратор), затем
-   `Library__Enabled=true` и перезапуск службы — в журнале «Connected to TrueNAS».
-4. [удалённо] Библиотека игр с личным слоем: в TrueNAS zvol мастера `ssd/club/lib` (sparse, volblocksize 64K) и
-   файловая система `ssd/club/seats` (в том же пуле — клон ZFS живёт только в пуле снапшота). В настройках:
-   `Library__MasterZvol=ssd/club/lib`, `Library__PersonalGames=true`, `Library__PersonalParent=ssd/club/seats`.
+1. [руки] Импорт `truenas.crt`/`truenas.key` (из `/etc/club-server/tls` сервера) в TrueNAS: Credentials →
+   Certificates → Add → Import Certificate, имя `club-truenas-gui`, в **Certificate** — `truenas.crt`
+   (`-----BEGIN CERTIFICATE-----`), в **Private Key** — `truenas.key`; «Add To Trusted Store» не нужен. Закрытый ключ
+   вставляет человек, не администратор удалённо.
+2. [удалённо] Назначить его веб-интерфейсу: `midclt call system.general.update '{"ui_certificate": <id>}'`, затем
+   `midclt call system.general.ui_restart`. Проверка с сервера клуба:
+   `curl -s -o /dev/null -w '%{ssl_verify_result}\n' --cacert /etc/club-server/tls/club-ca.crt https://<TrueNAS>/ui/` → `0`.
+3. [руки] Ключ API для `clubsrv`: `https://<TrueNAS>/ui/apikeys` → Add, Username `clubsrv`, без срока. Ключ
+   показывается один раз — сразу во вкладку терминала, которую откроет администратор:
+   `stty -echo; ssh clubadmin@<IP сервера> sudo club-set-truenas-key; stty echo` (вставить, Enter; ввод скрыт, ключ не
+   попадает ни в журнал sudo, ни на экран). Ответ — `TrueNas__ApiKey saved (id N, 64 chars)`.
+4. [удалённо] Библиотека игр с личным слоем на пуле `games`, в `/etc/club-server/club-server.env`:
+   `Library__Enabled=true`, `Library__MasterZvol=games/club/lib`, `Library__PublishedParent=games/club/published`,
+   `Library__PortalId=<id портала>`, `Library__PersonalGames=true`, `Library__PersonalParent=games/club/seats`;
+   `sudo systemctl restart club-server`. Строка «Connected to TrueNAS» в журнале появится только при первой операции
+   с хранилищем (публикация, мастер, диск места) — сразу проверить ключ можно входом `auth.login_ex` с ВМ.
    На ПК — помощник 1.5.0 или новее (старый помощник назначения не получит, игр на G: не будет). Каждое место
    получает свой диск `games-seat-NN` на запись; при загрузке ПК он сбрасывается к опубликованной версии.
+5. [удалённо] Резервные копии на `hdd`: `sh scripts/truenas/club-backup.sh <zvol ВМ>` в Shell TrueNAS (повторный
+   запуск безопасен). Мастер игр — по понедельникам 05:00 (на `hdd` 3 недели), диск ВМ сервера клуба (система,
+   PostgreSQL, настройки) — ежедневно 04:30 (14 дней + воскресные 8 недель). Только собственные цепочки `bkp-*`
+   TrueNAS, без рекурсии: снапшоты сервера (`lib-*`, `img-*`, `@clean`) и одноразовые клоны мест не трогаются.
+   Эталон Windows (`img-*`, по имени, хранить всё) — задачей после первой публикации образа.
 
 ## 5. Бездиск: подготовка эталона [удалённо + руки] (когда сервер готов)
 
@@ -95,19 +134,29 @@
    `ssd/club/diskless/win11` (sparse, 64 ГиБ, volblocksize 16K). В настройках сервера `Diskless__Enabled=true`
    (и `Diskless__ImageZvol`/`SeatsParent`, если пул называется не `ssd`), перезапуск службы.
    Место под личные слои — квотами, иначе один ПК (обновление игры, установка на G:) может заполнить пул, и тогда
-   встают все бездисковые ПК: `ssd/club/diskless/seats` — reservation 28 × 10 ГиБ и quota 28 × 25 ГиБ,
-   `ssd/club/seats` (личные слои игр) — quota так, чтобы в пуле оставалось ≥ 20 % свободного. Периодические задачи
-   снапшотов на `ssd/club/diskless/seats` и `ssd/club/seats` не ставить (клоны одноразовые; сервер их всё равно
+   встают все бездисковые ПК: в клубе `ssd/club/diskless/seats` — quota 200 ГиБ + reservation 56 ГиБ (на зеркале
+   ~460 ГБ рядом ВМ и эталон), `games/club/seats` (личные слои игр) — quota 200 ГиБ. Периодические задачи
+   снапшотов на `ssd/club/diskless/seats` и `games/club/seats` не ставить (клоны одноразовые; сервер их всё равно
    откатывает с `-r` и удаляет вместе со снапшотами).
-2. [удалённо] Установщик Windows для режима мастера. ISO Windows 11 — прямо на сервер (ссылка Microsoft
-   действует 24 ч; страница загрузки из сети клуба может не открываться — ссылку берём с телефона через мобильный
-   интернет): `sudo install -d /srv/club/iso && sudo wget -c -O /srv/club/iso/Win11.iso '<ссылка>'`, затем
-   `sudo sh ~/scripts/server/extract-winsetup.sh /srv/club/iso/Win11.iso`. Скрипт монтирует ISO только для чтения в
+2. [удалённо] Установщик Windows для режима мастера. ISO Windows 11 — прямо на сервер. Страница Microsoft в регионе
+   клуба ссылку не выдаёт, а сервер обновлений Microsoft (`tlu.dl.delivery.mp.microsoft.com`) доступен, поэтому в
+   клубе (2026-10-18) ISO собран через UUP dump из оригинальных файлов Windows Update (каждый файл — по SHA-1 из
+   метаданных Microsoft; конвертер `convert.sh` закреплён по SHA-256 и в сеть не ходит; запуск от обычного
+   пользователя): `uupdump.net/get.php?id=<uuid сборки>&pack=ru-ru&edition=professional` (POST `autodl=2`) →
+   `apt install aria2 cabextract wimtools chntpw genisoimage` → `bash uup_download_linux.sh`. Linux-конвертер не
+   встраивает обновления: ISO — базовая `26100.1` (24H2, Pro, ru-RU, `install.wim`); накопительное, пакет включения
+   26H2 (KB5121794) и .NET лежат в `/srv/club/iso/updates-26300.9807/` — ставятся в эталон в режиме мастера
+   (`dism /online /add-package`) или приходят через Windows Update. Готовые «сборки» Windows с чужих сайтов не брать:
+   эталон раскатывается на все бездисковые ПК. Затем
+   `sudo sh ~/scripts/server/extract-winsetup.sh /srv/club/iso/Win11-26100.1-pro-ru.iso` (ISO оставить на месте,
+   `chmod 444`). Скрипт монтирует ISO только для чтения в
    `/srv/club/winsetup` (fstab — ISO не удалять) и отдаёт его SMB-шарой `winsetup` (пользователь `winsetup` только для
    чтения, пароль генерирует сам), а в `/srv/club/pxe/winsetup/` кладёт `boot/bcd`, `boot/boot.sdi`, `sources/boot.wim`
    и `install.cmd` + `winpeshl.ini`: wimboot подкладывает их в WinPE, и установщик запускается с шары (в boot.wim нет
    install.wim) с обходом проверок Windows 11 (LabConfig). `win-noprompt.py` здесь не нужен.
-3. [удалённо] Kea включается для пилота (`docs/network.md`): резервации мест, классы PXE в конфиге.
+3. [удалённо] Kea уже раздаёт DHCP клуба (`docs/network.md`, переключение 2026-10-18). После
+   `Diskless__Enabled=true` конфиг Kea скачать заново (в нём появятся классы PXE `club-reimage-*`), проверить
+   `sudo -u _kea kea-dhcp4 -t`, поставить и `systemctl restart kea-dhcp4-server`.
 4. [руки] BIOS бездискового ПК: UEFI, сетевая загрузка IPv4 первой, **Secure Boot выключен**, TPM не нужен.
 5. [удалённо] Панель → «Бездиск» → «Новый бездисковый ПК»: MAC сетевой карты (из BIOS или с экрана загрузки по
    сети) и номер места — ПК сразу одобрен и бездисковый. «Режим мастера»: этот
@@ -121,8 +170,11 @@
 ## 6. Проверка дня
 
 - Панель `https://<IP сервера>:5443/panel/` открывается, «Библиотека игр» видит TrueNAS.
-- `ethtool` на TrueNAS: порт SFP+ — 10000Mb/s; ПК — 1000Mb/s.
-- DHCP раздаёт роутер; Kea замаскирован, сеть клуба от сервера не зависит.
+- Сеть TrueNAS: `br0` ← `bond1` (LACP, оба порта X520 по 10G в один коммутатор, на нём агрегация с LACP — Reyee:
+  Ports → Port Aggregation, LACP включить при создании). У `/proc/net/bonding/bond1` оба порта с одним Aggregator ID;
+  STP на `br0` выключен (иначе ~30 с простоя при каждом подключении bond). ПК — 1000Mb/s.
+- DHCP раздаёт Kea на сервере клуба (DHCP роутера выключен); `systemctl is-active kea-dhcp4-server` — active.
+- Резервные копии: `midclt call replication.query` — обе задачи `FINISHED` после первого запуска.
 
 Дальше: гибридные ПК (зоны 3–5) — помощник 1.5.0 (`docs/helper.md`), игры — личный диск места (раздел 4, п. 4);
 бездиск — пилот на 2–3 ПК (раздел 5), затем зоны 1–2 и Kea как DHCP клуба.

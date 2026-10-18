@@ -12,7 +12,9 @@ DHCP в клубе раздаёт **Kea 3.0** (пакет Ubuntu `kea-dhcp4-serv
 | Администратор (root) | Установка Kea, создание базы, права, установка конфига, перезапуск Kea |
 | Помощник на ПК | MAC основной карты первым при регистрации; адреса DHCP-серверов текущих аренд в каждом отчёте |
 
-Сервер **не** правит `/etc/kea` и не перезапускает службы: для этого нужен root. PXE и перезаливка — следующий этап.
+Сервер **не** правит `/etc/kea` и не перезапускает службы: для этого нужен root. PXE-классы для бездиска и
+перезаливки попадают в конфиг, когда включён `Diskless__Enabled` или `Imaging__Enabled` (конфиг тогда перегенерировать
+и поставить заново).
 
 ## Адресный план
 
@@ -25,6 +27,12 @@ DHCP в клубе раздаёт **Kea 3.0** (пакет Ubuntu `kea-dhcp4-serv
 | Резервации мест | IP места = `192.168.77.101` + № − 1 (места 1…99) |
 | Пул гостей и новых ПК | `192.168.77.200` – `192.168.77.250` |
 | Аренда | 12 ч |
+
+План клуба (Z590, 2026-10-18): подсеть `192.168.1.0/24`, интерфейс `lan0`, этот DHCP `192.168.1.201`, шлюз и DNS —
+роутер `192.168.1.1`, пул `.20`–`.99` (телефоны, Wi-Fi, новые ПК до одобрения), место N → `192.168.1.(100+N)`,
+аренда 12 ч; `.2`/`.3` — коммутаторы (ручные резервации, см. ниже), `.200` TrueNAS и `.201` сервер клуба — статика.
+Номера мест — **до 99**: место 100 попало бы на `.200` (TrueNAS); план о статических адресах вне пула не знает, и
+«мест в диапазоне» под формой показывает 100.
 
 - Резервация создаётся только для **одобренной** машины и только по **первому** MAC из регистрации (помощник ставит
   первой карту с IPv4-шлюзом). Новая машина до одобрения получает адрес из пула.
@@ -79,14 +87,31 @@ SQL
 Конфиг Kea: на экране «Сеть» — «Скачать kea-dhcp4.conf» (или `GET /panel/api/v1/network/kea-dhcp4.conf`), затем:
 
 ```bash
+cp -n /etc/kea/kea-dhcp4.conf /etc/kea/kea-dhcp4.conf.dist
 install -m 640 -o root -g _kea kea-dhcp4.conf /etc/kea/kea-dhcp4.conf
-kea-dhcp4 -t /etc/kea/kea-dhcp4.conf
+sudo -u _kea kea-dhcp4 -t /etc/kea/kea-dhcp4.conf    # от _kea: root AppArmor не пускает в /etc/kea (750 _kea)
 echo '/run/postgresql/.s.PGSQL.* rw,' >> /etc/apparmor.d/local/usr.sbin.kea-dhcp4   # один раз, см. ниже
 apparmor_parser -r /etc/apparmor.d/usr.sbin.kea-dhcp4
 systemctl unmask kea-dhcp4-server
 systemctl enable --now kea-dhcp4-server
-journalctl -u kea-dhcp4-server -n 20 --no-pager      # DHCP4_STARTED, без ERROR
+journalctl -u kea-dhcp4-server -n 20 --no-pager      # PGSQL_HB_DB … DHCP4_STARTED, без ERROR
 ```
+
+`kea-dhcp4 -t` от root в Ubuntu 26.04 отвечает `Unable to open file` даже для файла в `/etc/kea`: каталог —
+`750 _kea:_kea`, а профиль AppArmor запрещает `kea-dhcp4` право `dac_override` (в `journalctl -k` —
+`apparmor="DENIED" … capname="dac_override"`). Служба работает от `_kea`, поэтому и проверка — от `_kea`.
+
+Kea выходит при старте, если база резерваций ещё не поднялась (загрузка ВМ, обновление PostgreSQL), — клуб остался бы
+без DHCP. `setup-club-server.sh` ставит для этого `/etc/systemd/system/kea-dhcp4-server.service.d/club.conf`:
+`After=`/`Wants=postgresql.service`, `Restart=on-failure`, `RestartSec=5`.
+
+**Переключение DHCP с роутера на Kea** (клуб, 2026-10-18): экран «Сеть» сохранён → конфиг поставлен и проверен →
+Kea запущен (DHCP4_STARTED) → **сразу** на роутере выключить DHCP Server (ZTE F6600P: страница LAN; «DHCP Port
+Control» на порту к коммутатору клуба — `No Control`, иначе роутер не пропускает чужой DHCP) → телефон переподключить
+к Wi-Fi: в журнале Kea `DHCP4_LEASE_ALLOC … 192.168.1.20`. Остальные устройства переходят на Kea, когда истекает
+аренда роутера (или при переподключении). Откат за минуту: DHCP на роутере включить **первым**, затем
+`systemctl disable --now kea-dhcp4-server && systemctl mask kea-dhcp4-server`. Второй роутер (Wi-Fi посетителей)
+в коммутаторы клуба не включать: в сети клуба DHCP только один.
 
 **AppArmor.** Профиль `kea-dhcp4` из пакета Ubuntu включает `abstractions/mysql`, но не разрешает сокет PostgreSQL:
 без правила выше Kea не стартует — `DHCP4_CONFIG_LOAD_FAIL … Unable to open database: connection to server on socket
@@ -115,7 +140,18 @@ operation="connect" profile="kea-dhcp4"`. `kea-dhcp4 -t` к базе не под
 3. удаляет изменённые и лишние **свои** строки, затем вставляет новые (перестановка сетевых карт между ПК не
    упирается в уникальные индексы Kea).
 
-Строки без метки (добавленные вручную через `kea-shell`/SQL) не трогаются никогда. Если ручная резервация занимает
+Строки без метки (добавленные вручную через `kea-shell`/SQL) не трогаются никогда. Так в клубе закреплены адреса
+управления коммутаторов (вне пула, Kea это разрешает при `reservations-in-subnet`):
+
+```bash
+cd /tmp && sudo -u _kea psql -d kea <<'SQL'
+INSERT INTO hosts (dhcp_identifier, dhcp_identifier_type, dhcp4_subnet_id, ipv4_address, hostname) VALUES
+ (decode('28d0f5dadafc','hex'), 0, 1, '192.168.1.2'::inet - '0.0.0.0'::inet, 'sw-deagle'),
+ (decode('7085c4c01c08','hex'), 0, 1, '192.168.1.3'::inet - '0.0.0.0'::inet, 'sw-deagle2');
+SQL
+```
+
+`dhcp_identifier_type` 0 — MAC, как у резерваций сервера. Если ручная резервация занимает
 MAC или IP места — наша резервация для этого места не создаётся, в панели предупреждение `manualReservation`.
 Расхождения не исправляются автоматически сверх этого — только предупреждения.
 

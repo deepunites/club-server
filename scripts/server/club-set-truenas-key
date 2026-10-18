@@ -1,0 +1,20 @@
+#!/bin/sh
+# Stores a TrueNAS API key read from stdin as TrueNas__ApiKey in the club-server env; the key never appears on a
+# command line, in sudo's log or on screen. Installed by setup-club-server.sh to /usr/local/sbin. From the admin laptop:
+#   stty -echo; ssh clubadmin@<server IP> sudo club-set-truenas-key; stty echo     (paste the key, Enter)
+# then: sudo systemctl restart club-server
+set -eu
+ENV=/etc/club-server/club-server.env
+key=$(head -n 1 | tr -d "\r\n\t " | head -c 512)
+case "$key" in
+  [0-9]*-*) ;;
+  *) echo "not a TrueNAS API key (expected <id>-<64 chars>)" >&2; exit 1 ;;
+esac
+tail=${key#*-}
+[ ${#tail} -eq 64 ] || { echo "unexpected key length: ${#tail} chars after the id (expected 64)" >&2; exit 1; }
+tmp=$(mktemp "$ENV.XXXXXX")
+chmod --reference="$ENV" "$tmp"; chown --reference="$ENV" "$tmp"
+grep -v "^TrueNas__ApiKey=" "$ENV" > "$tmp"
+printf "TrueNas__ApiKey=%s\n" "$key" >> "$tmp"
+mv "$tmp" "$ENV"
+echo "TrueNas__ApiKey saved (id ${key%%-*}, ${#tail} chars)"
