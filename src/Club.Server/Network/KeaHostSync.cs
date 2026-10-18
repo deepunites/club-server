@@ -27,8 +27,13 @@ public sealed record KeaSyncResult(bool SchemaOk, string? SchemaVersion, int Des
 /// Наши строки помечены <c>user_context.clubsrv</c>; строки без метки (ручные) не трогаются никогда —
 /// конфликт с ними (тот же MAC или IP в подсети) становится предупреждением, а машина остаётся без резервации.
 /// </summary>
-public sealed class KeaHostSync(KeaOptions options, MachineRepository machines, NetworkRepository network, Imaging.ImageRepository images, Diskless.DisklessRepository diskless, ILogger<KeaHostSync> logger)
+public sealed class KeaHostSync(
+    KeaOptions options, MachineRepository machines, NetworkRepository network, Imaging.ImageRepository images, Diskless.DisklessRepository diskless,
+    StaticHosts statics, ILogger<KeaHostSync> logger)
 {
+    /// <summary>Адресный план с учётом статических адресов серверов клуба (TrueNAS и т. п.).</summary>
+    public IpPlan PlanFor(NetworkSettings settings) => new(settings, statics);
+
     private const short HwAddress = 0;
 
     /// <summary>
@@ -55,7 +60,7 @@ public sealed class KeaHostSync(KeaOptions options, MachineRepository machines, 
 
             if (plan.SeatAddress(m.Number) is not { } ip)
             {
-                conflicts.Add(new("seatOutOfRange", m.Name, $"Место №{m.Number} ({m.Name}) не помещается в диапазон резерваций или задевает пул"));
+                conflicts.Add(new("seatOutOfRange", m.Name, $"Место №{m.Number} ({m.Name}) не помещается в диапазон резерваций или задевает пул либо адрес сервера"));
                 continue;
             }
 
@@ -80,7 +85,7 @@ public sealed class KeaHostSync(KeaOptions options, MachineRepository machines, 
             return null;
         }
 
-        var plan = new IpPlan(settings);
+        var plan = PlanFor(settings);
         // PXE-флаг: перезаливка (снимается после заливки) и бездиск/режим мастера (держится всегда).
         var networkBoot = (await images.ArmedMachinesAsync()).Union(await diskless.NetworkBootMachinesAsync()).ToHashSet();
         var (desired, conflicts) = Plan(await machines.AllAsync(), plan, networkBoot);

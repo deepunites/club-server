@@ -118,18 +118,41 @@ public sealed class SeatDisks(
 
     private static IPAddress Plain(IPAddress ip) => ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip;
 
+    /// <summary>wimboot v2.9.0: <c>VDISK_NAME_LEN</c> 31 — длиннее имя обрезается молча, и INF не находит свой SYS.</summary>
+    public const int MaxDriverNameLength = 31;
+
+    /// <summary>wimboot v2.9.0: <c>VDISK_MAX_FILES</c> 63 минус 5 файлов установщика и запас на bootmgr из WIM.</summary>
+    public const int MaxDriverFiles = 50;
+
     /// <summary>
     /// Драйверы для WinPE установщика: файлы в <c>Imaging:PxeRoot/&lt;SetupDirectory&gt;/drv/</c> (только простые имена —
-    /// они попадают в скрипт iPXE и в X:\Windows\System32).
+    /// они попадают в скрипт iPXE и в X:\Windows\System32). Имена длиннее <see cref="MaxDriverNameLength"/> и файлы сверх
+    /// <see cref="MaxDriverFiles"/> пропускаются с предупреждением в журнале (wimboot их не донёс бы).
     /// </summary>
     private IReadOnlyList<string> SetupDrivers()
     {
         var directory = Path.Combine(imaging.PxeRoot, options.SetupDirectory, "drv");
-        return Directory.Exists(directory)
-            ? Directory.EnumerateFiles(directory).Select(Path.GetFileName).OfType<string>()
-                .Where(name => name.Length <= 64 && name.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '_'))
-                .Order(StringComparer.Ordinal).ToList()
-            : [];
+        if (!Directory.Exists(directory))
+        {
+            return [];
+        }
+
+        var names = Directory.EnumerateFiles(directory).Select(Path.GetFileName).OfType<string>().Order(StringComparer.Ordinal).ToList();
+        var usable = names.Where(name => name.Length <= MaxDriverNameLength && name.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '_')).ToList();
+        if (usable.Count < names.Count)
+        {
+            logger.LogWarning("Diskless setup: skipped driver files (name over {Max} characters or not [A-Za-z0-9._-]): {Names}",
+                MaxDriverNameLength, string.Join(", ", names.Except(usable)));
+        }
+
+        if (usable.Count > MaxDriverFiles)
+        {
+            logger.LogWarning("Diskless setup: {Count} driver files, only the first {Max} are loaded (wimboot file limit), skipped: {Names}",
+                usable.Count, MaxDriverFiles, string.Join(", ", usable.Skip(MaxDriverFiles)));
+            usable = usable.Take(MaxDriverFiles).ToList();
+        }
+
+        return usable;
     }
 
     /// <summary>

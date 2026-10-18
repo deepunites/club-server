@@ -3,15 +3,15 @@ using System.Text.Json.Nodes;
 
 namespace Club.Server.Network;
 
-/// <summary>
-/// <c>/etc/kea/kea-dhcp4.conf</c> из настроек сети (Kea 3.0, пакет Ubuntu). Резервации — в базе Kea (hosts backend
-/// pgsql через хук <c>libdhcp_pgsql.so</c>), доступ по peer-аутентификации роли <c>_kea</c> через сокет PostgreSQL,
-/// поэтому пароля в файле нет. Ставит файл администратор (нужен root); сервер клуба только генерирует.
-/// [ГИПОТЕЗА: peer-доступ Kea к PostgreSQL через каталог сокета проверить на стенде.]
-/// </summary>
 /// <summary>Загрузка по сети для перезаливки: TFTP с ipxe-shim.efi/ipxe.efi/undionly.kpxe и HTTP-скрипт iPXE этого сервера.</summary>
 public sealed record PxeBoot(string TftpServer, string ScriptUrl);
 
+/// <summary>
+/// <c>/etc/kea/kea-dhcp4.conf</c> из настроек сети (Kea 3.0, пакет Ubuntu). Резервации — в базе Kea (hosts backend
+/// pgsql через хук <c>libdhcp_pgsql.so</c>), доступ по peer-аутентификации роли <c>_kea</c> через сокет PostgreSQL,
+/// поэтому пароля в файле нет (проверено на стенде и в клубе, Kea 3.0.3). Ставит файл администратор (нужен root);
+/// сервер клуба только генерирует.
+/// </summary>
 public static class KeaConfig
 {
     public const string HooksDirectory = "/usr/lib/x86_64-linux-gnu/kea/hooks";
@@ -32,6 +32,13 @@ public static class KeaConfig
                     ["name"] = keaDatabase,
                     ["user"] = "_kea",
                     ["host"] = "/var/run/postgresql",
+                    // По умолчанию Kea выходит, если база недоступна при старте или пропала (перезапуск PostgreSQL при
+                    // обновлении) — клуб остаётся без DHCP. Так он раздаёт адреса дальше и переподключается раз в 5 с
+                    // (без базы резерваций места, ожидаемо, получают адрес из пула; формат проверен kea-dhcp4 -t 3.0.3).
+                    ["on-fail"] = "serve-retry-continue",
+                    ["retry-on-startup"] = true,
+                    ["max-reconnect-tries"] = 60,
+                    ["reconnect-wait-time"] = 5000,
                 },
                 ["hooks-libraries"] = new JsonArray(new JsonObject { ["library"] = $"{hooksDirectory}/libdhcp_pgsql.so" }),
                 // Резервации ищутся по MAC; глобальных резерваций нет — только в подсети клуба.

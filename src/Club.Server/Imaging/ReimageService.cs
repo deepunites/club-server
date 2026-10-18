@@ -54,7 +54,7 @@ public sealed class ReimageService(
         }
 
         var settings = await network.GetAsync();
-        if (!settings.Configured || KeaHostSync.Plan([machine], new IpPlan(settings)).Hosts.Count == 0)
+        if (!settings.Configured || KeaHostSync.Plan([machine], keaSync.PlanFor(settings)).Hosts.Count == 0)
         {
             // Без резервации в Kea негде поставить PXE-флаг.
             throw Conflict("noReservation", "Machine has no DHCP reservation (see the Network screen)");

@@ -21,13 +21,49 @@ public sealed record NetworkSettings(
     string ReservedStart,
     int LeaseTimeSec);
 
+/// <summary>
+/// Статические адреса серверов клуба вне адресного плана (TrueNAS, портал iSCSI, сам сервер клуба по ссылке PXE):
+/// их не получает ни место, ни пул гостей. Берутся из настроек сервера — только IPv4-литералы, имена не разрешаются.
+/// Без этого место 100 при плане «место 1 = .101» получило бы адрес TrueNAS .200.
+/// </summary>
+public sealed class StaticHosts
+{
+    public static readonly StaticHosts None = new([]);
+
+    public StaticHosts(IEnumerable<uint> addresses) => Addresses = addresses.ToHashSet();
+
+    public IReadOnlySet<uint> Addresses { get; }
+
+    /// <summary>Из адресов вида <c>192.168.1.200</c>, <c>192.168.1.200:3260</c> или <c>http://192.168.1.201:5080</c>.</summary>
+    public static StaticHosts From(params string?[] hostsOrUrls) =>
+        new(hostsOrUrls.Select(HostOf).Select(h => IpPlan.TryParseIp(h, out var ip) ? ip : (uint?)null).OfType<uint>());
+
+    private static string? HostOf(string? value)
+    {
+        value = value?.Trim();
+        if (string.IsNullOrEmpty(value))
+        {
+            return null;
+        }
+
+        if (value.Contains("://", StringComparison.Ordinal))
+        {
+            return Uri.TryCreate(value, UriKind.Absolute, out var uri) ? uri.Host : null;
+        }
+
+        var colon = value.LastIndexOf(':');
+        return colon > 0 && value.IndexOf(':') == colon ? value[..colon] : value;
+    }
+}
+
 /// <summary>Адресный план: подсеть, динамический пул и диапазон резерваций по номерам мест.</summary>
 public sealed class IpPlan
 {
     private readonly uint _network;
     private readonly uint _broadcast;
+    private readonly IReadOnlySet<uint> _static;
 
-    public IpPlan(NetworkSettings settings)
+    public IpPlan(NetworkSettings settings, StaticHosts? statics = null)
     {
         Settings = settings;
         var (address, prefix) = ParseCidr(settings.Subnet);
@@ -35,6 +71,7 @@ public sealed class IpPlan
         _network = address & mask;
         _broadcast = _network | ~mask;
         Prefix = prefix;
+        _static = (statics ?? StaticHosts.None).Addresses;
     }
 
     public NetworkSettings Settings { get; }
@@ -43,7 +80,10 @@ public sealed class IpPlan
 
     public string Mask => ToIp(Prefix == 0 ? 0u : uint.MaxValue << (32 - Prefix));
 
-    /// <summary>IP места: начало диапазона резерваций + номер − 1. <c>null</c>, если выходит за подсеть или задевает пул.</summary>
+    /// <summary>
+    /// IP места: начало диапазона резерваций + номер − 1. <c>null</c>, если выходит за подсеть, задевает пул, шлюз,
+    /// этот DHCP-сервер или статический адрес сервера клуба.
+    /// </summary>
     public uint? SeatAddress(int seat)
     {
         if (seat < 1)
@@ -52,7 +92,8 @@ public sealed class IpPlan
         }
 
         var ip = (ulong)ToUInt(Settings.ReservedStart) + (ulong)(seat - 1);
-        if (ip > uint.MaxValue || !IsUsable((uint)ip) || InPool((uint)ip) || (uint)ip == ToUInt(Settings.Gateway) || (uint)ip == ToUInt(Settings.DhcpServer))
+        if (ip > uint.MaxValue || !IsUsable((uint)ip) || InPool((uint)ip) || (uint)ip == ToUInt(Settings.Gateway) || (uint)ip == ToUInt(Settings.DhcpServer)
+            || _static.Contains((uint)ip))
         {
             return null;
         }
@@ -65,7 +106,7 @@ public sealed class IpPlan
     public bool IsUsable(uint ip) => ip > _network && ip < _broadcast;
 
     /// <summary>Ошибки настроек (поле → причина); пусто — настройки согласованы.</summary>
-    public static IReadOnlyList<(string Field, string Reason)> Validate(NetworkSettings s)
+    public static IReadOnlyList<(string Field, string Reason)> Validate(NetworkSettings s, StaticHosts? statics = null)
     {
         var errors = new List<(string, string)>();
         if (!TryParseCidr(s.Subnet, out var address, out var prefix) || prefix is < 8 or > 30)
@@ -110,7 +151,8 @@ public sealed class IpPlan
             errors.Add(("reservedStart", "insidePool"));
         }
 
-        if (plan.InPool(ToUInt(s.DhcpServer)) || plan.InPool(ToUInt(s.Gateway)))
+        // Пул не должен раздавать адреса шлюза, этого DHCP и серверов клуба (TrueNAS): Kea отдал бы их гостю.
+        if (plan.InPool(ToUInt(s.DhcpServer)) || plan.InPool(ToUInt(s.Gateway)) || (statics ?? StaticHosts.None).Addresses.Any(plan.InPool))
         {
             errors.Add(("poolStart", "coversInfrastructure"));
         }

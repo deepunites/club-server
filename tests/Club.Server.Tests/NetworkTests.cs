@@ -34,6 +34,36 @@ public sealed class IpPlanTests
         Assert.Null(plan.SeatAddress(155)); // .255 — broadcast
     }
 
+    [Fact]
+    public void Seat_never_gets_a_static_server_address()
+    {
+        // Клуб: место 1 = .101, TrueNAS .200 вне пула — место 100 получило бы адрес TrueNAS.
+        var club = Default("192.168.1.0/24") with
+        {
+            DhcpServer = "192.168.1.201", Gateway = "192.168.1.1", DnsServers = ["192.168.1.1"],
+            PoolStart = "192.168.1.20", PoolEnd = "192.168.1.99", ReservedStart = "192.168.1.101",
+        };
+        var statics = StaticHosts.From("192.168.1.200", "192.168.1.200:3260", null, "http://192.168.1.201:5080", "truenas.local");
+        Assert.Equal(["192.168.1.200", "192.168.1.201"], statics.Addresses.Select(IpPlan.ToIp).Order().ToArray());
+
+        Assert.Equal("192.168.1.200", IpPlan.ToIp(new IpPlan(club).SeatAddress(100)!.Value)); // без статических — коллизия
+        var plan = new IpPlan(club, statics);
+        Assert.Equal("192.168.1.199", IpPlan.ToIp(plan.SeatAddress(99)!.Value));
+        Assert.Null(plan.SeatAddress(100));
+        Assert.Equal("192.168.1.202", IpPlan.ToIp(plan.SeatAddress(102)!.Value));
+        Assert.Equal(99, Panel.NetworkPanelEndpoints.SeatCapacity(club, statics));
+        Assert.Equal(100, Panel.NetworkPanelEndpoints.SeatCapacity(club));
+    }
+
+    [Fact]
+    public void Pool_must_not_cover_a_static_server_address()
+    {
+        var statics = StaticHosts.From("192.168.77.230");
+        Assert.Empty(IpPlan.Validate(Default()));
+        Assert.Contains(("poolStart", "coversInfrastructure"), IpPlan.Validate(Default(), statics));
+        Assert.Empty(IpPlan.Validate(Default(), StaticHosts.From("192.168.77.150", "10.0.0.5")));
+    }
+
     [Theory]
     [InlineData("192.168.77.5/24", "subnet", "notNetworkAddress")]
     [InlineData("192.168.77.0/31", "subnet", "format")]
@@ -293,7 +323,12 @@ public sealed class NetworkTests : IAsyncLifetime
         var subnet = dhcp4.GetProperty("subnet4")[0];
         Assert.Equal("192.168.77.0/24", subnet.GetProperty("subnet").GetString());
         Assert.Equal("192.168.77.200 - 192.168.77.250", subnet.GetProperty("pools")[0].GetProperty("pool").GetString());
-        Assert.Equal("postgresql", dhcp4.GetProperty("hosts-database").GetProperty("type").GetString());
+        var hostsDb = dhcp4.GetProperty("hosts-database");
+        Assert.Equal("postgresql", hostsDb.GetProperty("type").GetString());
+        // База резерваций недоступна (загрузка ВМ, перезапуск PostgreSQL) — Kea не выходит, а переподключается.
+        Assert.Equal("serve-retry-continue", hostsDb.GetProperty("on-fail").GetString());
+        Assert.True(hostsDb.GetProperty("retry-on-startup").GetBoolean());
+        Assert.True(hostsDb.GetProperty("max-reconnect-tries").GetInt32() > 0);
         Assert.DoesNotContain("password", text);
 
         if (Environment.GetEnvironmentVariable("KEA_DHCP4") is not { Length: > 0 } kea)

@@ -8,7 +8,7 @@
     <PackageReference Include="FluentMigrator.Runner.Postgres" Version="8.0.1" />
     <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" Version="8.23.0" />
     <PackageReference Include="Npgsql" Version="10.0.3" />
-    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.12" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
   </ItemGroup>
 
   <ItemGroup>
@@ -23,6 +23,15 @@
   <ItemGroup>
     <!-- Файлы, которые wimboot подкладывает в WinPE (docs/imaging.md). -->
     <EmbeddedResource Include="Imaging\WinPE\*" LogicalName="WinPE.%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <!-- Самодостаточная поставка (scripts/build-server-package.sh <версия>) может взять среду .NET новее той, что знает
+       SDK: исправления безопасности приходят в NuGet раньше, чем пакет SDK в Ubuntu (так было с 10.0.13, октябрь 2026). -->
+  <PropertyGroup Condition="'$(ClubRuntimeVersion)' != ''">
+    <RuntimeFrameworkVersion>$(ClubRuntimeVersion)</RuntimeFrameworkVersion>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(ClubRuntimeVersion)' != ''">
+    <FrameworkReference Update="Microsoft.AspNetCore.App" RuntimeFrameworkVersion="$(ClubRuntimeVersion)" />
   </ItemGroup>
 
 </Project>

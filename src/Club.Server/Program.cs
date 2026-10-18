@@ -46,6 +46,8 @@ if (imagingOptions.Enabled && imagingOptions.RunWorker)
     builder.Services.AddHostedService<ImagingWorker>();
 }
 builder.Services.AddSingleton<NetworkRepository>();
+// Адреса TrueNAS/портала/самого сервера: ни место, ни пул гостей их не получают (docs/network.md).
+builder.Services.AddSingleton(StaticHosts.From(trueNasOptions.Host, libraryOptions.PortalAddress, libraryOptions.DiscoveryAddress, imagingOptions.PublicBaseUrl));
 builder.Services.AddSingleton<KeaHostSync>();
 builder.Services.AddSingleton<NetworkState>();
 if (builder.Configuration.GetValue("Network:RunWorker", true))

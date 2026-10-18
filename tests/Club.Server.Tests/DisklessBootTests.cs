@@ -23,6 +23,7 @@ public sealed class DisklessBootTests : IAsyncLifetime
     private FakeTrueNas _nas = null!;
     private ServerFixture _server = null!;
     private TrueNasStorage _storage = null!;
+    private readonly DirectoryInfo _pxeRoot = Directory.CreateTempSubdirectory("club-pxe-");
 
     public async Task InitializeAsync()
     {
@@ -42,6 +43,7 @@ public sealed class DisklessBootTests : IAsyncLifetime
             ["Diskless:Enabled"] = "true",
             ["Diskless:ImageZvol"] = Image,
             ["Diskless:SeatsParent"] = Seats,
+            ["Imaging:PxeRoot"] = _pxeRoot.FullName,
             ["Panel:AdminToken"] = PanelToken,
             ["TrueNas:Host"] = options.Host,
             ["TrueNas:Port"] = options.Port.ToString(),
@@ -62,6 +64,7 @@ public sealed class DisklessBootTests : IAsyncLifetime
     {
         await ((IAsyncLifetime)_server).DisposeAsync();
         await _nas.DisposeAsync();
+        _pxeRoot.Delete(recursive: true);
     }
 
     private HttpClient Panel()
@@ -240,6 +243,29 @@ public sealed class DisklessBootTests : IAsyncLifetime
         var script = await (await _server.CreateClient().GetAsync("/pxe/v1/boot.ipxe")).Content.ReadAsStringAsync();
         Assert.Contains("chain --autofree --replace /pxe/v1/machines/${netX/mac:hexhyp}/boot.ipxe || goto unreachable\n", script);
         Assert.Contains("iseq ${tries} 12 && goto local ||\n", script);
+    }
+
+    [Fact]
+    public async Task Master_install_loads_only_driver_names_wimboot_keeps_whole()
+    {
+        var drv = Directory.CreateDirectory(Path.Combine(_pxeRoot.FullName, "winsetup", "drv"));
+        foreach (var name in new[] { "rt640x64.inf", "rt640x64.sys", "e1d68x64-0123456789abcdefgh.inf", "e1d68x64-0123456789abcdefghi.inf", "bad name.inf" })
+        {
+            await File.WriteAllTextAsync(Path.Combine(drv.FullName, name), "x");
+        }
+
+        var machine = await DisklessSeatAsync();
+        using (var response = await Panel().PutAsJsonAsync("/panel/api/v1/diskless/master", new { machineId = machine.MachineId, install = true }))
+        {
+            Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        }
+
+        var script = await BootScriptAsync();
+        Assert.Contains("initrd /pxe/v1/files/winsetup/drv/rt640x64.inf rt640x64.inf || goto failed\n", script);
+        Assert.Contains("initrd /pxe/v1/files/winsetup/drv/rt640x64.sys rt640x64.sys || goto failed\n", script);
+        Assert.Contains("e1d68x64-0123456789abcdefgh.inf", script); // ровно 31 символ — wimboot хранит целиком
+        Assert.DoesNotContain("e1d68x64-0123456789abcdefghi.inf", script); // 32 — wimboot обрезал бы молча
+        Assert.DoesNotContain("bad name", script);
     }
 
     [Fact]

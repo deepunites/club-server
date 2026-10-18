@@ -28,10 +28,10 @@ public sealed record NetworkStatusView(
 /// </summary>
 public static class NetworkPanelEndpoints
 {
-    /// <summary>Сколько мест помещается в диапазон резерваций до пула, шлюза или конца подсети.</summary>
-    public static int SeatCapacity(NetworkSettings s)
+    /// <summary>Сколько мест помещается в диапазон резерваций до пула, шлюза, адреса сервера клуба или конца подсети.</summary>
+    public static int SeatCapacity(NetworkSettings s, StaticHosts? statics = null)
     {
-        var plan = new IpPlan(s);
+        var plan = new IpPlan(s, statics);
         var seat = 0;
         while (seat < 4096 && plan.SeatAddress(seat + 1) is not null)
         {
@@ -45,15 +45,15 @@ public static class NetworkPanelEndpoints
     {
         var panel = app.MapGroup(PanelAuthMiddleware.Prefix + "/v1/network");
 
-        panel.MapGet("/settings", async (NetworkRepository network) => Results.Json(View(await network.GetAsync()), ApiJson.Options));
+        panel.MapGet("/settings", async (NetworkRepository network, StaticHosts statics) => Results.Json(View(await network.GetAsync(), statics), ApiJson.Options));
 
-        panel.MapPut("/settings", async (NetworkSettingsInput input, NetworkRepository network, IServiceProvider services, TimeProvider clock, ILoggerFactory logs) =>
+        panel.MapPut("/settings", async (NetworkSettingsInput input, NetworkRepository network, StaticHosts statics, IServiceProvider services, TimeProvider clock, ILoggerFactory logs) =>
         {
             var settings = new NetworkSettings(
                 true, input.Subnet?.Trim() ?? "", input.KeaSubnetId, input.Interface?.Trim() ?? "", input.DhcpServer?.Trim() ?? "",
                 input.Gateway?.Trim() ?? "", (input.DnsServers ?? []).Select(d => d.Trim()).Where(d => d.Length > 0).ToList(),
                 input.PoolStart?.Trim() ?? "", input.PoolEnd?.Trim() ?? "", input.ReservedStart?.Trim() ?? "", input.LeaseTimeSec);
-            var errors = IpPlan.Validate(settings);
+            var errors = IpPlan.Validate(settings, statics);
             if (errors.Count > 0)
             {
                 throw new ApiException(StatusCodes.Status400BadRequest, ErrorCodes.Validation, "Invalid network settings",
@@ -66,17 +66,17 @@ public static class NetworkPanelEndpoints
 
             // Резервации под новый план — сразу, не дожидаясь прохода фоновой службы. Ошибка Kea попадёт в предупреждения.
             await NetworkWorker.RunOnceAsync(services, clock, CancellationToken.None);
-            return Results.Json(View(await network.GetAsync()), ApiJson.Options);
+            return Results.Json(View(await network.GetAsync(), statics), ApiJson.Options);
         });
 
-        panel.MapGet("/status", async (NetworkRepository network, MachineRepository machines, LibraryRepository library, NetworkState state, KeaOptions kea) =>
+        panel.MapGet("/status", async (NetworkRepository network, MachineRepository machines, LibraryRepository library, NetworkState state, KeaOptions kea, KeaHostSync keaSync) =>
         {
             var settings = await network.GetAsync();
             var registry = await machines.AllAsync();
             var reservations = new List<ReservationView>();
             if (settings.Configured)
             {
-                var (hosts, conflicts) = KeaHostSync.Plan(registry, new IpPlan(settings));
+                var (hosts, conflicts) = KeaHostSync.Plan(registry, keaSync.PlanFor(settings));
                 foreach (var m in registry.Where(m => m.Approved).OrderBy(m => m.Number))
                 {
                     var host = hosts.FirstOrDefault(h => h.MachineId == m.Id);
@@ -116,9 +116,9 @@ public static class NetworkPanelEndpoints
             ? new PxeBoot(settings.DhcpServer, url.ToString().TrimEnd('/') + Imaging.PxeEndpoints.Prefix + "/boot.ipxe")
             : null;
 
-    private static NetworkSettingsView View(NetworkSettings s) =>
+    private static NetworkSettingsView View(NetworkSettings s, StaticHosts statics) =>
         new(s.Configured, s.Subnet, new IpPlan(s).Mask, s.KeaSubnetId, s.Interface, s.DhcpServer, s.Gateway, s.DnsServers,
-            s.PoolStart, s.PoolEnd, s.ReservedStart, s.LeaseTimeSec, SeatCapacity(s), ServerInterfaces());
+            s.PoolStart, s.PoolEnd, s.ReservedStart, s.LeaseTimeSec, SeatCapacity(s, statics), ServerInterfaces());
 
     /// <summary>Интерфейсы этой машины — подсказка для поля «интерфейс» (Kea не примет подсеть на несуществующем).</summary>
     private static List<string> ServerInterfaces() =>
