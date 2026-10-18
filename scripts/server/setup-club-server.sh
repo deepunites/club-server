@@ -107,6 +107,9 @@ cat > /etc/samba/smb.conf <<CONF
    hosts deny = 0.0.0.0/0
    map to guest = never
    server min protocol = SMB2_10
+   # dead connections of rebooted PCs are closed within a minute: WinPE reuses the same source ports on every boot, and
+   # a stale connection on that port makes "net use" fail with error 53 for minutes
+   socket options = TCP_NODELAY SO_KEEPALIVE TCP_KEEPIDLE=20 TCP_KEEPINTVL=5 TCP_KEEPCNT=3
    load printers = no
    printing = bsd
    printcap name = /dev/null
@@ -128,6 +131,8 @@ cat > /etc/samba/smb.conf <<CONF
    valid users = winsetup
    read only = yes
    browseable = no
+   # the ISO files have no Unix x bit: without this Samba refuses to run setup.exe (Access denied, Setup exit code 5)
+   acl allow execute always = yes
 CONF
 testparm -s >/dev/null 2>&1
 systemctl restart smbd

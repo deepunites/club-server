@@ -11,7 +11,7 @@
     Что делает:
       - электропитание: гибернация и быстрый запуск выключены, сон — никогда, PCIe ASPM выключен (экран не трогаем);
       - дампы памяти выключены, восстановление при загрузке и WinRE выключены (BCD, reagentc);
-      - Windows Update: без автообновлений, без драйверов, версия 25H2; оптимизация доставки, контроль памяти,
+      - Windows Update: без автообновлений, без драйверов, версия -TargetRelease (26H2); оптимизация доставки, контроль памяти,
         автоматическое обслуживание, дефрагментация по расписанию, индексатор (WSearch), точки восстановления — выключены;
         исключения Defender для G:\ и H:\; запрет шифрования устройства;
       - iSCSI: удержание запросов при обрыве 120 с (MaxRequestHoldTime), таймаут диска 120 с, служба MSiSCSI — автоматически
@@ -30,6 +30,10 @@
     Выключить целостность памяти (HVCI): DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity Enabled=0
     (действует после перезагрузки; заметнее всего на Ryzen 5 1600).
 
+.PARAMETER TargetRelease
+    Версия Windows, на которой держит Windows Update (TargetReleaseVersionInfo): 26H2 в клубе (2026-10-18). Не 26H1
+    (сборки 28000+): она ломает передачу диска от iPXE.
+
 .PARAMETER Force
     Продолжить, даже если системный диск не iSCSI или ПК загружен как обычное место (изменения места пропадут при
     следующей загрузке).
@@ -44,6 +48,7 @@
 param(
     [string]$StageDrivers,
     [switch]$DisableMemoryIntegrity,
+    [string]$TargetRelease = '26H2',
     [switch]$Force
 )
 
@@ -57,7 +62,6 @@ $WuPolicy  = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
 $HoldTimeSec    = 120   # MaxRequestHoldTime: сколько iSCSI держит и повторяет запросы при обрыве (по умолчанию 60)
 $DiskTimeoutSec = 120   # disk\TimeOutValue: не меньше удержания, иначе диск отказывает раньше (0x7A)
 $ExclusionPaths = @('G:\', 'H:\')
-$TargetRelease  = '25H2'
 # Свойства энергосбережения сетевой карты: по отображаемому имени (англ. и рус.) и по ключевому слову реестра.
 $PowerSavingNames    = '(?i)\bEEE\b|Energy.?Efficient|Green.?Ethernet|Power Saving|Ultra Low Power|Энергосбер|Зелён|Зелен'
 $PowerSavingKeywords = '(?i)^\*?EEE$|^AdvancedEEE$|^EnableGreenEthernet$|^PowerSavingMode$|^ULPMode$'
@@ -375,7 +379,7 @@ Invoke-Step 'Среда восстановления WinRE выключена (r
 # ======================================================================================================================
 # 3. Windows Update и фоновые задачи (каждое место грузится с отката — «пропущенное» обслуживание шло бы на каждой загрузке)
 # ======================================================================================================================
-Invoke-Step 'Windows Update: без автообновлений, без драйверов, версия 25H2' {
+Invoke-Step ('Windows Update: без автообновлений, без драйверов, версия {0}' -f $TargetRelease) {
     Set-RegValue "$WuPolicy\AU" 'NoAutoUpdate' 1
     # Драйвер из Windows Update под другим именем службы теряет BootFlags сетевой карты -> 0x7B; заодно не меняет видеодрайверы.
     Set-RegValue $WuPolicy 'ExcludeWUDriversInQualityUpdate' 1
@@ -549,7 +553,7 @@ Write-Host '============================== ПРОВЕРКА ====================
 $cv = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
 $build = Get-RegValue $cv 'CurrentBuild'
 Write-Info ('Windows: {0}, {1}, сборка {2}.{3}' -f (Get-RegValue $cv 'EditionID'), (Get-RegValue $cv 'DisplayVersion'), $build, (Get-RegValue $cv 'UBR'))
-Test-Check ('версия Windows {0}' -f $TargetRelease) { (Get-RegValue $cv 'DisplayVersion') -eq $TargetRelease } 'эталон ставится с ISO 25H2; 26H1 (сборка 28000+) ломает передачу диска от iPXE'
+Test-Check ('версия Windows {0}' -f $TargetRelease) { (Get-RegValue $cv 'DisplayVersion') -eq $TargetRelease } 'обновите Windows до этой версии через Windows Update (драйверы он не ставит); 26H1 (сборка 28000+) ломает передачу диска от iPXE'
 
 # Электропитание
 Test-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' 'HibernateEnabled' 0 'powercfg /hibernate off'
