@@ -1,12 +1,12 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Ставит помощник бездиска (ClubDisklessHelper 1.5.0) в эталон: служба Windows, которая подключает диск игр G:,
+    Ставит помощник бездиска (ClubDisklessHelper 1.5.1) в эталон: служба Windows, которая подключает диск игр G:,
     правку библиотеки M: и сообщает серверу клуба состояние ПК (docs/helper.md).
 
 .DESCRIPTION
     Запускать в эталоне в режиме мастера, PowerShell от администратора. Рядом со скриптом (флешка) — три файла:
-      ClubDisklessHelper.exe — сборка 1.5.0, SHA256 сверяется;
+      ClubDisklessHelper.exe — сборка 1.5.1, SHA256 сверяется;
       helper.json            — адрес сервера и ключ клуба (секрет: после установки удаляется с флешки);
       club-ca.pem            — CA клуба, которым подписан сертификат сервера.
     Помощник 1.5.0 привязывает регистрацию к HWID платы: запуск на мастере безопасен — места с другим HWID
@@ -24,7 +24,7 @@ $ErrorActionPreference = 'Continue'
 # $PSScriptRoot в значении параметра по умолчанию пуст при запуске powershell.exe -File (PS 5.1) — берём папку скрипта здесь.
 if (-not $Source) { $Source = Split-Path -Parent $MyInvocation.MyCommand.Path }
 
-$ExeSha256 = '7a119c5768cb95496be6d27df35eff9f530b295552b664c172016155db12edf2'   # 1.5.0+4d54f9d
+$ExeSha256 = 'bec0828743b7095714cfab18997ad348e1dbe9cc7e5fbc429abfa8da5eef1b28'   # 1.5.1+b844e64 (.NET 10.0.13)
 $ServiceName = 'ClubDisklessHelper'
 $InstallDir = "$env:ProgramFiles\ClubDiskless"
 $StateDir = "$env:ProgramData\ClubDiskless"
@@ -50,7 +50,7 @@ try {
     $ca = Join-Path $Source 'club-ca.pem'
     foreach ($p in $exe, $ca) { if (-not (Test-Path -LiteralPath $p)) { throw "нет файла $p" } }
     if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ne $ExeSha256) { throw 'SHA256 ClubDisklessHelper.exe не совпадает (не та сборка или файл повреждён)' }
-    Write-Pass 'ClubDisklessHelper.exe 1.5.0: SHA256 совпадает'
+    Write-Pass 'ClubDisklessHelper.exe 1.5.1: SHA256 совпадает'
     $haveJson = Test-Path -LiteralPath $json
     $stateJson = Join-Path $StateDir 'helper.json'
     $stateCa = Join-Path $StateDir 'club-ca.pem'
