@@ -44,9 +44,11 @@ if ($master) { Write-Pass "загрузка с мастер-тома ($($master[
 elseif ($Force) { Write-Warn 'сессии diskless-master нет — продолжаю из-за -Force' }
 else { throw 'Этот ПК загружен не с мастер-тома (нет iSCSI-сессии …:diskless-master). Скрипт — только для сеанса мастера (обойти: -Force).' }
 
-if (Get-Volume -DriveLetter M -ErrorAction SilentlyContinue) {
-    Write-Warn 'открыта правка библиотеки (M:): в панели «Закончить правку» библиотеки, потом снова этот скрипт'
+if (@(Get-IscsiSession -ErrorAction SilentlyContinue | Where-Object { $_.TargetNodeAddress -match ':club-master$' -and $_.IsConnected }).Count -gt 0) {
+    Write-Warn 'открыта правка библиотеки (таргет club-master): в панели «Закончить правку» библиотеки, потом снова этот скрипт'
 }
+# Вход в лаунчеры под аккаунтами клуба остался бы в образе и библиотеке — игроки получили бы эти аккаунты.
+Write-Line 'Перед публикацией: выйдите из аккаунтов клуба в Steam, Epic, Battle.net, Ubisoft, Rockstar, Lesta (и закройте их).'
 
 Write-Title 'Помощник: остановка и удаление регистрации этого ПК'
 $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
