@@ -40,11 +40,17 @@ public sealed class InMemoryAssignmentCache : IAssignmentCache
 /// отключить занятый том старой версии ронял такт целиком, и отчётов не было, пока том не освободился). Windows не
 /// ответила на том (таймаут PowerShell, 120 с) — мастер-том в этом такте не опрашивается (unknown), чтобы отчёт не ждал
 /// ещё столько же.
+/// Мастер-том на букве тома библиотеки (сервер с Library:MasterDriveLetter = DriveLetter, 1.5.1): сначала отпускается том
+/// библиотеки, потом подключается мастер-том; пока назначение мастер-тома есть, том библиотеки не монтируется
+/// (<see cref="MasterLetter"/>). Правку закрыли — наоборот: сначала отключается мастер-том (не отключился, на нём открыты
+/// файлы, — том библиотеки ждёт), потом возвращается том библиотеки. Без назначения (служба перезапустилась, сервер ещё
+/// не ответил или недоступен) опора — то, что на ПК: мастер-том на букве тома библиотеки её не отдаёт (<see cref="HeldLetter"/>).
 /// </summary>
 public sealed class HelperLoop(
     DisklessApiClient api, VolumeManager volumes, IAssignmentCache cache, IMachineIdentity identity, HelperOptions options, ILogger<HelperLoop> logger,
-    MasterManager? masters = null)
+    MasterManager? masters = null, TimeProvider? clock = null)
 {
+    private readonly TimeProvider _clock = clock ?? TimeProvider.System;
     private VolumeAssignment? _desired;
     private bool _known;
     private MasterAssignment? _master;
@@ -53,8 +59,22 @@ public sealed class HelperLoop(
     private string? _volumeFailure;
     private string? _masterFailure;
 
+    /// <summary>Сервер в последнем ответе сказал, что буква тома библиотеки отдана мастер-тому (StatusAccepted.LibraryLetterReserved).</summary>
+    private bool _libraryLetterReserved;
+
+    /// <summary>
+    /// Буква, на которой мастер-том сейчас на ПК, по последнему ответу MasterManager: подключён, подключается или не
+    /// отключился (failed с буквой). none и «не подключён» её забывают; unknown и failed без буквы не меняют — подключён ли
+    /// он теперь, по ним не понять. Нужна там, где назначения нет: правку закрыли, а на мастер-томе открыты файлы (ждут и
+    /// помощник, и сервер); служба перезапустилась во время правки, а сервер не ответил.
+    /// </summary>
+    private char? _masterOnLetter;
+
     /// <summary>MasterManager после запуска службы хоть раз ответил: известно, подключён ли мастер-том на ПК.</summary>
     private bool _masterSeen;
+
+    /// <summary>Мастер-том после запуска службы хоть раз опрошен (с любым итогом).</summary>
+    private bool _masterChecked;
 
     /// <summary>
     /// Последний ответ MasterManager, кроме unknown (<c>null</c> — мастер-том не подключён): при сбое отчёт опирается на
@@ -73,7 +93,7 @@ public sealed class HelperLoop(
     /// </summary>
     private string? _personalConfirmed;
 
-    /// <summary>С какого момента (Environment.TickCount64) сервер недоступен при запросе назначения; null — доступен.</summary>
+    /// <summary>С какого момента (монотонная отметка TimeProvider) сервер недоступен при запросе назначения; null — доступен.</summary>
     private long? _unreachableSince;
 
     /// <summary>
@@ -84,6 +104,27 @@ public sealed class HelperLoop(
 
     public MountedVolume? LastReport { get; private set; }
 
+    /// <summary>
+    /// Буква, которую мастер-том занимает вместо тома библиотеки: мастер-том назначен, и его буква — буква назначенного тома
+    /// библиотеки, или сервер прямо сказал, что буква отдана мастер-тому (тогда назначения тома может и не быть: ПК
+    /// загрузился во время правки). Пока она есть, том библиотеки не монтируется — ни из ответа сервера, ни из
+    /// assignment.json, ни после <see cref="CachedPersonalAfter"/> без сервера, — а подключённый отпускается.
+    /// </summary>
+    private char? MasterLetter =>
+        _master is { DriveLetter: { Length: > 0 } letter }
+        && (_libraryLetterReserved || (_desired is { DriveLetter: { Length: > 0 } library } && char.ToUpperInvariant(library[0]) == char.ToUpperInvariant(letter[0])))
+            ? char.ToUpperInvariant(letter[0])
+            : null;
+
+    /// <summary>Буква назначенного тома библиотеки (из ответа сервера или assignment.json).</summary>
+    private char? LibraryLetter => _desired is { DriveLetter: { Length: > 0 } letter } ? char.ToUpperInvariant(letter[0]) : null;
+
+    /// <summary>
+    /// Буква, на которую тому библиотеки сейчас нельзя: её берёт назначенный мастер-том или мастер-том уже на ней —
+    /// снятый, но не отключившийся, или подключённый до перезапуска службы, когда назначения помощник ещё не знает.
+    /// </summary>
+    private char? HeldLetter => MasterLetter ?? (_masterOnLetter is { } held && held == LibraryLetter ? held : null);
+
     public async Task TickAsync(CancellationToken ct)
     {
         if (!_known)
@@ -91,16 +132,54 @@ public sealed class HelperLoop(
             await LearnAssignmentAsync(ct);
         }
 
-        var report = await ApplyAsync(ct);
-        var master = await ApplyMasterAsync(ct);
+        // Порядок важен, когда мастер-том на букве библиотеки: букву сначала отпускают, потом берут. Обычно первым идёт том
+        // библиотеки. Мастер-том первым — когда с него сняли назначение, а он не отключился в прошлый раз, и в первом такте
+        // после запуска службы: мастер-том, подключённый до перезапуска, виден раньше, чем том из assignment.json
+        // попробует встать на его букву.
+        MountedVolume report;
+        MasterReport? master;
+        if (!_masterChecked || (MasterLetter is null && HeldLetter is not null))
+        {
+            _windowsTimedOut = false; // от прошлого такта: в этом том библиотеки ещё не применялся
+            master = await ApplyMasterAsync(ct);
+            report = await ApplyAsync(ct);
+        }
+        else
+        {
+            report = await ApplyAsync(ct);
+            master = await ApplyMasterAsync(ct);
+        }
+
         var reply = await ReportAsync(report, master, ct);
         if (reply is null)
         {
             return;
         }
 
+        var heldBefore = HeldLetter is not null;
+        var masterChanged = !Equals(reply.Master, _master) || !_masterKnown;
+        _masterKnown = true;
+        _master = reply.Master;
+        _libraryLetterReserved = reply.Master is not null && reply.LibraryLetterReserved;
+
         var changed = false;
-        if (reply.Volume is null && _desired is not null && VolumeManager.IsPersonal(_desired))
+        var masterApplied = false;
+        if (masterChanged && heldBefore && MasterLetter is null)
+        {
+            // Правку закрыли: сначала отключается мастер-том — он освобождает букву, на которую вернётся том библиотеки.
+            // Не отключился (открыты файлы) — том библиотеки ждёт (HeldLetter), пока не отключится.
+            master = await ApplyMasterAsync(ct);
+            masterApplied = changed = true;
+        }
+
+        var volumeApplied = false;
+        if (reply.Volume is null && _libraryLetterReserved)
+        {
+            // Буква тома отдана мастер-тому: тома нет намеренно. Назначение и assignment.json не трогаем — после правки том
+            // вернётся (с ответом сервера, как прежде), а при перезагрузке без сервера будет что подключить.
+            logger.LogDebug("Server withholds the library volume: its drive letter is given to the master volume");
+        }
+        else if (reply.Volume is null && _desired is not null && VolumeManager.IsPersonal(_desired))
         {
             // Личный диск не отпускаем из-за пустого ответа (диск готовится, сбой TrueNAS): на нём сессия игрока. Он
             // сменится при следующем старте помощника.
@@ -112,7 +191,7 @@ public sealed class HelperLoop(
             logger.LogInformation("Personal games disk offered in a status reply; asking for it at boot to get it reset first");
             await LearnAssignmentAsync(ct);
             report = await ApplyAsync(ct);
-            changed = true;
+            volumeApplied = changed = true;
         }
         else if (!Equals(reply.Volume, _desired))
         {
@@ -122,15 +201,19 @@ public sealed class HelperLoop(
             _known = true;
             await cache.SaveAsync((await identity.ReadAsync(ct)).Hwid, _desired, ct);
             report = await ApplyAsync(ct);
+            volumeApplied = changed = true;
+        }
+
+        if (!volumeApplied && heldBefore != (HeldLetter is not null))
+        {
+            // Буква перешла к мастер-тому (том библиотеки отпускается) или вернулась от него (том снова монтируется).
+            report = await ApplyAsync(ct);
             changed = true;
         }
 
-        var masterKnownBefore = _masterKnown;
-        _masterKnown = true;
-        if (!Equals(reply.Master, _master) || !masterKnownBefore)
+        if (masterChanged && !masterApplied)
         {
             // Администратор открыл или закрыл правку мастер-тома.
-            _master = reply.Master;
             master = await ApplyMasterAsync(ct);
             changed = true;
         }
@@ -145,6 +228,7 @@ public sealed class HelperLoop(
 
     private async Task<MasterReport?> ApplyMasterAsync(CancellationToken ct)
     {
+        _masterChecked = true;
         if (masters is null)
         {
             return LastMasterReport = null;
@@ -159,6 +243,17 @@ public sealed class HelperLoop(
             return LastMasterReport = new MasterReport(MasterManager.UnknownState, Error: "not checked: timeout");
         }
 
+        if (MasterLetter is { } letter && _master is { } held && LastReport is { State: not "none", TargetIqn: not null } library)
+        {
+            // Том библиотеки ещё на букве мастер-тома (ApplyAsync в этом такте его не отпустил: с тома запущена игра, открыты
+            // файлы, сбой): мастер-том не подключаем — буква занята. Насильно том не отключается; повтор в следующем такте.
+            var reason = library.Error is { } error && error.StartsWith(VolumeManager.MasterWaits, StringComparison.Ordinal)
+                ? error[VolumeManager.MasterWaits.Length..]
+                : library.Error ?? library.State;
+            logger.LogDebug("Master volume waits for {Letter}: held by the library volume {Iqn}: {Reason}", letter, library.TargetIqn, reason);
+            return LastMasterReport = new MasterReport("failed", held.TargetIqn, held.DriveLetter, $"drive letter {letter}: is held by the library volume: {reason}");
+        }
+
         try
         {
             LastMasterReport = await masters.ApplyAsync(_master, _masterKnown, ct);
@@ -168,6 +263,12 @@ public sealed class HelperLoop(
                 _masterSeen = true;
             }
 
+            _masterOnLetter = LastMasterReport switch
+            {
+                null or { State: "none" } => null,
+                { State: "mounted" or "mounting" or "failed", DriveLetter: { Length: > 0 } onLetter } => char.ToUpperInvariant(onLetter[0]),
+                _ => _masterOnLetter,
+            };
             _masterFailure = null;
             return LastMasterReport;
         }
@@ -195,11 +296,21 @@ public sealed class HelperLoop(
     {
         try
         {
-            _desired = await api.GetVolumeAsync(await volumes.PersonalAttachedAsync(ct), ct);
+            var answer = await api.GetVolumeAsync(await volumes.PersonalAttachedAsync(ct), ct);
+            _desired = answer.Volume;
             _known = true;
             _unreachableSince = null;
             _personalConfirmed = _desired is not null && VolumeManager.IsPersonal(_desired) ? _desired.TargetIqn : null;
-            await cache.SaveAsync((await identity.ReadAsync(ct)).Hwid, _desired, ct);
+            if (answer.LibraryLetterReserved)
+            {
+                // Тома нет, потому что его буква отдана мастер-тому (ПК загрузили во время правки), а не потому, что нечего
+                // монтировать: assignment.json не затираем — без сервера при следующей загрузке будет что подключить.
+                logger.LogInformation("Server withholds the library volume at boot: its drive letter is given to the master volume");
+            }
+            else
+            {
+                await cache.SaveAsync((await identity.ReadAsync(ct)).Hwid, _desired, ct);
+            }
         }
         catch (Exception ex) when (ex is ServerUnavailableException or PendingApprovalException)
         {
@@ -207,7 +318,7 @@ public sealed class HelperLoop(
             _desired = await cache.LoadAsync((await identity.ReadAsync(ct)).Hwid, ct);
             if (ex is ServerUnavailableException { Unreachable: true })
             {
-                _unreachableSince ??= Environment.TickCount64;
+                _unreachableSince ??= _clock.GetTimestamp();
             }
             else
             {
@@ -219,7 +330,7 @@ public sealed class HelperLoop(
                 // Личный диск без сброса сервером — с данными прошлого игрока. Пока сервер отвечает ошибкой или недоступен
                 // недолго (перезапуск службы, DHCP ещё не выдал адрес), спрашиваем снова каждый такт; дольше
                 // CachedPersonalAfter — монтируем как есть: без игр клуб не работает.
-                if (_unreachableSince is not { } since || Environment.TickCount64 - since < (long)CachedPersonalAfter.TotalMilliseconds)
+                if (_unreachableSince is not { } since || _clock.GetElapsedTime(since) < CachedPersonalAfter)
                 {
                     logger.LogWarning("Server did not give the assignment ({Reason}); asking again instead of mounting the cached personal disk", ex.Message);
                     _desired = null;
@@ -238,7 +349,8 @@ public sealed class HelperLoop(
     private async Task<MountedVolume> ApplyAsync(CancellationToken ct)
     {
         _windowsTimedOut = false;
-        if (!_known)
+        var masterLetter = HeldLetter;
+        if (!_known && masterLetter is null)
         {
             // Ни сервера, ни сохранённого назначения — ничего не трогаем (и ничего не отключаем).
             return LastReport = new MountedVolume("none", Error: "no assignment known yet");
@@ -246,7 +358,9 @@ public sealed class HelperLoop(
 
         try
         {
-            LastReport = await volumes.ApplyAsync(_desired, ct);
+            // Буква тома отдана мастер-тому: не монтируем, какое бы назначение ни было (ответ сервера, assignment.json,
+            // сохранённый личный диск после 3 минут без сервера), — подключённый том отпускаем.
+            LastReport = masterLetter is { } letter ? await volumes.ReleaseForMasterAsync(_desired, letter, ct) : await volumes.ApplyAsync(_desired, ct);
             _windowsTimedOut = volumes.WindowsTimedOut;
             _volumeFailure = null;
             return LastReport;

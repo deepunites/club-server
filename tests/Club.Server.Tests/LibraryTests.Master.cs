@@ -235,6 +235,57 @@ public sealed partial class LibraryTests
         Assert.Equal(((string?)null, (string?)null), await MachineMasterRowAsync(a));
     }
 
+    [Fact]
+    public async Task Superclient_on_the_library_letter_gets_no_read_only_volume_while_editing()
+    {
+        // Library:MasterDriveLetter = DriveLetter: на ПК правки мастер-том встаёт на G: вместо тома библиотеки.
+        Options.MasterDriveLetter = "G";
+        await PublishAsync("v1");
+        var (b, _) = await ReportMasterAsync("hw-2", IqnB);
+        var a = await OpenMasterAsync();
+
+        using (var response = await a.SendAsync(HttpMethod.Put, $"/diskless/v1/machines/{a.MachineId}/status", TestMachine.Status()))
+        {
+            var reply = await Contract.ReadAsync(response, "StatusAccepted");
+            Assert.False(reply.TryGetProperty("volume", out _));
+            Assert.True(reply.GetProperty("libraryLetterReserved").GetBoolean());
+            Assert.Equal("G", reply.GetProperty("master").GetProperty("driveLetter").GetString());
+        }
+
+        using (var boot = await a.SendAsync(HttpMethod.Get, $"/diskless/v1/machines/{a.MachineId}/volume"))
+        {
+            // 204 с пометкой: помощник 1.5.1 не затирает assignment.json, как при «нечего монтировать».
+            Assert.Equal(HttpStatusCode.NoContent, boot.StatusCode);
+            Assert.Equal(["true"], boot.Headers.GetValues("X-Library-Letter-Reserved"));
+        }
+
+        // Помощник не отдал G: (лаунчер держит файлы на томе библиотеки) — причина видна в панели: у машины на экране
+        // «Рабочие станции» (с буквой мастер-тома из настройки, а не M:) и у мастер-тома на экране «Библиотека игр».
+        const string held = "drive letter G: is held by the library volume: volume in use (open files on G:): The disk is in use";
+        await StatusReplyAsync(a, new { state = "failed", targetIqn = $"{Basename}:club-master", driveLetter = "G", error = held });
+        var machines = await Panel().GetFromJsonAsync<JsonElement>("/panel/api/v1/machines");
+        Assert.Equal("G", machines.GetProperty("masterDriveLetter").GetString());
+        var row = machines.GetProperty("machines").EnumerateArray().Single(m => m.GetProperty("id").GetGuid() == a.MachineId);
+        Assert.Equal(("failed", held), (row.GetProperty("masterState").GetString(), row.GetProperty("masterError").GetString()));
+        var view = await MasterAsync();
+        Assert.Equal(("failed", held), (view.GetProperty("machineState").GetString(), view.GetProperty("machineError").GetString()));
+
+        // Остальные ПК — как всегда: опубликованная версия на G:.
+        var other = await StatusReplyAsync(b);
+        Assert.Equal(("v1", "G"), (other.GetProperty("volume").GetProperty("libraryVersion").GetString(), other.GetProperty("volume").GetProperty("driveLetter").GetString()));
+        Assert.False(other.TryGetProperty("libraryLetterReserved", out _));
+        using (var boot = await b.SendAsync(HttpMethod.Get, $"/diskless/v1/machines/{b.MachineId}/volume"))
+        {
+            Assert.Equal(HttpStatusCode.OK, boot.StatusCode);
+            Assert.False(boot.Headers.Contains("X-Library-Letter-Reserved"));
+        }
+
+        // Правку закрыли — ПК правки снова получает версию.
+        Assert.Equal((HttpStatusCode.Accepted, null), await PanelPostAsync("/panel/api/v1/library/master/close", new { }));
+        await PassAsync();
+        Assert.Equal("v1", (await StatusReplyAsync(a)).GetProperty("volume").GetProperty("libraryVersion").GetString());
+    }
+
     private async Task<(string? State, string? Error)> MachineMasterRowAsync(TestMachine machine)
     {
         var row = (await _server.Services.GetRequiredService<MachineRepository>().FindAsync(machine.MachineId))!;

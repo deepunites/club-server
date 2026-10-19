@@ -326,9 +326,9 @@ public sealed class HelperEndToEndTests : IAsyncLifetime
 
         // Сбой ушёл из VolumeManager исключением (опрос сессий): один опрос за такт, а не два.
         _windows.ConnectedTargetsError = new TimeoutException("PowerShell did not finish in 120 s");
-        var calls = _windows.ConnectedTargetsCalls;
+        var calls = _windows.SessionQueries;
         await helper.TickAsync(CancellationToken.None);
-        Assert.Equal(calls + 1, _windows.ConnectedTargetsCalls);
+        Assert.Equal(calls + 1, _windows.SessionQueries);
         Assert.Equal(new MasterReport(MasterManager.UnknownState, Error: "not checked: timeout"), helper.LastMasterReport);
         var machine = await MachineAsync();
         Assert.Equal(("failed", "v1"), (machine.VolumeState, machine.VolumeVersion));
@@ -336,9 +336,9 @@ public sealed class HelperEndToEndTests : IAsyncLifetime
         // Сбой пойман в VolumeManager (поиск диска текущей версии): том остаётся, мастер-том тоже не опрашивается.
         _windows.ConnectedTargetsError = null;
         _windows.FindDiskErrors[v1] = new TimeoutException("PowerShell did not finish in 120 s");
-        calls = _windows.ConnectedTargetsCalls;
+        calls = _windows.SessionQueries;
         await helper.TickAsync(CancellationToken.None);
-        Assert.Equal(calls + 1, _windows.ConnectedTargetsCalls);
+        Assert.Equal(calls + 1, _windows.SessionQueries);
         Assert.Equal(MasterManager.UnknownState, helper.LastMasterReport!.State);
         machine = await MachineAsync();
         Assert.Equal(("failed", "v1", "not checked: timeout"), (machine.VolumeState, machine.VolumeVersion, machine.VolumeError));
@@ -346,9 +346,9 @@ public sealed class HelperEndToEndTests : IAsyncLifetime
 
         // Windows отвечает — мастер-том снова опрашивается.
         _windows.FindDiskErrors.Clear();
-        calls = _windows.ConnectedTargetsCalls;
+        calls = _windows.SessionQueries;
         await helper.TickAsync(CancellationToken.None);
-        Assert.Equal(calls + 2, _windows.ConnectedTargetsCalls);
+        Assert.Equal(calls + 2, _windows.SessionQueries);
         Assert.Null(helper.LastMasterReport); // мастер-том не назначен и не подключён
         Assert.Equal("mounted", (await MachineAsync()).VolumeState);
     }
@@ -428,6 +428,122 @@ public sealed class HelperEndToEndTests : IAsyncLifetime
         await StorageWorker.RunOnceAsync(_publisher, _library, reconcile: false, TimeProvider.System, CancellationToken.None);
         var closed = await _server.Services.GetRequiredService<MasterRepository>().GetAsync();
         Assert.Equal(("closed", false), (closed.State, closed.Dirty));
+    }
+
+    /// <summary>Мастер-том на букве библиотеки (Library:MasterDriveLetter = DriveLetter, помощник 1.5.1) открыт и на G:.</summary>
+    private async Task<(string V1, string MasterIqn)> MasterOnLibraryLetterAsync()
+    {
+        _server.Services.GetRequiredService<LibraryOptions>().MasterDriveLetter = "G";
+        await PublishAsync("v1");
+        var helper = Helper();
+        await helper.TickAsync(CancellationToken.None);
+        var v1 = $"{Basename}:games-v1";
+        var masterIqn = $"{Basename}:club-master";
+        Assert.True(_windows.Sessions[v1] is { ReadOnly: true, Offline: false, Letter: 'G' });
+        await _server.Services.GetRequiredService<MasterEditor>().RequestOpenAsync((await MachineAsync()).Id, "test");
+        await StorageWorker.RunOnceAsync(_publisher, _library, reconcile: false, TimeProvider.System, CancellationToken.None);
+        await helper.TickAsync(CancellationToken.None);
+        Assert.False(_windows.Sessions.ContainsKey(v1));
+        Assert.True(_windows.Sessions[masterIqn] is { ReadOnly: false, Offline: false, Letter: 'G' });
+        Assert.Equal("v1", _cache.Current!.LibraryVersion);
+        return (v1, masterIqn);
+    }
+
+    [Fact]
+    public async Task Cached_library_version_is_not_mounted_while_the_master_holds_its_letter()
+    {
+        var (v1, masterIqn) = await MasterOnLibraryLetterAsync();
+
+        // Служба помощника перезапустилась во время правки, сервер недоступен: назначения мастер-тома помощник не знает
+        // (оно только в памяти), в assignment.json — v1. Но на G: мастер-том — v1 на неё не встаёт ни разу.
+        var start = _windows.Log.Count;
+        var restarted = Helper(_server.CreateDefaultClient(new ServerDown()));
+        await restarted.TickAsync(CancellationToken.None);
+        await restarted.TickAsync(CancellationToken.None);
+
+        Assert.DoesNotContain(_windows.Log.Skip(start), l => l.StartsWith($"connect {v1} ", StringComparison.Ordinal));
+        Assert.True(_windows.Sessions[masterIqn] is { ReadOnly: false, Offline: false, Letter: 'G' });
+        Assert.Equal(new MasterReport("mounted", masterIqn, "G"), restarted.LastMasterReport);
+        Assert.Equal(("none", "drive letter G: is given to the master volume (library editing)"), (restarted.LastReport!.State, restarted.LastReport.Error));
+        Assert.Equal("v1", _cache.Current!.LibraryVersion);
+    }
+
+    [Fact]
+    public async Task Boot_during_editing_keeps_the_saved_assignment()
+    {
+        var (v1, masterIqn) = await MasterOnLibraryLetterAsync();
+
+        // ПК правки перезагрузили: запрос при старте — 204 с пометкой «буква отдана мастер-тому», а не «нечего
+        // монтировать». v1 не подключается, assignment.json не затирается: без сервера при следующей загрузке будет что
+        // подключить.
+        foreach (var iqn in _windows.Sessions.Keys.ToList())
+        {
+            await _windows.DisconnectAsync(iqn, CancellationToken.None);
+        }
+
+        var start = _windows.Log.Count;
+        var helper = Helper();
+        await helper.TickAsync(CancellationToken.None);
+
+        Assert.DoesNotContain(_windows.Log.Skip(start), l => l.StartsWith($"connect {v1} ", StringComparison.Ordinal));
+        Assert.True(_windows.Sessions[masterIqn] is { ReadOnly: false, Offline: false, Letter: 'G' });
+        Assert.Equal("v1", _cache.Current!.LibraryVersion);
+    }
+
+    [Fact]
+    public async Task Reboot_without_the_boot_answer_mounts_the_cached_version_only_until_the_first_reply()
+    {
+        // Мастер-том на букве библиотеки (Library:MasterDriveLetter = DriveLetter, помощник 1.5.1).
+        _server.Services.GetRequiredService<LibraryOptions>().MasterDriveLetter = "G";
+        await PublishAsync("v1");
+        await Helper().TickAsync(CancellationToken.None);
+        var v1 = $"{Basename}:games-v1";
+        var masterIqn = $"{Basename}:club-master";
+        Assert.True(_windows.Sessions[v1] is { ReadOnly: true, Offline: false, Letter: 'G' });
+        await _server.Services.GetRequiredService<MasterEditor>().RequestOpenAsync((await MachineAsync()).Id, "test");
+        await StorageWorker.RunOnceAsync(_publisher, _library, reconcile: false, TimeProvider.System, CancellationToken.None);
+
+        // ПК правки перезагрузили; запрос назначения при старте отвечает ошибкой — помощник берёт assignment.json (v1).
+        foreach (var iqn in _windows.Sessions.Keys.ToList())
+        {
+            await _windows.DisconnectAsync(iqn, CancellationToken.None);
+        }
+
+        var start = _windows.Log.Count;
+        var helper = Helper(_server.CreateDefaultClient(new VolumeRequestFails()));
+        await helper.TickAsync(CancellationToken.None);
+
+        // После перезагрузки мастер-тома на ПК нет, а назначение его — только в памяти: до ответа на первый отчёт помощник о
+        // правке не знает и подключает v1 (ограничение, docs/master-editing.md). Ответ в том же такте отдаёт G: мастер-тому —
+        // v1 отпускается, мастер-том встаёт на G:.
+        Assert.False(_windows.Sessions.ContainsKey(v1));
+        Assert.True(_windows.Sessions[masterIqn] is { ReadOnly: false, Offline: false, Letter: 'G' });
+
+        // Дальше v1 из assignment.json не монтируется, пока правка открыта; сам assignment.json не затёрт.
+        await helper.TickAsync(CancellationToken.None);
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(1, _windows.Log.Skip(start).Count(l => l.StartsWith($"connect {v1} ", StringComparison.Ordinal)));
+        Assert.False(_windows.Sessions.ContainsKey(v1));
+        Assert.True(_windows.Sessions[masterIqn] is { ReadOnly: false, Offline: false, Letter: 'G' });
+        Assert.Equal("v1", _cache.Current!.LibraryVersion);
+        var machine = await MachineAsync();
+        Assert.Equal(("none", "mounted"), (machine.VolumeState, machine.MasterState));
+    }
+
+    /// <summary>Сервер клуба недоступен: соединение отклонено на любой запрос.</summary>
+    private sealed class ServerDown : DelegatingHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            throw new HttpRequestException("Connection refused");
+    }
+
+    /// <summary>Запрос назначения при старте (<c>GET …/volume</c>) отвечает 503: сервер есть, но назначения не даёт.</summary>
+    private sealed class VolumeRequestFails : DelegatingHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            request.Method == HttpMethod.Get && request.RequestUri!.AbsolutePath.EndsWith("/volume", StringComparison.Ordinal)
+                ? Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.ServiceUnavailable) { RequestMessage = request })
+                : base.SendAsync(request, cancellationToken);
     }
 
     [Fact]

@@ -215,6 +215,90 @@ public sealed class PersonalGamesTests : IAsyncLifetime
         Assert.Equal(1, _nas.Count("target"));
     }
 
+    private LibraryOptions Options => _server.Services.GetRequiredService<LibraryOptions>();
+
+    /// <summary>Ответ на отчёт целиком (по контракту): том, мастер-том, libraryLetterReserved.</summary>
+    private static async Task<JsonElement> StatusReplyAsync(TestMachine machine, string iqn = Iqn)
+    {
+        using var response = await machine.SendAsync(HttpMethod.Put, $"/diskless/v1/machines/{machine.MachineId}/status", new
+        {
+            helperVersion = "1.5.1", volume = new { state = "none" }, initiatorIqn = iqn,
+        });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return await Contract.ReadAsync(response, "StatusAccepted");
+    }
+
+    private async Task OpenMasterAsync(TestMachine machine)
+    {
+        await _server.Services.GetRequiredService<MasterEditor>().RequestOpenAsync(machine.MachineId, "test");
+        await StorageWorker.RunOnceAsync(_publisher, _repository, reconcile: false, TimeProvider.System, CancellationToken.None);
+        Assert.Equal("open", (await _server.Services.GetRequiredService<MasterRepository>().GetAsync()).State);
+    }
+
+    [Fact]
+    public async Task Master_on_the_library_letter_withholds_the_editing_pcs_games_disk_without_resetting_it()
+    {
+        Options.MasterDriveLetter = "G"; // = DriveLetter: лаунчеры на ПК правки пишут пути G:\… как на местах
+        await PublishAsync("v1");
+        var (pc, _) = await TestMachine.RegisterAsync(_server.CreateClient());
+        var (other, _) = await TestMachine.RegisterAsync(_server.CreateClient(), null, "02:00:00:00:30:02");
+        const string otherIqn = "iqn.1991-05.com.microsoft:pc-02";
+        Assert.NotNull(await ReportAsync(pc));
+        Assert.NotNull(await ReportAsync(other, iqn: otherIqn));
+        var resets = _nas.Rollbacks($"{Seats}/games-seat-01");
+        await OpenMasterAsync(pc);
+
+        // ПК правки: мастер-том на G: и явный знак, что тома библиотеки нет намеренно.
+        var reply = await StatusReplyAsync(pc);
+        Assert.False(reply.TryGetProperty("volume", out _));
+        Assert.True(reply.GetProperty("libraryLetterReserved").GetBoolean());
+        var master = reply.GetProperty("master");
+        Assert.Equal(($"{Basename}:club-master", "G"), (master.GetProperty("targetIqn").GetString(), master.GetProperty("driveLetter").GetString()));
+
+        // Запрос при старте — тоже без тома, и личный диск при этом не сбрасывается (attached=false разрешил бы сброс).
+        using (var boot = await pc.SendAsync(HttpMethod.Get, $"/diskless/v1/machines/{pc.MachineId}/volume?attached=false"))
+        {
+            Assert.Equal(HttpStatusCode.NoContent, boot.StatusCode);
+            Assert.Equal(["true"], boot.Headers.GetValues("X-Library-Letter-Reserved"));
+        }
+
+        Assert.Equal(resets, _nas.Rollbacks($"{Seats}/games-seat-01"));
+        Assert.NotNull(await _storage.GetDatasetAsync($"{Seats}/games-seat-01"));
+        Assert.Equal("ready", (await _server.Services.GetRequiredService<SeatGamesRepository>().FindAsync(pc.MachineId))!.State);
+
+        // Другие ПК не затронуты: свой личный диск, ни мастер-тома, ни знака.
+        var otherReply = await StatusReplyAsync(other, otherIqn);
+        Assert.Equal($"{Basename}:games-seat-02", otherReply.GetProperty("volume").GetProperty("targetIqn").GetString());
+        Assert.False(otherReply.TryGetProperty("master", out _));
+        Assert.False(otherReply.TryGetProperty("libraryLetterReserved", out _));
+        Assert.NotNull(await VolumeAtBootAsync(other));
+
+        // Правку закрыли — ПК правки снова получает свой личный диск.
+        await _server.Services.GetRequiredService<MasterEditor>().RequestCloseAsync(force: false, "test");
+        await StorageWorker.RunOnceAsync(_publisher, _repository, reconcile: false, TimeProvider.System, CancellationToken.None);
+        var after = await StatusReplyAsync(pc);
+        Assert.Equal($"{Basename}:games-seat-01", after.GetProperty("volume").GetProperty("targetIqn").GetString());
+        Assert.False(after.TryGetProperty("master", out _));
+        Assert.False(after.TryGetProperty("libraryLetterReserved", out _));
+    }
+
+    [Fact]
+    public async Task Master_on_its_own_letter_leaves_the_games_disk_assigned()
+    {
+        Assert.True(new LibraryOptions { DriveLetter = "G", MasterDriveLetter = "g" }.MasterOnLibraryLetter); // без учёта регистра
+        Assert.False(Options.MasterOnLibraryLetter); // по умолчанию M:
+        await PublishAsync("v1");
+        var (pc, _) = await TestMachine.RegisterAsync(_server.CreateClient());
+        await ReportAsync(pc);
+        await OpenMasterAsync(pc);
+
+        var reply = await StatusReplyAsync(pc);
+        Assert.Equal($"{Basename}:games-seat-01", reply.GetProperty("volume").GetProperty("targetIqn").GetString());
+        Assert.Equal("M", reply.GetProperty("master").GetProperty("driveLetter").GetString());
+        Assert.False(reply.TryGetProperty("libraryLetterReserved", out _));
+        Assert.NotNull(await VolumeAtBootAsync(pc));
+    }
+
     [Fact]
     public async Task Diskless_seat_admits_its_boot_initiator_too()
     {

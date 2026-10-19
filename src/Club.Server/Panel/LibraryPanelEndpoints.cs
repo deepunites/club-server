@@ -11,11 +11,13 @@ public sealed record LibraryVersionView(
 
 /// <summary>
 /// Мастер-том для суперклиента. <c>state</c>: closed | opening | open | closing | failed; <c>mounted</c> — по отчёту
-/// помощника на ПК суперклиента; <c>dirty</c> — закрыт принудительно, публикация требует подтверждения.
+/// помощника на ПК суперклиента; <c>dirty</c> — закрыт принудительно, публикация требует подтверждения;
+/// <c>machineError</c> — причина из отчёта помощника (у <c>machineState</c> failed и mounting).
 /// </summary>
 public sealed record MasterView(
     string State, Guid? MachineId, string? MachineName, string? MachineState, bool Dirty, bool ForceClose,
-    DateTimeOffset? OpenedAt, DateTimeOffset? CloseRequestedAt, DateTimeOffset? ClosedAt, string? LastError, string DriveLetter);
+    DateTimeOffset? OpenedAt, DateTimeOffset? CloseRequestedAt, DateTimeOffset? ClosedAt, string? LastError, string DriveLetter,
+    string? MachineError = null);
 
 /// <summary>ПК, на котором можно открыть мастер-том: одобрен и сообщил IQN инициатора.</summary>
 public sealed record MasterCandidate(Guid Id, int Number, string Name, bool Online);
@@ -70,7 +72,8 @@ public static class LibraryPanelEndpoints
             var masterMachine = registry.FirstOrDefault(m => m.Id == masterState.MachineId);
             var masterView = new MasterView(
                 masterState.State, masterState.MachineId, masterMachine?.Name, masterMachine?.MasterState, masterState.Dirty, masterState.ForceClose,
-                masterState.OpenedAt, masterState.CloseRequestedAt, masterState.ClosedAt, masterState.LastError, options.MasterDriveLetter);
+                masterState.OpenedAt, masterState.CloseRequestedAt, masterState.ClosedAt, masterState.LastError, options.MasterDriveLetter,
+                masterMachine?.MasterState is "mounting" or "failed" ? masterMachine.MasterError : null);
             var candidates = registry.Where(m => m.Approved && !string.IsNullOrEmpty(m.InitiatorIqn))
                 .Select(m => new MasterCandidate(m.Id, m.Number, m.Name, IsOnline(m))).ToList();
             var online = registry

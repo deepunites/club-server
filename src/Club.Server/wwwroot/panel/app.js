@@ -144,7 +144,9 @@
     const r = m.reimage;
     const parts = [m.bootMode === "diskless" ? badge("info", t("bootDiskless"), t("bootDisklessHint")) : m.imageVersion ? el("span", { class: "mono" }, m.imageVersion) : dash()];
     if (m.masterState) {
-      parts.push(el("div", {}, badge(m.masterState === "failed" ? "bad" : "warn", t("masterBadge", { letter: "M" }), t(`mm_${m.masterState}`))));
+      // Буква — из настройки сервера (Library:MasterDriveLetter: M или G — та же, что у библиотеки); причина — во всплывающей подсказке.
+      const hint = m.masterError ? `${t(`mm_${m.masterState}`)}: ${m.masterError}` : t(`mm_${m.masterState}`);
+      parts.push(el("div", {}, badge(m.masterState === "failed" ? "bad" : "warn", t("masterBadge", { letter: data?.masterDriveLetter ?? "M" }), hint)));
     }
     const sb = m.secureBoot;
     if (sb && sb.enabled !== null && sb.enabled !== undefined) {
@@ -518,6 +520,8 @@
     }
     parts.push(el("div", { class: "master-row" }, head));
     if (m.state === "closing") parts.push(el("div", { class: "muted small" }, t("masterWaiting")));
+    // Причина из отчёта помощника (буква занята томом библиотеки, открыты файлы, CHAP) — то, что администратору делать дальше.
+    if (m.machineError && m.state !== "closed") parts.push(el("div", { class: "error small" }, m.machineError));
     // У открытого тома lastError — оговорка открытия (таргет не виден ПК), а не ошибка.
     if (m.lastError) parts.push(el("div", { class: m.state === "open" ? "notice small" : "error small" }, m.lastError));
     if (m.dirty && m.state === "closed") parts.push(el("p", { class: "notice small" }, t("masterDirty")));

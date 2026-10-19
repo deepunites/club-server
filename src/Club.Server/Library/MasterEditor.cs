@@ -92,7 +92,7 @@ public sealed class MasterEditor(
         {
             TargetCheck.Hidden =>
                 $"The master target is not visible to the superclient PC ({state.InitiatorIqn}) even after re-applying the iSCSI configuration; " +
-                "if M: does not appear, restart the iSCSI service in TrueNAS (System → Services → iSCSI) — this drops every PC's session",
+                $"if {options.MasterDriveLetter}: does not appear, restart the iSCSI service in TrueNAS (System → Services → iSCSI) — this drops every PC's session",
             TargetCheck.ProbeDenied =>
                 $"The initiator group of the master target does not include the superclient PC ({state.InitiatorIqn}); close and open the master volume again",
             _ => null,

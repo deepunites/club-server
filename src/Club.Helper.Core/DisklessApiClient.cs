@@ -27,7 +27,19 @@ public sealed record MasterAssignment(string TargetIqn, string Portal, string Ch
 
 public sealed record MasterReport(string State, string? TargetIqn = null, string? DriveLetter = null, string? Error = null);
 
-public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume, MasterAssignment? Master = null);
+/// <summary>
+/// Ответ на отчёт. <paramref name="LibraryLetterReserved"/> (сервер с Library:MasterDriveLetter = DriveLetter, помощник
+/// 1.5.1+) — буква тома библиотеки отдана мастер-тому этого ПК: <paramref name="Volume"/> нет намеренно, и том
+/// библиотеки отпускается, а не сохраняется, как при пустом ответе.
+/// </summary>
+public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume, MasterAssignment? Master = null, bool LibraryLetterReserved = false);
+
+/// <summary>
+/// Ответ на запрос назначения при старте. <paramref name="LibraryLetterReserved"/> (сервер с Library:MasterDriveLetter =
+/// DriveLetter, заголовок <see cref="DisklessApiClient.LibraryLetterReservedHeader"/> у 204) — тома нет, потому что его
+/// буква отдана мастер-тому этого ПК, а не потому, что монтировать нечего.
+/// </summary>
+public sealed record BootAssignment(VolumeAssignment? Volume, bool LibraryLetterReserved = false);
 
 internal sealed record RegisterRequest(string Hwid, string Hostname, IReadOnlyList<string> MacAddresses, string HelperVersion, string? OsVersion);
 
@@ -62,15 +74,21 @@ public sealed class DisklessApiClient(HttpClient http, HelperOptions options, IC
 
     public Guid? MachineId => _credentials?.MachineId;
 
+    /// <summary>Заголовок 204 на запрос назначения при старте: тома нет, потому что его буква отдана мастер-тому.</summary>
+    public const string LibraryLetterReservedHeader = "X-Library-Letter-Reserved";
+
     /// <summary>
     /// Назначение при старте помощника. <paramref name="attached"/> — подключён ли на ПК личный диск игр (<c>null</c> —
     /// неизвестно): <c>false</c> разрешает серверу сбросить диск, даже если на нём висит сессия прошлой загрузки.
     /// </summary>
-    public async Task<VolumeAssignment?> GetVolumeAsync(bool? attached, CancellationToken ct)
+    public async Task<BootAssignment> GetVolumeAsync(bool? attached, CancellationToken ct)
     {
         var query = attached is { } a ? $"?attached={(a ? "true" : "false")}" : "";
         using var response = await SendAuthorizedAsync(id => new HttpRequestMessage(HttpMethod.Get, $"diskless/v1/machines/{id}/volume{query}"), ct);
-        return response.StatusCode == HttpStatusCode.NoContent ? null : await ReadAsync<VolumeAssignment>(response, ct);
+        return response.StatusCode == HttpStatusCode.NoContent
+            ? new BootAssignment(null, response.Headers.TryGetValues(LibraryLetterReservedHeader, out var reserved)
+                && reserved.Any(v => v.Equals("true", StringComparison.OrdinalIgnoreCase)))
+            : new BootAssignment(await ReadAsync<VolumeAssignment>(response, ct));
     }
 
     public async Task<StatusAccepted> ReportStatusAsync(MachineStatus status, CancellationToken ct)

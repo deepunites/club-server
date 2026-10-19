@@ -97,7 +97,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/VolumeAssignment'
         '204':
-          description: Тома нет (библиотека не опубликована) — помощник ничего не монтирует.
+          description: >-
+            Тома нет (библиотека не опубликована или буква тома отдана мастер-тому этого ПК — см.
+            StatusAccepted.libraryLetterReserved) — помощник ничего не монтирует. Личный диск места при этом не сбрасывается.
+          headers:
+            X-Library-Letter-Reserved:
+              description: >-
+                true — тома нет, потому что его буква отдана мастер-тому этого ПК (правка открыта ему, а
+                Library:MasterDriveLetter совпадает с Library:DriveLetter), а не потому, что монтировать нечего: помощник
+                1.5.1+ не затирает сохранённое назначение (assignment.json). Иначе заголовка нет; старые помощники его не
+                читают.
+              schema:
+                type: string
+                enum: ['true']
         '401':
           $ref: '#/components/responses/Error'
         '403':
@@ -403,7 +415,8 @@ components:
       description: >-
         Мастер-том библиотеки на запись. Приходит только ПК, которому администратор открыл правку, и только пока
         правка открыта. Секрет CHAP новый на каждое открытие. Назначение пропало — помощник сбрасывает кэш тома на
-        диск, переводит диск offline и отключает таргет; сервер закрывает доступ только после отключения.
+        диск, переводит диск offline и отключает таргет; сервер закрывает доступ только после отключения. driveLetter
+        может совпадать с буквой тома библиотеки — см. StatusAccepted.libraryLetterReserved.
       required: [targetIqn, portal, chapUser, chapSecret, driveLetter]
       properties:
         targetIqn:
@@ -469,6 +482,17 @@ components:
           $ref: '#/components/schemas/VolumeAssignment'
         master:
           $ref: '#/components/schemas/MasterAssignment'
+        libraryLetterReserved:
+          type: boolean
+          const: true
+          description: >-
+            Буква тома библиотеки отдана мастер-тому этого ПК: правка открыта ему, а Library:MasterDriveLetter совпадает
+            с Library:DriveLetter (без учёта регистра) — лаунчеры на ПК правки записывают пути G:\… так, как их видят
+            места. Приходит только вместе с master; volume тогда нет намеренно (и GET …/volume отвечает 204 с
+            X-Library-Letter-Reserved), личный диск места не сбрасывается и не удаляется. Помощник 1.5.1+ отпускает том
+            библиотеки (личный диск — со сбросом кэша и offline), подключает мастер-том на эту букву и, пока назначение
+            мастер-тома есть, том библиотеки не монтирует. Иначе поля нет; старые помощники его пропускают (1.5.0 при этом не отдаёт личный диск, и мастер-том
+            не подключается: буква занята).
     MachinesSnapshot:
       type: object
       required: [schema, generatedAt, contentHash, machines]

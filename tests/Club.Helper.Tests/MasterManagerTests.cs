@@ -73,9 +73,51 @@ public sealed class MasterManagerTests
 
         var report = await _masters.ApplyAsync(null, known: true, CancellationToken.None);
 
-        Assert.Equal("failed", report!.State);
+        // failed с таргетом и буквой, на которой том остался: по ней HelperLoop не ставит на неё том библиотеки.
+        Assert.Equal(new MasterReport("failed", MasterIqn, "M", "The disk is in use"), report);
         Assert.True(_storage.Sessions.ContainsKey(MasterIqn)); // не отключили без сброса кэша
         Assert.DoesNotContain($"disconnect {MasterIqn}", _storage.Log);
+    }
+
+    [Fact]
+    public async Task Dead_session_of_an_unassigned_master_is_disconnected_without_a_flush_after_a_grace_period()
+    {
+        // Принудительное закрытие: TrueNAS удалил таргет и оборвал сессию. Windows восстанавливает связь (IsConnected =
+        // false), том остаётся на своей букве; среди подключённых сессий его нет, диска служба не видит.
+        var clock = new ManualClock();
+        var masters = new MasterManager(_storage, new HelperOptions { DiskWaitSec = 1 }, clock, NullLogger<MasterManager>.Instance);
+        await masters.ApplyAsync(Assign(), known: true, CancellationToken.None);
+        _storage.RecoveringSessions.Add(MasterIqn);
+
+        // Пока связь может вернуться, сессию не трогаем: failed (букву том держит), а не none.
+        var waiting = await masters.ApplyAsync(null, known: true, CancellationToken.None);
+        Assert.Equal(("failed", MasterIqn), (waiting!.State, waiting.TargetIqn));
+        Assert.Contains("reconnecting", waiting.Error);
+        Assert.DoesNotContain($"disconnect {MasterIqn}", _storage.Log);
+
+        // Не вернулась — отключаем; сбрасывать кэш некуда.
+        clock.Advance(MasterManager.ReconnectingDetachAfter);
+        Assert.Equal(new MasterReport("none"), await masters.ApplyAsync(null, known: true, CancellationToken.None));
+        Assert.Empty(_storage.Sessions);
+        Assert.DoesNotContain(_storage.Log, l => l.StartsWith("flush+offline", StringComparison.Ordinal));
+        Assert.Null(await masters.ApplyAsync(null, known: true, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Session_that_recovers_within_the_grace_period_is_flushed_as_usual()
+    {
+        var clock = new ManualClock();
+        var masters = new MasterManager(_storage, new HelperOptions { DiskWaitSec = 1 }, clock, NullLogger<MasterManager>.Instance);
+        await masters.ApplyAsync(Assign(), known: true, CancellationToken.None);
+        var disk = _storage.Sessions[MasterIqn].Number;
+        _storage.RecoveringSessions.Add(MasterIqn); // сбой сети во время закрытия
+        Assert.Equal("failed", (await masters.ApplyAsync(null, known: true, CancellationToken.None))!.State);
+
+        _storage.RecoveringSessions.Remove(MasterIqn); // связь вернулась
+        clock.Advance(TimeSpan.FromSeconds(30));
+        Assert.Equal(new MasterReport("none"), await masters.ApplyAsync(null, known: true, CancellationToken.None));
+        var flush = _storage.Log.IndexOf($"flush+offline {disk} M");
+        Assert.True(flush >= 0 && flush < _storage.Log.IndexOf($"disconnect {MasterIqn}"), string.Join(" | ", _storage.Log));
     }
 
     [Theory]
@@ -101,7 +143,7 @@ public sealed class MasterManagerTests
     {
         await _masters.ApplyAsync(Assign(), known: true, CancellationToken.None);
         var report = await _masters.ApplyAsync(null, known: false, CancellationToken.None);
-        Assert.Equal("mounted", report!.State);
+        Assert.Equal(new MasterReport("mounted", MasterIqn, "M"), report); // с буквой, на которой том сейчас
         Assert.True(_storage.Sessions.ContainsKey(MasterIqn));
     }
 

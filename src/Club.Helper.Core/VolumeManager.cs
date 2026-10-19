@@ -15,7 +15,9 @@ namespace Club.Helper.Core;
 /// <item>нет назначения (сервер ничего не опубликовал) — том отключается, когда освободится;</item>
 /// <item>личный диск игр места (<c>games-seat-NN</c>, помощник 1.5+): единственный том, который подключается на запись, —
 /// с CHAP места; сервер сбрасывает его при каждой загрузке ПК. Read-only тут не проверяется (ReadOnlyVerified = null).
-/// Любое другое назначение на запись не выполняется.</item>
+/// Любое другое назначение на запись не выполняется;</item>
+/// <item>мастер-том на букве библиотеки (помощник 1.5.1, <see cref="ReleaseForMasterAsync"/>): том библиотеки отпускается
+/// по тем же правилам, личный диск перед отключением ещё сбрасывает кэш и уходит offline.</item>
 /// </list>
 /// Недоступность сервера сюда не доходит: цикл просто не вызывает <see cref="ApplyAsync"/> с новым назначением.
 /// </summary>
@@ -162,6 +164,31 @@ public sealed class VolumeManager(IWindowsStorage storage, IProcessInspector pro
         }
 
         return await MountAsync(desired, letter, ct);
+    }
+
+    /// <summary>Начало причины в отчёте о томе, который ещё не отдал букву мастер-тому.</summary>
+    public const string MasterWaits = "master volume waits: ";
+
+    /// <summary>
+    /// Мастер-том назначен на букву тома библиотеки (сервер с Library:MasterDriveLetter = DriveLetter): том библиотеки
+    /// отпускается, как при снятии назначения, — только таргеты <c>:games-</c> (системный диск бездиска, мастер-том и чужие
+    /// сессии не трогаются), когда освободятся. Личный диск (на запись) перед отключением ещё сбрасывает кэш на диск и
+    /// уходит offline, как мастер-том у <see cref="MasterManager"/>; read-only тому сбрасывать нечего. Занят (с тома запущен
+    /// процесс, Windows не переводит диск offline или не завершает сессию — открыты файлы) — насильно не отключается:
+    /// <c>switchPending</c> с причиной, повтор в следующем такте. Отпущен (или его не было) — <c>none</c> с причиной: это не
+    /// сбой библиотеки. <paramref name="desired"/> — назначение тома, только чтобы назвать версию личного диска в отчёте.
+    /// </summary>
+    public async Task<MountedVolume> ReleaseForMasterAsync(VolumeAssignment? desired, char letter, CancellationToken ct)
+    {
+        WindowsTimedOut = false;
+        var busy = await ReleaseAsync(await ManagedTargetsAsync(ct), keepGoing: false, letter, ct, offlinePersonal: true);
+        if (busy is null)
+        {
+            return new MountedVolume("none", Error: $"drive letter {letter}: is given to the master volume (library editing)");
+        }
+
+        var version = busy.Iqn.Equals(desired?.TargetIqn, StringComparison.OrdinalIgnoreCase) ? desired!.LibraryVersion : VersionOfTarget(busy.Iqn);
+        return new MountedVolume("switchPending", busy.Iqn, version, letter.ToString(), Error: MasterWaits + busy.Reason);
     }
 
     /// <summary>
@@ -363,9 +390,10 @@ public sealed class VolumeManager(IWindowsStorage storage, IProcessInspector pro
     /// первый из них. Занят — с тома запущен процесс или Windows отказалась завершить сессию. <paramref name="keepGoing"/>
     /// — сбой проверки таргета не прерывает остальное (таргет считается занятым), иначе исключение уходит наверх.
     /// <paramref name="assignedLetter"/> — назначенная буква, пока назначенный том не подключён: по ней диагностика
-    /// отказа, если буквы таргета не знаем.
+    /// отказа, если буквы таргета не знаем. <paramref name="offlinePersonal"/> — личный диск перед отключением сбрасывает
+    /// кэш и уходит offline (<see cref="ReleaseForMasterAsync"/>).
     /// </summary>
-    private async Task<Busy?> ReleaseAsync(IReadOnlyList<string> targets, bool keepGoing, char? assignedLetter, CancellationToken ct)
+    private async Task<Busy?> ReleaseAsync(IReadOnlyList<string> targets, bool keepGoing, char? assignedLetter, CancellationToken ct, bool offlinePersonal = false)
     {
         Busy? first = null;
         var held = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -374,7 +402,7 @@ public sealed class VolumeManager(IWindowsStorage storage, IProcessInspector pro
             Busy? busy;
             try
             {
-                busy = await TryReleaseAsync(iqn, assignedLetter, ct);
+                busy = await TryReleaseAsync(iqn, assignedLetter, offlinePersonal, ct);
             }
             catch (Exception ex) when (keepGoing && (ex is not OperationCanceledException || !ct.IsCancellationRequested))
             {
@@ -450,7 +478,7 @@ public sealed class VolumeManager(IWindowsStorage storage, IProcessInspector pro
             ? "not found"
             : $"number {disk.Number}, letter {(disk.DriveLetter is { } l ? $"{l}:" : "none")}, offline {disk.IsOffline}, read-only {disk.IsReadOnly}";
 
-    private async Task<Busy?> TryReleaseAsync(string iqn, char? assignedLetter, CancellationToken ct)
+    private async Task<Busy?> TryReleaseAsync(string iqn, char? assignedLetter, bool offlinePersonal, CancellationToken ct)
     {
         var disk = await storage.FindDiskAsync(iqn, ct);
         if (disk?.DriveLetter is { } letter)
@@ -461,6 +489,12 @@ public sealed class VolumeManager(IWindowsStorage storage, IProcessInspector pro
             {
                 return new Busy(iqn, $"volume in use by {running[0]}");
             }
+        }
+
+        if (offlinePersonal && disk is { IsOffline: false } && iqn.Contains(PersonalTargetMarker, StringComparison.OrdinalIgnoreCase)
+            && await FlushAndOfflineAsync(iqn, disk, ct) is { } refused)
+        {
+            return refused;
         }
 
         try
@@ -506,6 +540,32 @@ public sealed class VolumeManager(IWindowsStorage storage, IProcessInspector pro
         Disconnected(iqn);
         logger.LogInformation("Library target {Iqn} disconnected", iqn);
         return null;
+    }
+
+    /// <summary>
+    /// Личный диск (на запись) перед отключением: кэш тома на диск и диск offline — как мастер-том у
+    /// <see cref="MasterManager"/>. Windows не перевела диск offline (на томе открыты файлы) — насильно не отключаем: таргет
+    /// остаётся, повтор в следующем такте. Уже offline (прошлое отключение не удалось) — только отключение.
+    /// </summary>
+    private async Task<Busy?> FlushAndOfflineAsync(string iqn, DiskInfo disk, CancellationToken ct)
+    {
+        try
+        {
+            await storage.FlushAndOfflineAsync(disk.Number, disk.DriveLetter, ct);
+            logger.LogInformation("Personal games disk {Iqn} flushed and taken offline", iqn);
+            return null;
+        }
+        catch (Exception ex) when (IsTimeout(ex, ct))
+        {
+            WindowsTimedOut = true;
+            return new Busy(iqn, "not taken offline: timeout", ex);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            // Как отказ завершить сессию (TryReleaseAsync): текст отказа Windows локализован — показываем его, а не судим.
+            var reason = disk.DriveLetter is { } l ? $"volume in use (open files on {l}:): {ShortMessage(ex)}" : $"not taken offline: {ShortMessage(ex)}";
+            return new Busy(iqn, reason, ex, ex is InvalidOperationException ? new Refusal(disk, disk.DriveLetter, disk.DriveLetter is null ? null : "volume letter") : null);
+        }
     }
 
     /// <summary>

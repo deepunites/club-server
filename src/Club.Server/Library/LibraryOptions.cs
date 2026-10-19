@@ -67,8 +67,19 @@ public sealed class LibraryOptions
 
     public string MasterExtentName { get; set; } = "clubsrv-master";
 
-    /// <summary>Буква мастер-тома на ПК суперклиента (библиотека остаётся на своей букве, только для чтения).</summary>
+    /// <summary>
+    /// Буква мастер-тома на ПК суперклиента. По умолчанию своя (библиотека остаётся на своей букве); может совпадать с
+    /// <see cref="DriveLetter"/> — см. <see cref="MasterOnLibraryLetter"/>.
+    /// </summary>
     public string MasterDriveLetter { get; set; } = "M";
+
+    /// <summary>
+    /// Мастер-том на букве библиотеки (<see cref="MasterDriveLetter"/> = <see cref="DriveLetter"/> без учёта регистра):
+    /// лаунчеры на ПК правки записывают пути установки <c>G:\…</c> так, как их видят места. Пока правка открыта, этот ПК
+    /// тома библиотеки не получает — на его букве мастер-том (docs/master-editing.md, помощник 1.5.1+). Буквы приводит к
+    /// одному виду <see cref="Validate"/>: сравнивается и уходит помощнику одно и то же.
+    /// </summary>
+    public bool MasterOnLibraryLetter => string.Equals(MasterDriveLetter, DriveLetter, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Личный слой игр (docs/diskless-full.md §2): каждое место получает записываемый клон текущей версии со своим
@@ -94,6 +105,10 @@ public sealed class LibraryOptions
             return;
         }
 
+        // Буква — одна, D…Z (контракт: ^[D-Z]$; помощник берёт первый символ). Пробелы и регистр из конфигурации
+        // убираются здесь, а «G:» или « » — ошибка при старте, а не том на непонятной букве.
+        DriveLetter = CheckLetter("DriveLetter", DriveLetter);
+        MasterDriveLetter = CheckLetter("MasterDriveLetter", MasterDriveLetter);
         CheckPortal("PortalAddress", PortalAddress);
         if (!string.IsNullOrWhiteSpace(DiscoveryAddress))
         {
@@ -120,6 +135,12 @@ public sealed class LibraryOptions
         if (!Diskless.DisklessEndpoints.IsInitiatorIqn(ProbeInitiatorIqn))
         {
             throw new InvalidOperationException($"Library:ProbeInitiatorIqn must be a lowercase iqn.yyyy-mm.domain[:name] name, got '{ProbeInitiatorIqn}'");
+        }
+
+        static string CheckLetter(string key, string? value)
+        {
+            var letter = value?.Trim().ToUpperInvariant() ?? "";
+            return letter is [>= 'D' and <= 'Z'] ? letter : throw new InvalidOperationException($"Library:{key} must be a single drive letter D..Z, got '{value}'");
         }
 
         static void CheckPortal(string key, string value)

@@ -27,14 +27,15 @@ camelCase, enum строками, время `2026-09-27T10:15:30.123Z`, оши�
 `POST /library/versions` принимает `allowDirtyMaster` и отвечает 409 `masterOpen` (мастер-том открыт) или
 `masterDirty` (отключён принудительно, нужна явная публикация с `allowDirtyMaster: true`).
 
-В обзоре `master { state (closed|opening|open|closing|failed), machineId, machineName, machineState, dirty, forceClose,
-openedAt, closeRequestedAt, closedAt, lastError, driveLetter }` и `masterCandidates [{ id, number, name, online }]` —
+В обзоре `master { state (closed|opening|open|closing|failed), machineId, machineName, machineState, machineError, dirty,
+forceClose, openedAt, closeRequestedAt, closedAt, lastError, driveLetter }` и `masterCandidates [{ id, number, name, online }]` —
 одобренные ПК, чей помощник сообщил IQN инициатора. `lastError` у открытого тома — оговорка открытия шага verify, а
 не ошибка: либо таргет мастер-тома так и не стал виден ПК суперклиента и после повторных применений конфигурации iSCSI
-(`The master target is not visible to the superclient PC …`, подсказка — перезапуск службы iSCSI, если `M:` не
-появится), либо группа инициаторов мастер-тома не включает IQN этого ПК (`The initiator group of the master target
+(`The master target is not visible to the superclient PC …`, подсказка — перезапуск службы iSCSI, если буква
+мастер-тома не появится), либо группа инициаторов мастер-тома не включает IQN этого ПК (`The initiator group of the master target
 does not include the superclient PC …`, подсказка — закрыть и открыть том заново). `machineState` — последний отчёт помощника о мастер-томе
-(`mounted|mounting|failed|none`); отчёт без мастер-тома и закрытие тома его сбрасывают. Операции `masterOpen` (шаги auth, initiator, extent, target,
+(`mounted|mounting|failed|none`), `machineError` — причина из того же отчёта (у `failed` и `mounting`: например,
+`drive letter G: is held by the library volume: …`); отчёт без мастер-тома и закрытие тома их сбрасывают. Операции `masterOpen` (шаги auth, initiator, extent, target,
 verify) и `masterClose` (target, extent, initiator, auth) — в общем журнале.
 
 Версия: `id, label, state (publishing|published|retiring|retired|failed), role (current|rollback|null), targetIqn,
@@ -131,7 +132,9 @@ bootTime, volume { state, libraryVersion, readOnlyVerified, outdated, error, per
 `GET /images` также отдаёт `bootFiles { tftpChecked, files [{ name, location (tftp|pxe), required, status (ok|missing|invalid|unsigned|badSignature|wrongSigner), sizeBytes, sha256, component, signedBy, expected }] }` — цепочка загрузки и подписи.
 
 В `GET /machines` у машины `secureBoot { enabled, thirdPartyCa2011, windowsCa2023, pca2011Revoked }` (по отчёту помощника), `imageVersion` и `reimage { state, image, step, percent, message, failure, diskTouched,
-pxeArmed, attempts, updatedAt }`, статус `reimaging`, в обзоре `currentImageVersion` и `reimaging`.
+pxeArmed, attempts, updatedAt }`, статус `reimaging`, в обзоре `currentImageVersion` и `reimaging`. Мастер-том на ПК —
+`masterState` (`mounted|mounting|failed`) и `masterError` (причина у `failed` и `mounting`), в обзоре `masterDriveLetter`
+(`Library:MasterDriveLetter`) — буква для отметки мастер-тома.
 
 В обзоре `GET /machines` — `machineFeed { state, target, lastDeliveredAt, lastAttemptAt, machines, error, failures }`,
 если включена отправка списка ПК (`docs/machine-feed.md`): `state` — `pending` (ещё не отправлялся) | `ok` | `failing`,

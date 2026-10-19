@@ -7,6 +7,10 @@ namespace Club.Helper.Core;
 /// по назначению сервера (администратор открыл правку этому ПК). Назначение снято — кэш сбрасывается на диск, диск
 /// уходит offline, таргет отключается; пока это не удалось, сервер ждёт и таргет не удаляет.
 /// Назначение в памяти, не на диске: после перезагрузки без сервера мастер-том не подключается.
+/// Назначение снято, а сессия мастер-тома восстанавливает связь (таргет удалён принудительным закрытием, TrueNAS
+/// перезапустил iSCSI): том всё ещё смонтирован на своей букве. Связь не вернулась за <see cref="ReconnectingDetachAfter"/>
+/// — сессия отключается без сброса кэша, сбрасывать уже некуда; иначе букву (на букве библиотеки — G:) никто не отпустил
+/// бы до перезагрузки ПК.
 /// </summary>
 public sealed class MasterManager(IWindowsStorage storage, HelperOptions options, TimeProvider clock, ILogger<MasterManager> logger)
 {
@@ -20,26 +24,66 @@ public sealed class MasterManager(IWindowsStorage storage, HelperOptions options
     /// </summary>
     public const string UnknownState = "unknown";
 
+    /// <summary>
+    /// Сколько ждать, пока сессия мастер-тома без назначения восстановит связь, прежде чем отключить её без сброса кэша.
+    /// Вернулась (сбой сети во время закрытия) — том отключается как обычно, со сбросом кэша. Не вернулась — сбрасывать
+    /// нечего: запросы к пропавшему таргету Windows держит не дольше MaxRequestHoldTime (60 с по умолчанию).
+    /// </summary>
+    public static readonly TimeSpan ReconnectingDetachAfter = TimeSpan.FromMinutes(2);
+
+    /// <summary>С какого момента (монотонная отметка) сессия мастер-тома без назначения видна без диска.</summary>
+    private readonly Dictionary<string, long> _reconnectingSince = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Отчёт о мастер-томе: <c>null</c> — не назначен и не подключён. Буква в отчёте — та, на которой том сейчас (или
+    /// назначенная): по ней <see cref="HelperLoop"/> не ставит том библиотеки на букву, которую держит мастер-том.
+    /// </summary>
     public async Task<MasterReport?> ApplyAsync(MasterAssignment? desired, bool known, CancellationToken ct)
     {
         List<string>? connected = null;
+        (string Iqn, char? Letter)? detaching = null;
         try
         {
-            connected = (await storage.ConnectedTargetsAsync(ct)).Where(t => t.EndsWith(TargetMarker, StringComparison.Ordinal)).ToList();
-            if (desired is null)
+            if (desired is null && known)
             {
-                if (!known)
+                // Назначение снято — отключаем все сессии мастер-тома, и восстанавливающие связь (IsConnected = false):
+                // такая всё ещё держит смонтированный том на его букве.
+                connected = [.. (await storage.SessionTargetsAsync(ct)).Where(IsMaster).Distinct(StringComparer.OrdinalIgnoreCase)];
+                foreach (var gone in _reconnectingSince.Keys.Where(t => !connected.Contains(t, StringComparer.OrdinalIgnoreCase)).ToList())
                 {
-                    // Сервер ещё не ответил — ничего не трогаем (и не отключаем то, с чем, возможно, идёт работа).
-                    return connected.Count == 0 ? null : new MasterReport("mounted", connected[0]);
+                    _reconnectingSince.Remove(gone);
                 }
 
+                MasterReport? waiting = null;
                 foreach (var iqn in connected)
                 {
-                    await DetachAsync(iqn, ct);
+                    var disk = await storage.FindDiskAsync(iqn, ct);
+                    detaching = (iqn, disk?.DriveLetter);
+                    if (disk is not null)
+                    {
+                        _reconnectingSince.Remove(iqn);
+                    }
+                    else if (Reconnecting(iqn) is { } left)
+                    {
+                        // Диска служба не видит — сессия восстанавливает связь (или диск ещё не появился). Сбросить кэш нельзя:
+                        // ждём, вдруг связь вернётся. Букву том держит — failed (не none): HelperLoop том библиотеки на неё не ставит.
+                        waiting ??= new MasterReport("failed", iqn, Error: $"iSCSI session is reconnecting; disconnecting it in {left.TotalSeconds:0} s unless it recovers");
+                        continue;
+                    }
+
+                    await DetachAsync(iqn, disk, ct);
+                    _reconnectingSince.Remove(iqn);
                 }
 
-                return connected.Count == 0 ? null : new MasterReport("none");
+                return waiting ?? (connected.Count == 0 ? null : new MasterReport("none"));
+            }
+
+            connected = (await storage.ConnectedTargetsAsync(ct)).Where(IsMaster).ToList();
+            if (desired is null)
+            {
+                // Сервер ещё не ответил — ничего не трогаем (и не отключаем то, с чем, возможно, идёт работа). Буква тома —
+                // чтобы HelperLoop не поставил на неё том из assignment.json (служба перезапустилась во время правки).
+                return connected.Count == 0 ? null : new MasterReport("mounted", connected[0], await LetterAsync(connected[0], ct));
             }
 
             return await AttachAsync(desired, connected, ct);
@@ -49,10 +93,42 @@ public sealed class MasterManager(IWindowsStorage storage, HelperOptions options
             logger.LogWarning(ex, "Master volume: {Reason}", ex.Message);
 
             // Не назначен и сессии не прочитались — подключён ли том, неизвестно: failed без таргета был бы ложной ошибкой
-            // у любого ПК (и затёр бы mounted на сервере), отчёт без master — ложным «не подключён».
-            return desired is null && connected is null
-                ? new MasterReport(UnknownState, Error: ex.Message)
+            // у любого ПК (и затёр бы mounted на сервере), отчёт без master — ложным «не подключён». Не назначен и не
+            // отключился — failed с таргетом и буквой, на которой он остался.
+            return desired is null && connected is null ? new MasterReport(UnknownState, Error: ex.Message)
+                : desired is null && detaching is { } d ? new MasterReport("failed", d.Iqn, d.Letter?.ToString(), ex.Message)
                 : new MasterReport("failed", desired?.TargetIqn, desired?.DriveLetter, ex.Message);
+        }
+    }
+
+    private static bool IsMaster(string iqn) => iqn.EndsWith(TargetMarker, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Сессия без диска: сколько ещё ждать восстановления связи, прежде чем отключить; <c>null</c> — ждать хватит.
+    /// </summary>
+    private TimeSpan? Reconnecting(string iqn)
+    {
+        if (!_reconnectingSince.TryGetValue(iqn, out var since))
+        {
+            _reconnectingSince[iqn] = since = clock.GetTimestamp();
+            logger.LogWarning("Master volume {Iqn}: iSCSI session has no disk (reconnecting); disconnecting it in {Wait} unless it recovers", iqn, ReconnectingDetachAfter);
+        }
+
+        var left = ReconnectingDetachAfter - clock.GetElapsedTime(since);
+        return left > TimeSpan.Zero ? left : null;
+    }
+
+    /// <summary>Буква тома подключённого мастер-тома для отчёта; не прочиталась — без буквы.</summary>
+    private async Task<string?> LetterAsync(string iqn, CancellationToken ct)
+    {
+        try
+        {
+            return (await storage.FindDiskAsync(iqn, ct))?.DriveLetter?.ToString();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            logger.LogDebug("Master volume {Iqn}: drive letter not read: {Reason}", iqn, ex.Message);
+            return null;
         }
     }
 
@@ -60,7 +136,7 @@ public sealed class MasterManager(IWindowsStorage storage, HelperOptions options
     {
         foreach (var stale in connected.Where(t => t != desired.TargetIqn))
         {
-            await DetachAsync(stale, ct);
+            await DetachAsync(stale, await storage.FindDiskAsync(stale, ct), ct);
         }
 
         if (!connected.Contains(desired.TargetIqn))
@@ -95,15 +171,23 @@ public sealed class MasterManager(IWindowsStorage storage, HelperOptions options
         return new MasterReport("mounted", desired.TargetIqn, letter.ToString());
     }
 
-    private async Task DetachAsync(string iqn, CancellationToken ct)
+    /// <summary>Кэш на диск, диск offline, отключение. Диска нет (сессия восстанавливала связь и не восстановила) — только отключение.</summary>
+    private async Task DetachAsync(string iqn, DiskInfo? disk, CancellationToken ct)
     {
-        if (await storage.FindDiskAsync(iqn, ct) is { } disk)
+        if (disk is not null)
         {
             await storage.FlushAndOfflineAsync(disk.Number, disk.DriveLetter, ct);
         }
 
         await storage.DisconnectAsync(iqn, ct);
-        logger.LogInformation("Master volume {Iqn} flushed and disconnected", iqn);
+        if (disk is not null)
+        {
+            logger.LogInformation("Master volume {Iqn} flushed and disconnected", iqn);
+        }
+        else
+        {
+            logger.LogWarning("Master volume {Iqn} disconnected without a flush: its iSCSI session had no disk", iqn);
+        }
     }
 
     private async Task<DiskInfo?> WaitForDiskAsync(string iqn, CancellationToken ct)

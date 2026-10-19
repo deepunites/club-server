@@ -62,6 +62,7 @@ public sealed class DisklessApiTests(ServerFixture server) : IClassFixture<Serve
         var (machine, _) = await TestMachine.RegisterAsync(_http);
         using var response = await machine.SendAsync(HttpMethod.Get, $"/diskless/v1/machines/{machine.MachineId}/volume");
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.False(response.Headers.Contains("X-Library-Letter-Reserved")); // «нечего монтировать», а не «буква отдана мастер-тому»
     }
 
     [Fact]

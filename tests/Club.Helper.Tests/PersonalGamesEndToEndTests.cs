@@ -13,7 +13,7 @@ namespace Club.Helper.Tests;
 /// TrueNAS. Диск места подключается на запись с CHAP и сбрасывается при каждой загрузке ПК — и тогда, когда на сервере
 /// висит сессия прошлой загрузки (ПК выключили кнопкой); при перезапуске одной службы — не сбрасывается.
 /// </summary>
-public sealed class PersonalGamesEndToEndTests : IAsyncLifetime
+public sealed partial class PersonalGamesEndToEndTests : IAsyncLifetime
 {
     private const string Master = "tank/club/lib";
     private const string Seats = "tank/club/seats";
@@ -69,13 +69,18 @@ public sealed class PersonalGamesEndToEndTests : IAsyncLifetime
         await _nas.DisposeAsync();
     }
 
-    /// <summary>Помощник, только что запущенный на ПК с Windows <paramref name="windows"/>.</summary>
-    private HelperLoop Helper(FakeWindowsStorage windows, DelegatingHandler? handler = null)
+    /// <summary>
+    /// Помощник, только что запущенный на ПК с Windows <paramref name="windows"/>; <paramref name="clock"/> — часы для
+    /// ожидания недоступного сервера (<see cref="HelperLoop.CachedPersonalAfter"/>) и мёртвой сессии мастер-тома
+    /// (<see cref="MasterManager.ReconnectingDetachAfter"/>).
+    /// </summary>
+    private HelperLoop Helper(FakeWindowsStorage windows, DelegatingHandler? handler = null, TimeProvider? clock = null)
     {
         var options = new HelperOptions { ClubKey = ServerFixture.ClubKey, DiskWaitSec = 1, HelperVersion = "1.5.0" };
         var api = new DisklessApiClient(handler is null ? _server.CreateClient() : _server.CreateDefaultClient(handler), options, _credentials, _identity);
         var volumes = new VolumeManager(windows, _processes, options, TimeProvider.System, NullLogger<VolumeManager>.Instance);
-        return new HelperLoop(api, volumes, _cache, _identity, options, NullLogger<HelperLoop>.Instance, new MasterManager(windows, options, TimeProvider.System, NullLogger<MasterManager>.Instance));
+        var masters = new MasterManager(windows, options, clock ?? TimeProvider.System, NullLogger<MasterManager>.Instance);
+        return new HelperLoop(api, volumes, _cache, _identity, options, NullLogger<HelperLoop>.Instance, masters, clock);
     }
 
     private async Task PublishAsync(string label)

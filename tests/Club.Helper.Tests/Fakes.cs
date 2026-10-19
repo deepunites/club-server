@@ -50,17 +50,37 @@ public sealed class FakeWindowsStorage : IWindowsStorage
         ConnectedTargetsCalls++;
         return ConnectedTargetsError is { } error
             ? Task.FromException<IReadOnlyList<string>>(error)
-            : Task.FromResult<IReadOnlyList<string>>(_sessions.Keys.ToList());
+            : Task.FromResult<IReadOnlyList<string>>(_sessions.Keys.Where(t => !RecoveringSessions.Contains(t)).ToList());
     }
 
-    /// <summary>Сессии, которые Windows восстанавливает (IsConnected = false): в ConnectedTargets их нет.</summary>
+    /// <summary>
+    /// Сессии, которые Windows восстанавливает (IsConnected = false): в ConnectedTargets их нет, диска служба не видит
+    /// (FindDisk ищет диск подключённой сессии), второй вход в таргет Windows отклоняет. Сессия с диском (в
+    /// <see cref="Sessions"/>) держит смонтированный том на его букве, пока её не отключат.
+    /// </summary>
     public HashSet<string> RecoveringSessions { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-    public Task<IReadOnlyList<string>> SessionTargetsAsync(CancellationToken ct) =>
-        Task.FromResult<IReadOnlyList<string>>([.. _sessions.Keys, .. RecoveringSessions]);
+    public int SessionTargetsCalls { get; private set; }
+
+    /// <summary>Опросы сессий (Get-IscsiSession): и подключённых, и всех.</summary>
+    public int SessionQueries => ConnectedTargetsCalls + SessionTargetsCalls;
+
+    /// <summary>Тот же Get-IscsiSession, что у ConnectedTargets: падает тем же <see cref="ConnectedTargetsError"/>.</summary>
+    public Task<IReadOnlyList<string>> SessionTargetsAsync(CancellationToken ct)
+    {
+        SessionTargetsCalls++;
+        return ConnectedTargetsError is { } error
+            ? Task.FromException<IReadOnlyList<string>>(error)
+            : Task.FromResult<IReadOnlyList<string>>(_sessions.Keys.Concat(RecoveringSessions).Distinct(StringComparer.OrdinalIgnoreCase).ToList());
+    }
 
     public Task ConnectAsync(string targetIqn, string portalHost, int portalPort, CancellationToken ct)
     {
+        if (RecoveringSessions.Contains(targetIqn))
+        {
+            throw new InvalidOperationException("PowerShell failed (1): The target has already been logged in via an iSCSI session.");
+        }
+
         Log.Add($"connect {targetIqn} {portalHost}:{portalPort}");
         var disk = new FakeDisk { Number = _nextDisk++, ReadOnly = false, Offline = SanOfflineShared, Letter = SanOfflineShared ? null : NextFreeLetter() };
         _sessions[targetIqn] = disk;
@@ -95,6 +115,7 @@ public sealed class FakeWindowsStorage : IWindowsStorage
         }
 
         _sessions.Remove(targetIqn);
+        RecoveringSessions.Remove(targetIqn);
         return Task.CompletedTask;
     }
 
@@ -116,7 +137,9 @@ public sealed class FakeWindowsStorage : IWindowsStorage
         }
 
         return Task.FromResult(
-            !HiddenDisks.Contains(targetIqn) && _sessions.TryGetValue(targetIqn, out var d) ? new DiskInfo(d.Number, d.ReadOnly, d.Offline, d.Letter) : null);
+            !HiddenDisks.Contains(targetIqn) && !RecoveringSessions.Contains(targetIqn) && _sessions.TryGetValue(targetIqn, out var d)
+                ? new DiskInfo(d.Number, d.ReadOnly, d.Offline, d.Letter)
+                : null);
     }
 
     /// <summary>Чем падает установка read-only (таймаут PowerShell); <c>null</c> — не падает.</summary>

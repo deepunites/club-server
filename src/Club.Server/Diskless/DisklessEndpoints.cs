@@ -38,7 +38,12 @@ public sealed record MachineStatus(
     string? ImageVersion = null, SystemDiskReport? SystemDisk = null, SecureBootReport? SecureBoot = null,
     string? InitiatorIqn = null, MasterReport? Master = null);
 
-public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume, MasterAssignment? Master = null);
+/// <summary>
+/// Ответ на отчёт. <paramref name="LibraryLetterReserved"/> — буква тома библиотеки отдана мастер-тому этого ПК
+/// (<see cref="LibraryOptions.MasterOnLibraryLetter"/>): <paramref name="Volume"/> нет намеренно. Иначе поля нет (null не
+/// передаётся) — старые помощники его и не видят.
+/// </summary>
+public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume, MasterAssignment? Master = null, bool? LibraryLetterReserved = null);
 
 /// <summary>
 /// API бездиска для помощника на ПК (docs/diskless-api.yaml). Не зависит от шелла: только машины и том библиотеки.
@@ -48,6 +53,9 @@ public static partial class DisklessEndpoints
 {
     private static readonly HashSet<string> VolumeStates = ["none", "mounting", "mounted", "switchPending", "failed"];
     private static readonly HashSet<string> MasterStates = ["none", "mounting", "mounted", "failed"];
+
+    /// <summary>Заголовок 204 на <c>GET …/volume</c>: тома нет, потому что его буква отдана мастер-тому этого ПК.</summary>
+    public const string LibraryLetterReservedHeader = "X-Library-Letter-Reserved";
 
     /// <summary>master.state «неизвестно»: помощник не знает, подключён ли мастер-том, — прежнее состояние не меняется.</summary>
     private const string MasterUnknownState = "unknown";
@@ -70,9 +78,17 @@ public static partial class DisklessEndpoints
         // attached=false — помощник проверил: на этом ПК личный диск не подключён, сессия на сервере (если есть) осталась от
         // прошлой загрузки (ПК выключили кнопкой) и сбросу не мешает.
         api.MapGet("/machines/{machineId:guid}/volume", async (Guid machineId, bool? attached, HttpContext context, LibraryRepository library, LibraryOptions options,
-            MachineRepository machines, SeatGames seatGames, CancellationToken ct) =>
+            MachineRepository machines, SeatGames seatGames, MasterRepository master, CancellationToken ct) =>
         {
             RequireSelf(context, machineId);
+            if (LibraryLetterReserved(await MasterAssignmentAsync(machineId, master, options), options))
+            {
+                // Буква тома отдана мастер-тому этого ПК: тома нет, личный диск не сбрасывается (SeatGames не вызывается).
+                // Заголовок — помощнику 1.5.1+: это не «нечего монтировать», assignment.json затирать не надо.
+                context.Response.Headers[LibraryLetterReservedHeader] = "true";
+                return Results.NoContent();
+            }
+
             var volume = options.PersonalGames
                 ? await machines.FindAsync(machineId) is { } machine ? await seatGames.AssignmentAsync(machine, atBoot: true, ct, attached) : null
                 : await AssignmentAsync(library, options);
@@ -218,11 +234,22 @@ public static partial class DisklessEndpoints
             await machines.RecordMasterAsync(machineId, iqn, null, null, keepMaster: true);
         }
 
-        var volume = options.PersonalGames
+        var masterAssignment = await MasterAssignmentAsync(machineId, master, options);
+        var reserved = LibraryLetterReserved(masterAssignment, options);
+        var volume = reserved ? null
+            : options.PersonalGames
             ? await machines.FindAsync(machineId) is { } machine ? await seatGames.AssignmentAsync(machine, atBoot: false, ct) : null
             : await AssignmentAsync(library, options);
-        return Results.Json(new StatusAccepted(clock.GetUtcNow(), volume, await MasterAssignmentAsync(machineId, master, options)), ApiJson.Options);
+        return Results.Json(new StatusAccepted(clock.GetUtcNow(), volume, masterAssignment, reserved ? true : null), ApiJson.Options);
     }
+
+    /// <summary>
+    /// Буква тома библиотеки отдана мастер-тому: правка открыта этому ПК, а мастер-том — на букве библиотеки
+    /// (<see cref="LibraryOptions.MasterOnLibraryLetter"/>). Тогда ПК не получает тома библиотеки — ни общего, ни личного;
+    /// личный диск места при этом не сбрасывается и не удаляется, просто не выдаётся, пока правка не закрыта. Остальные ПК
+    /// не затронуты; буквы разные — всё как раньше.
+    /// </summary>
+    private static bool LibraryLetterReserved(MasterAssignment? master, LibraryOptions options) => master is not null && options.MasterOnLibraryLetter;
 
     /// <summary>Мастер-том на запись — только этой машине и только в состоянии «открыт». Закрытие — перестаём отдавать.</summary>
     public static async Task<MasterAssignment?> MasterAssignmentAsync(Guid machineId, MasterRepository master, LibraryOptions options)

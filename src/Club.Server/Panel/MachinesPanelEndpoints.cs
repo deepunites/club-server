@@ -11,12 +11,13 @@ public sealed record MachineVolumeView(string State, string? LibraryVersion, boo
 /// <summary>
 /// Строка экрана «Рабочие станции». <c>status</c>: <c>pendingApproval</c> | <c>maintenance</c> | <c>online</c> |
 /// <c>offline</c> | <c>neverSeen</c>. Значения, не прошедшие проверку на вменяемость, отдаются как null (на экране — прочерк).
+/// <c>masterError</c> — причина из отчёта помощника о мастер-томе (у <c>failed</c> и <c>mounting</c>).
 /// </summary>
 public sealed record MachineView(
     Guid Id, int Number, string Name, string Zone, string Status, string Hostname, string? IpAddress,
     IReadOnlyList<string> MacAddresses, string? HelperVersion, string? OsVersion, DateTimeOffset? LastSeenAt,
     DateTimeOffset? BootTime, MachineVolumeView Volume, DateTimeOffset RegisteredAt, string? ImageVersion, ReimageView? Reimage,
-    Diskless.SecureBootReport? SecureBoot = null, string? MasterState = null, string BootMode = "local");
+    Diskless.SecureBootReport? SecureBoot = null, string? MasterState = null, string BootMode = "local", string? MasterError = null);
 
 /// <summary>
 /// Перезаливка машины (последнее задание, если оно не закрыто или закрыто меньше суток назад). <c>state</c>:
@@ -36,10 +37,11 @@ public sealed record ZoneView(string Id, string Name);
 public sealed record MachineFeedView(
     string State, string Target, DateTimeOffset? LastDeliveredAt, DateTimeOffset? LastAttemptAt, int Machines, string? Error, int Failures);
 
+/// <summary><c>masterDriveLetter</c> — буква мастер-тома на ПК правки (Library:MasterDriveLetter), для отметки у машины.</summary>
 public sealed record MachinesOverview(
     IReadOnlyList<MachineView> Machines, IReadOnlyList<ZoneView> Zones, string? CurrentLibraryVersion,
     int Online, int Offline, int Pending, int Maintenance, string? CurrentImageVersion = null, int Reimaging = 0,
-    MachineFeedView? MachineFeed = null);
+    MachineFeedView? MachineFeed = null, string? MasterDriveLetter = null);
 
 public sealed record ReimageRequest(string? Image, bool? AllowNewDisk);
 
@@ -55,7 +57,7 @@ public static class MachinesPanelEndpoints
     {
         var panel = app.MapGroup(PanelAuthMiddleware.Prefix + "/v1");
 
-        panel.MapGet("/machines", async (MachineRepository machines, LibraryRepository library, Imaging.ImageRepository images, Integration.MachineFeedOptions feedOptions, Integration.MachineFeedState feed, TimeProvider clock, ILoggerFactory logs) =>
+        panel.MapGet("/machines", async (MachineRepository machines, LibraryRepository library, LibraryOptions libraryOptions, Imaging.ImageRepository images, Integration.MachineFeedOptions feedOptions, Integration.MachineFeedState feed, TimeProvider clock, ILoggerFactory logs) =>
         {
             var logger = logs.CreateLogger("Club.Server.Panel.Sanity");
             var now = clock.GetUtcNow();
@@ -76,7 +78,8 @@ public static class MachinesPanelEndpoints
                     views.Count(v => v.Status == "maintenance"),
                     (await images.PointersAsync()).Current?.Label,
                     views.Count(v => v.Status == "reimaging"),
-                    FeedView(feedOptions, feed)),
+                    FeedView(feedOptions, feed),
+                    libraryOptions.MasterDriveLetter),
                 ApiJson.Options);
         });
 
@@ -170,7 +173,8 @@ public static class MachinesPanelEndpoints
                 : null,
             Imaging.ReimageService.SecureBoot(m),
             m.MasterState is "mounted" or "mounting" or "failed" ? m.MasterState : null,
-            m.BootMode);
+            m.BootMode,
+            m.MasterState is "mounting" or "failed" ? m.MasterError : null);
     }
 
     /// <summary>
