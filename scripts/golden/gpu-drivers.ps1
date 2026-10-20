@@ -1,22 +1,23 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Видеодрайверы для бездискового эталона: NVIDIA 581.80 на все карты NVIDIA и AMD 26.5.2 (Polaris) для RX 470.
+    Видеодрайверы для бездискового эталона карт Turing и новее: NVIDIA 617.42 (GTX 16xx, RTX 20/30/40/50) и AMD 26.5.2
+    (Polaris) для RX 470.
 
 .DESCRIPTION
     Запускать ТОЛЬКО внутри эталона в режиме мастера, PowerShell от администратора, после обновлений Windows.
 
-    Почему NVIDIA 581.80, а не новее: в зонах 1–2 стоят GTX 980 (Maxwell), GTX 1050 (Pascal) и GTX 1650 (Turing), мастер —
-    RTX 3050 (Ampere). С декабря 2025 NVIDIA делит драйверы: 59x+ (сейчас 617.42) — только Turing и новее, 582.xx — только
-    Maxwell/Pascal/Volta. Оба пакета ставят один и тот же драйвер ядра nvlddmkm и одни и те же 46 файлов в System32, поэтому в
-    одной Windows уживается только один. 581.80 (ноябрь 2025) — последний драйвер NVIDIA, в nv_dispi.inf которого есть все
-    четыре карты. AMD с NVIDIA не пересекается (свои службы; общие только загрузчики Vulkan/OpenCL Khronos).
+    Почему отдельные образы по поколениям NVIDIA: с декабря 2025 NVIDIA делит драйверы — 59x+ (сейчас 617.42) только для
+    Turing и новее, 582.xx — для Maxwell/Pascal/Volta (GTX 1050 Ti). Оба ставят один и тот же драйвер ядра nvlddmkm и одни
+    и те же 46 файлов в System32 — в одной Windows уживается только один. Общий для всех 581.80 (ноябрь 2025) теряет FPS на
+    обновлениях Windows с октября 2025 (признано NVIDIA). Клуб выбрал максимум FPS: этот образ — 617.42; для GTX 1050 Ti —
+    свой образ с 582.78 (2026-10-21). AMD с NVIDIA не пересекается (свои службы; общие только загрузчики Vulkan/OpenCL).
 
     Что делает (повторный запуск безопасен):
       1. скачивает с сервера клуба два архива (только нужные INF: nv_dispi.inf, nvhda.inf, AMD WT6A_INF и HDMI-звук), сверяет SHA256;
-      2. проверяет, что Windows Update не ставит драйверы; добавляет 581.80 в хранилище и только потом удаляет из него другие
+      2. проверяет, что Windows Update не ставит драйверы; добавляет 617.42 в хранилище и только потом удаляет из него другие
          версии видеодрайверов NVIDIA/AMD (например, пришедшие из Windows Update при установке Windows);
-      3. NVIDIA: pnputil /add-driver /install — на мастере (RTX 3050) ставится сразу, для GTX 980/1050/1650 лежит в хранилище;
+      3. NVIDIA: pnputil /add-driver /install — на мастере (RTX 3050) ставится сразу, для GTX 1650 и других RTX лежит в хранилище;
          без NVIDIA App, телеметрии, FrameView и ShadowPlay; Панель управления NVIDIA — из пакета (appx);
       4. AMD: pnputil /add-driver без /install — карты AMD на мастере нет, драйвер ждёт RX 470 в хранилище;
       5. проверяет результат (PASS/WARN), удаляет временные файлы.
@@ -35,10 +36,10 @@ param(
 
 $ErrorActionPreference = 'Continue'
 
-$NvVersion = '32.0.15.8180'     # NVIDIA 581.80
+$NvVersion = '32.0.16.1742'     # NVIDIA 617.42
 $AmdVersion = '31.0.21925.1001' # AMD Adrenalin 26.5.2 for Polaris & Vega
 $Bundles = @(
-    @{ File = 'gpu-nv-581.80.zip'; Sha256 = '84713128038022965da6b21dd657ae6c987df6dc897f82917ef4417dc7d1c580'; Dir = 'nv' },
+    @{ File = 'gpu-nv-617.42.zip'; Sha256 = 'd340b365e9161ffda3aa2e4487dccb99abb045f459611609fc313f2ad6aa7ebe'; Dir = 'nv' },
     @{ File = 'gpu-amd-26.5.2.zip'; Sha256 = '17e92b66219a9c47b331ddb71e164c717a028550f437040db8c10dbc66413399'; Dir = 'amd' }
 )
 $MinFreeGb = 12   # архивы 2 ГБ + распаковка 4,3 ГБ + копии в хранилище драйверов
@@ -112,11 +113,11 @@ try {
         } else { Write-Pass "$($v[1]) = $want" }
     }
 
-    # Сначала 581.80 в хранилище: при удалении другой версии карта сразу переходит на него, а не на «Базовый видеоадаптер»,
+    # Сначала 617.42 в хранилище: при удалении другой версии карта сразу переходит на него, а не на «Базовый видеоадаптер»,
     # и если пакет не добавился — ничего не удаляем.
-    Write-Title "NVIDIA $NvVersion (581.80): добавление в хранилище"
+    Write-Title "NVIDIA $NvVersion (617.42): добавление в хранилище"
     $code = Invoke-PnpUtil @('/add-driver', $nvInf)
-    if ($code -notin 0, 259, 3010) { throw "NVIDIA 581.80 не добавлен в хранилище (pnputil, код $code) — другие версии не удалялись" }
+    if ($code -notin 0, 259, 3010) { throw "NVIDIA 617.42 не добавлен в хранилище (pnputil, код $code) — другие версии не удалялись" }
 
     Write-Title 'Другие версии видеодрайверов NVIDIA/AMD: удаление из хранилища'
     $foreign = @(Get-StoreDisplayDrivers | Where-Object {
@@ -127,7 +128,7 @@ try {
         Invoke-PnpUtil @('/delete-driver', $d.Driver, '/uninstall', '/force') | Out-Null
     }
 
-    Write-Title "NVIDIA $NvVersion (581.80): установка на эту карту и в хранилище"
+    Write-Title "NVIDIA $NvVersion (617.42): установка на эту карту и в хранилище"
     Invoke-PnpUtil @('/add-driver', $nvInf, '/install') | Out-Null
     Invoke-PnpUtil @('/add-driver', $nvHda, '/install') | Out-Null
     $cplAppx = Get-ChildItem -LiteralPath (Join-Path $Work 'nv\Display.Driver\NVCPL') -Filter '*.appx' -ErrorAction SilentlyContinue | Select-Object -First 1

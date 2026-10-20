@@ -68,6 +68,18 @@ foreach ($f in $StateFiles) {
         if (Test-Path -LiteralPath $p) { Write-Warn "не удалён $p" } else { Write-Pass "удалён $f" }
     }
 }
+# Образы NGEN: после обновлений и новых программ .NET Framework их надо достроить здесь — на местах (сброс при каждой
+# загрузке) иначе каждый запуск PowerShell компилирует всё заново (помощник бездиска грузил ЦП до 100%, 2026-10-20).
+Write-Title 'Образы NGEN (.NET Framework): достройка'
+foreach ($ngen in "$env:windir\Microsoft.NET\Framework64\v4.0.30319\ngen.exe", "$env:windir\Microsoft.NET\Framework\v4.0.30319\ngen.exe",
+                  "$env:windir\Microsoft.NET\Framework64\v2.0.50727\ngen.exe", "$env:windir\Microsoft.NET\Framework\v2.0.50727\ngen.exe") {
+    if (-not (Test-Path -LiteralPath $ngen)) { continue }
+    & $ngen executeQueuedItems /nologo /silent | Out-Null
+    Write-Line ("{0}: код {1}" -f ($ngen -replace '^.*\\Microsoft\.NET\\', ''), $LASTEXITCODE)
+}
+$psStart = @(1..3 | ForEach-Object { (Measure-Command { & powershell.exe -NoProfile -NonInteractive -Command 'exit' }).TotalSeconds } | Measure-Object -Minimum).Minimum
+if ($psStart -le 1.5) { Write-Pass ('запуск PowerShell {0:N1} с' -f $psStart) } else { Write-Warn ('запуск PowerShell {0:N1} с — NGEN не достроен? (должно быть меньше 1,5 с)' -f $psStart) }
+
 foreach ($f in 'helper.json', 'club-ca.pem') {
     if (Test-Path -LiteralPath (Join-Path $StateDir $f)) { Write-Pass "на месте $f" } else { Write-Warn "нет $StateDir\$f — места не зарегистрируются" }
 }
