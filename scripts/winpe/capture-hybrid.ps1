@@ -172,7 +172,9 @@ try {
             Start-Sleep -Seconds 3
         }
     }
-    if (Test-Path -LiteralPath "$Share\") {
+    # Без подключения Samba отвечает «Access is denied», и при ErrorActionPreference Stop Test-Path бросал бы его
+    # (PC-11 2026-10-24) — поэтому SilentlyContinue: нет доступа = ещё не подключено.
+    if (Test-Path -LiteralPath "$Share\" -ErrorAction SilentlyContinue) {
         Say "$Share is already connected"
     }
     else {
