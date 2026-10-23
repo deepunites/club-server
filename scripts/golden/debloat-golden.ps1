@@ -77,8 +77,9 @@ $DisableTasks = @(
     '\Microsoft\Windows\Feedback\Siuf\DmClientOnScenarioDownload',
     '\Microsoft\Windows\Windows Error Reporting\QueueReporting',
     '\Microsoft\Windows\Maps\MapsUpdateTask',
-    '\Microsoft\Windows\Maps\MapsToastTask',
-    '\Microsoft\Windows\CloudExperienceHost\CreateObjectTask'
+    '\Microsoft\Windows\Maps\MapsToastTask'
+    # \Microsoft\Windows\CloudExperienceHost\CreateObjectTask НЕ отключать: без него OOBE после sysprep не создаёт
+    # учётную запись («Возникла проблема», гибрид PC-11 2026-10-24); seal-hybrid.ps1 включает его обратно.
 )
 
 # --- Вывод ------------------------------------------------------------------------------------------------------------

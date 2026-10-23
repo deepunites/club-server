@@ -38,6 +38,12 @@
           <Description>Prevent automatic device encryption (BitLocker)</Description>
           <Path>reg.exe add HKLM\SYSTEM\CurrentControlSet\Control\BitLocker /v PreventDeviceEncryption /t REG_DWORD /d 1 /f</Path>
         </RunSynchronousCommand>
+        <!-- Без этого задания OOBE не создаёт учётную запись («Возникла проблема»); debloat-golden.ps1 его отключал. -->
+        <RunSynchronousCommand wcm:action="add">
+          <Order>2</Order>
+          <Description>Enable the CloudExperienceHost task that OOBE needs</Description>
+          <Path>schtasks.exe /Change /TN "\Microsoft\Windows\CloudExperienceHost\CreateObjectTask" /Enable</Path>
+        </RunSynchronousCommand>
       </RunSynchronous>
     </component>
   </settings>

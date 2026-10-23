@@ -360,6 +360,19 @@ try {
     Write-Warn ('пакеты Appx не прочитались: {0}' -f $_.Exception.Message)
 }
 
+# debloat-golden.ps1 до 2026-10-24 отключал это задание — после sysprep OOBE не мог создать учётную запись
+# («Возникла проблема» на «Кто будет использовать это устройство?», гибрид PC-11).
+Write-Title 'Задание CloudExperienceHost\CreateObjectTask (нужно OOBE)'
+$oobeTask = Get-ScheduledTask -TaskPath '\Microsoft\Windows\CloudExperienceHost\' -TaskName 'CreateObjectTask' -ErrorAction SilentlyContinue
+if (-not $oobeTask) {
+    Write-Warn 'нет задания \Microsoft\Windows\CloudExperienceHost\CreateObjectTask — OOBE после sysprep не сможет создать учётную запись' 'восстановить задание (экспорт с чистой Windows 11 26H2, schtasks /create /xml)'
+} elseif ("$($oobeTask.State)" -eq 'Disabled') {
+    try { $oobeTask | Enable-ScheduledTask -ErrorAction Stop | Out-Null; Write-Pass 'задание CreateObjectTask включено (было отключено)' }
+    catch { Write-Warn ('задание CreateObjectTask не включено: {0}' -f $_.Exception.Message) 'schtasks /Change /TN "\Microsoft\Windows\CloudExperienceHost\CreateObjectTask" /Enable' }
+} else {
+    Write-Pass ('задание CreateObjectTask: {0}' -f $oobeTask.State)
+}
+
 Write-Title 'BitLocker и незавершённое обслуживание'
 $volume = $null
 try { $volume = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop } catch { }
