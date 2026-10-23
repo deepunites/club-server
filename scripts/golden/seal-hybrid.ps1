@@ -12,6 +12,17 @@
 
     Что делает:
       - отказ, если системный диск по iSCSI (бездисковый ПК);
+      - Riot Client, VALORANT, League of Legends и FACEIT: их процессы и трей Vanguard (vgtray) закрываются; службы
+        vgc и vgk не трогаются — Vanguard остаётся установленным. У каждого профиля C:\Users (кроме Default и Public)
+        удаляются вход и журналы: AppData\Local\Riot Games\Riot Client\Data (в т.ч. «Оставаться в системе» —
+        RiotGamesPrivateSettings.yaml) и \Logs, ...\Riot Games\League of Legends\Data, ...\VALORANT\Saved,
+        Документы\League of Legends; на всём ПК — C:\Riot Games\League of Legends\Logs, содержимое
+        C:\Program Files\Riot Vanguard\Logs, C:\Windows\vgkbootstatus.dat; учётные данные Windows (cmdkey, текущего
+        пользователя) с riot или faceit в имени, остальные — INFO. Игры (C:\Riot Games) и C:\ProgramData\Riot Games
+        (RiotClientInstalls.json, Metadata\*\*.product_settings.yaml) остаются — иначе клиент забудет установленные
+        игры. FACEIT: его папки в AppData (Local, Roaming) профилей и в ProgramData — INFO с размером, удаляются только
+        журналы и дампы (logs, log, crash dumps); вход в FACEIT скрипт не видит — выйти из аккаунта клуба вручную.
+        Не удалилось — WARN;
       - помощник: служба остановлена, удалены токены этого ПК и назначение личного диска (credentials.bin,
         assignment.json и их .tmp) — как seal-golden.ps1: иначе они достались бы всем гибридам;
       - образы NGEN (.NET Framework) — достройка;
@@ -49,6 +60,12 @@ $UnattendSource = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'u
 $UnattendCopy = Join-Path $SysprepDir 'unattend-hybrid.xml'
 # Лаунчеры и игры: по папке программы (Steam, Epic, Battle.net, Ubisoft, Rockstar, Lesta, Discord, Riot) или с диска игр G:.
 $LauncherPathPattern = '(?i)\\(Steam|Epic Games|Battle\.net|Ubisoft|Rockstar Games|Lesta|Discord|Riot Games)\\|^G:\\'
+# Раздел «Riot и FACEIT»: закрываемые процессы (клиенты, игры и трей Vanguard; плюс всё из C:\Riot Games). Службы
+# Vanguard vgc и vgk не останавливаются.
+$GameClientProcessPattern = '(?i)^(RiotClient|League|VALORANT|FACEIT)|^vgtray$'
+# В папках FACEIT удаляются только журналы и дампы, и только без файлов программы внутри.
+$FaceitLogDirPattern = '(?i)^(logs?|crash[ _-]?dumps?|crash[ _-]?reports?|crashes|crashpad)$'
+$ProgramFilePattern = '(?i)^\.(exe|dll|sys|node|asar|js|pyd|ps1|bat|cmd)$'
 
 $script:WarnCount = 0
 function Write-Title([string]$Text) { Write-Host ''; Write-Host "==> $Text" -ForegroundColor Cyan }
@@ -74,6 +91,29 @@ function Show-LogTail([string]$Path, [int]$Lines, [string]$Pattern) {
     foreach ($line in ($content | Select-Object -Last $Lines)) { Write-Line $line }
 }
 
+# Удаляет папку или файл (с -Contents — только содержимое папки). Не удалилось — WARN: это досталось бы всем гибридам.
+function Remove-Leftover([string]$Path, [switch]$Contents) {
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    if ($Contents) { $items = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue) }
+    else { $items = @(Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue) }
+    if (-not $items) { return }
+    $script:CleanupCount++
+    $items | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    $left = @($items | Where-Object { Test-Path -LiteralPath $_.FullName })
+    $what = if ($Contents) { '{0}\* ({1} шт.)' -f $Path, $items.Count } else { $Path }
+    if ($left) {
+        Write-Warn ('не удалено: {0}' -f $what) 'файлы заняты: закрыть Riot Client, игры и FACEIT (не помогло — перезагрузить ПК, не запуская их) и запустить скрипт снова'
+    } else {
+        Write-Pass ('удалено: {0}' -f $what)
+    }
+}
+
+# Цели сохранённых учётных данных Windows текущего пользователя (cmdkey /list). Подпись «Target:» переведена на язык
+# Windows, сама цель — нет (LegacyGeneric:target=..., Domain:interactive=...): ищем по ней.
+function Get-CredentialTargets {
+    @(& cmdkey.exe /list 2>$null | ForEach-Object { if ("$_" -match '^\s*[^:\s][^:]*:\s+(?<t>\w+:\w+=.*\S)\s*$') { $Matches['t'] } })
+}
+
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Запустите PowerShell от имени администратора.'
 }
@@ -96,14 +136,106 @@ Write-Pass ('{0}: {1}, шина {2}' -f $env:SystemDrive, $disk.FriendlyName, $d
 
 Write-Title 'Лаунчеры'
 # Вход в лаунчеры под аккаунтами клуба остался бы в образе — игроки на всех гибридах получили бы эти аккаунты.
-Write-Line 'Перед sysprep: выйдите из аккаунтов клуба в Steam, Epic, Battle.net, Ubisoft, Rockstar, Lesta (и Riot, если ставили),'
-Write-Line 'закройте их и игры.'
+Write-Line 'Перед sysprep: выйдите из аккаунтов клуба в Steam, Epic, Battle.net, Ubisoft, Rockstar, Lesta, Riot Client и FACEIT'
+Write-Line '(что ставили), закройте их и игры.'
 $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path -match $LauncherPathPattern })
 foreach ($p in ($running | Sort-Object Path -Unique)) { Write-Warn ('запущен {0} ({1})' -f $p.ProcessName, $p.Path) 'выйти из аккаунта клуба и закрыть (и в трее; остальное — «Диспетчер задач» -> «Снять задачу»)' }
 if (-not $running) { Write-Pass 'лаунчеры и игры не запущены' }
 if (@(Get-IscsiSession -ErrorAction SilentlyContinue | Where-Object { $_.TargetNodeAddress -match ':club-master$' -and $_.IsConnected }).Count -gt 0) {
     Write-Warn 'открыта правка библиотеки (таргет club-master)' 'в панели «Закончить правку» библиотеки, потом снова этот скрипт'
 }
+
+# Riot (Riot Client, VALORANT, League of Legends, Vanguard) и FACEIT: вход и журналы с эталона достались бы всем гибридам.
+# Остаются игры (C:\Riot Games) и список установок C:\ProgramData\Riot Games (RiotClientInstalls.json,
+# Metadata\*\*.product_settings.yaml) — без них Riot Client после заливки не найдёт игры. Vanguard остаётся
+# установленным: службы vgc и vgk не останавливаются и не удаляются. Повторный запуск безопасен.
+Write-Title 'Riot и FACEIT: вход и журналы'
+$script:CleanupCount = 0
+$riotRoot = Join-Path $env:SystemDrive 'Riot Games'
+$riotData = Join-Path $env:ProgramData 'Riot Games'
+$gameProcs = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match $GameClientProcessPattern -or ($_.Path -and $_.Path -like "$riotRoot\*") })
+if ($gameProcs) {
+    # Процесс службы (FACEIT AC) — через Stop-Service; процессы служб vgc и vgk пропускаются.
+    $svcByPid = @{}
+    foreach ($s in @(Get-CimInstance -ClassName Win32_Service -ErrorAction SilentlyContinue)) { if ($s.ProcessId) { $svcByPid[[int]$s.ProcessId] = "$($s.Name)" } }
+    $gameProcs = @($gameProcs | Where-Object { $svcByPid[$_.Id] -notmatch '^vg[ck]$' })
+    foreach ($p in $gameProcs) {
+        if ($svcByPid[$p.Id]) { Stop-Service -Name $svcByPid[$p.Id] -Force -ErrorAction SilentlyContinue }
+        else { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+    }
+    if ($gameProcs) { try { $gameProcs | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue } catch { } }
+    foreach ($p in ($gameProcs | Sort-Object ProcessName, Id)) {
+        $what = if ($svcByPid[$p.Id]) { '{0} (служба {1})' -f $p.ProcessName, $svcByPid[$p.Id] } else { '{0} (PID {1})' -f $p.ProcessName, $p.Id }
+        if (Get-Process -Id $p.Id -ErrorAction SilentlyContinue) { Write-Warn "не закрыт $what" 'закрыть (и в трее) или «Диспетчер задач» -> «Снять задачу», потом скрипт снова' }
+        else { Write-Pass "закрыт $what" }
+    }
+}
+
+# Профили C:\Users, кроме Default и Public; All Users и Default User — ссылки (junction), их тоже пропускаем.
+$profiles = @(Get-ChildItem -LiteralPath (Join-Path $env:SystemDrive 'Users') -Directory -Force -ErrorAction SilentlyContinue |
+    Where-Object { -not $_.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint) -and $_.Name -notin 'Default', 'Public' })
+foreach ($prof in $profiles) {
+    $local = Join-Path $prof.FullName 'AppData\Local'
+    $rcData = Join-Path $local 'Riot Games\Riot Client\Data'
+    if (Test-Path -LiteralPath (Join-Path $rcData 'RiotGamesPrivateSettings.yaml')) {
+        Write-Info ('{0}: есть вход Riot Client «Оставаться в системе» (RiotGamesPrivateSettings.yaml) — удаляется вместе с Data' -f $prof.Name)
+    }
+    $docs = @(Join-Path $prof.FullName 'Documents')
+    if ($prof.FullName -eq $env:USERPROFILE) {
+        # Документы текущего пользователя могут быть перенесены — тогда и там.
+        $myDocs = [Environment]::GetFolderPath('MyDocuments')
+        if ($myDocs -and $myDocs -ne $docs[0]) { $docs += $myDocs }
+    }
+    foreach ($path in @($rcData, (Join-Path $local 'Riot Games\Riot Client\Logs'), (Join-Path $local 'Riot Games\League of Legends\Data'),
+                        (Join-Path $local 'VALORANT\Saved')) + @($docs | ForEach-Object { Join-Path $_ 'League of Legends' })) {
+        Remove-Leftover $path
+    }
+}
+Remove-Leftover (Join-Path $riotRoot 'League of Legends\Logs')
+Remove-Leftover (Join-Path $env:SystemRoot 'vgkbootstatus.dat')
+Remove-Leftover (Join-Path $env:ProgramFiles 'Riot Vanguard\Logs') -Contents
+if ((Test-Path -LiteralPath $riotRoot) -or (Test-Path -LiteralPath $riotData)) {
+    $installs = Join-Path $riotData 'RiotClientInstalls.json'
+    $settings = @(Get-ChildItem -Path (Join-Path $riotData 'Metadata\*\*.product_settings.yaml') -Force -ErrorAction SilentlyContinue)
+    if (Test-Path -LiteralPath $installs) { Write-Info ('остаются {0} и product_settings.yaml ({1} шт.) — Riot Client после заливки найдёт игры' -f $installs, $settings.Count) }
+    else { Write-Info ('нет {0}: после заливки Riot Client может не найти игры в {1} (запустить Riot Client, закрыть, скрипт снова)' -f $installs, $riotRoot) }
+}
+
+# Учётные данные Windows: удаляются только с riot или faceit в имени цели; cmdkey видит лишь текущего пользователя.
+$credAll = @(Get-CredentialTargets)
+$credGame = @($credAll | Where-Object { $_ -match '(?i)riot|faceit' })
+foreach ($t in $credGame) {
+    & cmdkey.exe "/delete:$t" 2>&1 | Out-Null
+    # Не удалилась по полному имени — по цели без префикса LegacyGeneric:target=.
+    if (@(Get-CredentialTargets) -contains $t) { & cmdkey.exe ('/delete:' + ($t -replace '^[^=]*=', '')) 2>&1 | Out-Null }
+    if (@(Get-CredentialTargets) -contains $t) { Write-Warn "не удалены учётные данные Windows: $t" ('cmdkey /delete:{0} или «Диспетчер учётных данных» -> «Учётные данные Windows»' -f $t) }
+    else { $script:CleanupCount++; Write-Pass "удалены учётные данные Windows: $t" }
+}
+if (-not $credGame) { Write-Pass ('учётных данных Windows с riot или faceit в имени нет ({0}, cmdkey /list)' -f $env:USERNAME) }
+foreach ($t in @($credAll | Where-Object { $_ -notmatch '(?i)riot|faceit' })) { Write-Info "учётные данные Windows (не трогаю): $t" }
+$otherProfiles = @($profiles | Where-Object { $_.FullName -ne $env:USERPROFILE } | ForEach-Object { $_.Name })
+if ($otherProfiles) { Write-Info ('учётные данные Windows профилей {0} не проверены (cmdkey видит только текущего пользователя)' -f ($otherProfiles -join ', ')) }
+
+# FACEIT: где именно вход и журналы, неизвестно — его папки только показываются с размером; удаляются лишь журналы и
+# дампы без файлов программы внутри. Вход в приложение FACEIT скрипт не видит.
+$faceitDirs = @(@($env:ProgramData) + @($profiles | ForEach-Object { Join-Path $_.FullName 'AppData\Local'; Join-Path $_.FullName 'AppData\Roaming' }) |
+    ForEach-Object { Get-ChildItem -LiteralPath $_ -Directory -Force -ErrorAction SilentlyContinue } |
+    Where-Object { $_.Name -match '(?i)faceit' -and -not $_.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint) })
+foreach ($dir in $faceitDirs) {
+    $logDirs = @(Get-ChildItem -LiteralPath $dir.FullName -Directory -Recurse -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match $FaceitLogDirPattern } | Sort-Object { $_.FullName.Length })
+    foreach ($d in $logDirs) {
+        if (-not (Test-Path -LiteralPath $d.FullName)) { continue }  # удалена вместе с родительской
+        $code = @(Get-ChildItem -LiteralPath $d.FullName -File -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match $ProgramFilePattern } | Select-Object -First 1)
+        if ($code) { Write-Info ('FACEIT: {0} не трогаю — внутри файлы программы ({1})' -f $d.FullName, $code[0].Name); continue }
+        Remove-Leftover $d.FullName
+    }
+    $bytes = (Get-ChildItem -LiteralPath $dir.FullName -File -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    Write-Info ('FACEIT: {0} — {1:N1} МБ, остаётся в образе' -f $dir.FullName, ($bytes / 1MB))
+}
+if (-not $faceitDirs) { Write-Info 'FACEIT: папок в AppData (Local, Roaming) профилей и в ProgramData нет' }
+Write-Info 'FACEIT: вход в приложение скрипт не проверяет — выйдите из аккаунта клуба в FACEIT сами (до sysprep)'
+if ($script:CleanupCount -eq 0) { Write-Pass 'входа и журналов Riot и FACEIT для удаления нет' }
 
 Write-Title 'Файл ответов unattend-hybrid.xml'
 if (-not (Test-Path -LiteralPath $UnattendSource)) {

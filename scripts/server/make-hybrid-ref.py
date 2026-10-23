@@ -117,6 +117,8 @@ FILE_ATTR_SETTABLE = 0x1 | 0x2 | 0x4 | 0x20 | 0x100 | 0x1000 | 0x2000  # R H S A
 # own are attr_timeout=0 read-write, entry_timeout the default 1 s (the stale inode this leaves: lstat_new_type).
 NTFS_RW = "rw,norecover,noatime,nodev,nosuid,noexec,streams_interface=windows"
 NTFS_CHECK = "ro,nodev,nosuid,noexec,streams_interface=windows"
+WOF_LOOKUP_PAUSE = 2.5                             # s between the two WOF passes: > entry_timeout, fresh lookups
+EIO_TRIES, EIO_PAUSE = 20, 0.25                    # EIO from a stale FUSE inode: up to 5 s per call
 
 
 class Failure(Exception):
@@ -717,35 +719,74 @@ def lstat_new_type(path):
     that inode bad and fails with EIO (fs/fuse, inode_wrong_type); the next lookup makes a new one (kernel 7.0, dev box
     2026-10-23).
     """
-    for attempt in range(10):
+    st = None
+    for attempt in range(EIO_TRIES):
         try:
             st = os.lstat(path)
         except OSError as error:
-            if error.errno != errno.EIO or attempt == 9:
+            if error.errno != errno.EIO or attempt == EIO_TRIES - 1:
                 raise
+            time.sleep(EIO_PAUSE)
             continue
         if stat.S_ISREG(st.st_mode):
             return st
-        time.sleep(0.2)
-    raise Failure(f"not a regular file after its reparse point was removed (mode {oct(st.st_mode)})")
+        time.sleep(EIO_PAUSE)
+    raise Failure(f"not a regular file after its reparse point was removed (mode {oct(st.st_mode) if st else '?'})")
+
+
+def eio_retry(what, call):
+    """call() again while ntfs-3g/FUSE answers EIO for an inode whose type changed (see lstat_new_type)."""
+    for attempt in range(EIO_TRIES):
+        try:
+            return call()
+        except OSError as error:
+            if error.errno != errno.EIO or attempt == EIO_TRIES - 1:
+                raise Failure(f"{what}: {error}") from None
+            time.sleep(EIO_PAUSE)
+
+
+def wof_unlink_reparse(root, entry):
+    """
+    First pass for one WOF inode: its attributes, times and security descriptor are kept for wof_convert_file, then its
+    reparse point goes (ntfs-3g opens the streams of a reparse point only through a plugin). From here until the second
+    pass the file is broken, acceptable only because the clone is destroyed on any failure.
+    """
+    path = os.path.join(root, entry.path)
+    # system.ntfs_acl answers EIO for files of the real golden (club VM 2026-10-24), not for mkntfs test files. The
+    # descriptor is only compared, never written (the conversion leaves the security id alone and wimlib reads the
+    # descriptors through libntfs-3g), so a file whose descriptor cannot be read is converted without that comparison.
+    try:
+        acl = xattr(path, "system.ntfs_acl")
+    except OSError as error:
+        if error.errno != errno.EIO:
+            raise
+        acl = None
+    meta = (eio_retry("read the attributes", lambda: ntfs_attrib(path)),
+            eio_retry("read the times", lambda: xattr(path, "system.ntfs_times")), acl)
+    eio_retry("remove the reparse point", lambda: os.removexattr(path, REPARSE_XATTR, follow_symlinks=False))
+    return meta
 
 
 def wof_convert_file(root, entry, codec):
     """
-    One WOF inode made a plain file through the ntfs-3g read-write mount at root. ntfs-3g opens the streams of a reparse
-    point only through a plugin, so the reparse point goes first: a failure after that leaves a broken file, acceptable
-    only because the clone is destroyed then. The data overwrites the sparse unnamed stream (ntfs-3g allocates the
-    holes and drops SPARSE once there are none); the times and attributes writing changes are put back; the security
-    descriptor, the other streams, the short name and the object ID are not touched (the descriptor is compared).
+    Second pass for one WOF inode, after wof_unlink_reparse and the pause: made a plain file through the ntfs-3g
+    read-write mount at root. The data overwrites the sparse unnamed stream (ntfs-3g allocates the holes and drops
+    SPARSE once there are none); the times and attributes writing changes are put back; the security descriptor, the
+    other streams, the short name and the object ID are not touched (the descriptor is compared).
     Returns (size, sha256, still sparse).
     """
     path = os.path.join(root, entry.path)
     stream = path + ":" + WOF_STREAM
-    flags, times, acl = ntfs_attrib(path), xattr(path, "system.ntfs_times"), xattr(path, "system.ntfs_acl")
-    os.removexattr(path, REPARSE_XATTR, follow_symlinks=False)
+    flags, times, acl = entry.meta
     size = lstat_new_type(path).st_size  # the unnamed stream's size: the size of the data
-    fd = os.open(path, os.O_WRONLY | os.O_NOFOLLOW)  # no O_TRUNC: the stream keeps its size, the writes fill it
-    with open(fd, "wb", buffering=1 << 20) as out, open(stream, "rb", buffering=1 << 20) as src:
+    # no O_TRUNC: the stream keeps its size, the writes fill it
+    fd = eio_retry("open for writing", lambda: os.open(path, os.O_WRONLY | os.O_NOFOLLOW))
+    try:
+        src = eio_retry(f"open {WOF_STREAM}", lambda: open(stream, "rb", buffering=1 << 20))
+    except BaseException:
+        os.close(fd)  # an open file would keep the unmount of the failure path busy
+        raise
+    with open(fd, "wb", buffering=1 << 20) as out, src:
         digest, _, _ = wof_decode(src, size, entry.fmt, entry.csize, out, codec.decompress)
         out.flush()
         if os.fstat(fd).st_size != size:
@@ -763,7 +804,7 @@ def wof_convert_file(root, entry, codec):
         raise Failure(f"attributes 0x{flags:x} became 0x{now:x}")
     if xattr(path, "system.ntfs_times")[:24] != times[:24]:
         raise Failure("the times were not put back")
-    if xattr(path, "system.ntfs_acl") != acl:
+    if acl is not None and xattr(path, "system.ntfs_acl") != acl:
         raise Failure("the security descriptor changed")
     return size, digest, bool(now & FILE_ATTR_SPARSE)
 
@@ -826,9 +867,20 @@ def wof_convert_volume(partition, mountpoint, codec):
         if problems:
             raise Failure(f"{len(problems)} WOF file(s) this script cannot convert, nothing changed yet:\n  "
                           + "\n  ".join(problems[:20]) + ("\n  …" if len(problems) > 20 else ""))
+        # Two passes (club VM 2026-10-24: removing the reparse point and opening the file right away gave EIO): first
+        # every reparse point goes, then a pause longer than ntfs-3g's entry_timeout (1 s) so that the kernel looks the
+        # files up again as the regular files they now are, then the data.
+        ordered = sorted(files.items(), key=lambda item: item[1].path)
+        log(f"  removing {len(files)} WOF reparse point(s) …")
+        for ino, entry in ordered:
+            try:
+                entry.meta = wof_unlink_reparse(mountpoint, entry)
+            except (Failure, OSError) as error:
+                raise Failure(f"/{entry.path}: {error}") from None
+        time.sleep(WOF_LOOKUP_PAUSE)
         converted, written, sparse, samples = {}, 0, 0, {}
         started, progress = time.monotonic(), time.monotonic() + 15
-        for n, (ino, entry) in enumerate(sorted(files.items(), key=lambda item: item[1].path), 1):
+        for n, (ino, entry) in enumerate(ordered, 1):
             try:
                 size, digest, still_sparse = wof_convert_file(mountpoint, entry, codec)
             except (Failure, OSError) as error:
