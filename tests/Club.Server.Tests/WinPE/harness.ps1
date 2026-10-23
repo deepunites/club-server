@@ -9,14 +9,18 @@ function global:Log([string]$Text) { $global:Calls.Add($Text) }
 $env:SystemRoot = Join-Path $Root 'X'
 
 function global:Get-CimInstance { param([Parameter(Position = 0)]$ClassName) [pscustomobject]@{ PhysicalAdapter = $true; MACAddress = '02:00:00:00:00:01' } }
-# Офлайн-кусты залитого образа: ImageState — из MOCK_IMAGE_STATE (по умолчанию после sysprep /oobe, 'none' — нет значения).
+# Офлайн-кусты залитого образа: ImageState — из MOCK_IMAGE_STATE (по умолчанию после sysprep /oobe, 'none' — нет значения),
+# GeneralizationState — из MOCK_GENERALIZATION_STATE (по умолчанию 7, 'none' — нет значения).
 function global:Get-ItemProperty {
     [CmdletBinding()] param([Parameter(Position = 0)][string]$Path)
     if ($Path -like '*ClubOfflineSOFTWARE*\Setup\State') {
         $state = $env:MOCK_IMAGE_STATE ?? 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE'
         return $(if ($state -eq 'none') { $null } else { [pscustomobject]@{ ImageState = $state } })
     }
-    if ($Path -like '*ClubOfflineSYSTEM*\SysprepStatus') { return [pscustomobject]@{ GeneralizationState = 7 } }
+    if ($Path -like '*ClubOfflineSYSTEM*\SysprepStatus') {
+        $value = $env:MOCK_GENERALIZATION_STATE ?? '7'
+        return $(if ($value -eq 'none') { $null } else { [pscustomobject]@{ GeneralizationState = [int]$value } })
+    }
     [pscustomobject]@{ PEFirmwareType = 2 }
 }
 $global:MockDisks = @(
@@ -53,7 +57,7 @@ function global:dism.exe {
     }
     $global:LASTEXITCODE = 0
 }
-# MOCK_REG_LOAD_FAIL=SOFTWARE — этот куст не загружается (reg load с кодом 1).
+# MOCK_REG_LOAD_FAIL=SOFTWARE (или SYSTEM) — этот куст не загружается (reg load с кодом 1).
 function global:reg.exe {
     Log "reg $($args[0]) $($args[1])"
     $fail = $args[0] -eq 'load' -and $env:MOCK_REG_LOAD_FAIL -and $args[1] -like "*\ClubOffline$($env:MOCK_REG_LOAD_FAIL)"

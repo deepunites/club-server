@@ -29,6 +29,13 @@ public sealed class WindowsImage
 
     /// <summary>Объём выбранного образа после распаковки (для проверки размера диска).</summary>
     public long ExpandedBytes => WimImages.FirstOrDefault(i => i.Index == ImageIndex)?.TotalBytes ?? 0;
+
+    /// <summary>
+    /// Известно, что образ без sysprep: <c>generalized: false</c> (импорт или заливка) либо, пока заливка ничего не
+    /// сообщила, описание в WIM «not generalized» — так ловятся и версии, импортированные до пометки при импорте.
+    /// </summary>
+    public bool KnownNotGeneralized =>
+        Generalized == false || (Generalized is null && WimImages.FirstOrDefault(i => i.Index == ImageIndex) is { } wim && ImageLibrary.MarkedNotGeneralized(wim));
 }
 
 public sealed record ImagePointers(WindowsImage? Current, WindowsImage? Rollback);
@@ -96,18 +103,21 @@ public sealed class ImageRepository(NpgsqlDataSource db)
         return await c.QuerySingleOrDefaultAsync<WindowsImage>($"SELECT {ImageColumns} FROM windows_images WHERE label = @label", new { label });
     }
 
-    /// <summary>Намерение импорта. <c>false</c> — версия с такой меткой уже есть.</summary>
-    public async Task<bool> CreateImportAsync(Guid id, string label, string sourceFile, string filePath, int imageIndex, string? requestedBy)
+    /// <summary>
+    /// Намерение импорта. <c>false</c> — версия с такой меткой уже есть. <paramref name="notGeneralized"/> — администратор
+    /// сам сказал, что образ без sysprep: <c>generalized = false</c> сразу, до разбора WIM.
+    /// </summary>
+    public async Task<bool> CreateImportAsync(Guid id, string label, string sourceFile, string filePath, int imageIndex, bool notGeneralized, string? requestedBy)
     {
         await using var c = await db.OpenConnectionAsync();
         try
         {
             await c.ExecuteAsync(
                 """
-                INSERT INTO windows_images (id, label, state, source_file, file_path, image_index, requested_by)
-                VALUES (@id, @label, 'importing', @sourceFile, @filePath, @imageIndex, @requestedBy)
+                INSERT INTO windows_images (id, label, state, source_file, file_path, image_index, generalized, requested_by)
+                VALUES (@id, @label, 'importing', @sourceFile, @filePath, @imageIndex, @generalized, @requestedBy)
                 """,
-                new { id, label, sourceFile, filePath, imageIndex, requestedBy });
+                new { id, label, sourceFile, filePath, imageIndex, generalized = notGeneralized ? false : (bool?)null, requestedBy });
             return true;
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
@@ -122,16 +132,20 @@ public sealed class ImageRepository(NpgsqlDataSource db)
         return (await c.QueryAsync<WindowsImage>($"SELECT {ImageColumns} FROM windows_images WHERE state = @state ORDER BY created_at", new { state })).ToList();
     }
 
-    public async Task MarkImportedAsync(Guid id, long size, string sha256, IReadOnlyList<WimImage> images, DateTimeOffset now)
+    /// <summary>
+    /// Импорт завершён. <paramref name="generalized"/> — что известно по самому WIM (<c>false</c> — описание говорит «not
+    /// generalized»); null — ничего, тогда остаётся то, что задано при запросе импорта.
+    /// </summary>
+    public async Task MarkImportedAsync(Guid id, long size, string sha256, IReadOnlyList<WimImage> images, bool? generalized, DateTimeOffset now)
     {
         await using var c = await db.OpenConnectionAsync();
         await c.ExecuteAsync(
             """
             UPDATE windows_images SET state = 'ready', size_bytes = @size, sha256 = @sha256, wim_images = @json::jsonb,
-                   imported_at = @now, last_error = NULL
+                   generalized = COALESCE(@generalized, generalized), imported_at = @now, last_error = NULL
             WHERE id = @id AND state = 'importing'
             """,
-            new { id, size, sha256, json = JsonSerializer.Serialize(images, JsonSerializerOptions.Web), now });
+            new { id, size, sha256, json = JsonSerializer.Serialize(images, JsonSerializerOptions.Web), generalized, now });
     }
 
     public async Task MarkImportFailedAsync(Guid id, string error)
@@ -230,16 +244,38 @@ public sealed class ImageRepository(NpgsqlDataSource db)
         return (await c.QueryAsync<Guid>("SELECT DISTINCT image_id FROM reimage_jobs WHERE state IN ('requested', 'deploying', 'failed')")).ToHashSet();
     }
 
+    public enum CreateJobResult
+    {
+        Created,
+        AlreadyRequested,
+        DisklessMachine,
+    }
+
     /// <summary>
     /// Новое задание. Вытесняет задание в <c>booting</c> (Windows ещё не отчиталась) и упавшее (<c>failed</c>, например
     /// чтобы залить другой версией). Признак «диск тронут» наследуется от упавшего: иначе отмена нового задания сняла
     /// бы PXE-флаг с машины, у которой уже нет загрузчика.
+    /// Строка машины блокируется (<c>FOR UPDATE</c>) — так же, как при переключении в diskless и в мастера
+    /// (<see cref="Diskless.DisklessRepository"/>): кто взял блокировку вторым, видит изменение первого. Поэтому проверка
+    /// «бездиск или мастер» — отдельным запросом уже после блокировки (в READ COMMITTED у каждого запроса свой снимок).
     /// </summary>
-    public async Task<ReimageJob?> CreateJobAsync(Guid machineId, Guid imageId, bool allowNewDisk, bool allowNotGeneralized, string? requestedBy, DateTimeOffset now)
+    public async Task<(CreateJobResult Result, ReimageJob? Job)> CreateJobAsync(
+        Guid machineId, Guid imageId, bool allowNewDisk, bool allowNotGeneralized, string? requestedBy, DateTimeOffset now)
     {
         await using var c = await db.OpenConnectionAsync();
         await using var tx = await c.BeginTransactionAsync();
         await c.ExecuteAsync("SELECT 1 FROM machines WHERE id = @machineId FOR UPDATE", new { machineId }, tx);
+        var networkBoot = await c.ExecuteScalarAsync<bool>(
+            """
+            SELECT EXISTS (SELECT 1 FROM machines WHERE id = @machineId AND boot_mode = 'diskless')
+                OR EXISTS (SELECT 1 FROM diskless_image WHERE master_machine_id = @machineId)
+            """,
+            new { machineId }, tx);
+        if (networkBoot)
+        {
+            return (CreateJobResult.DisklessMachine, null);
+        }
+
         var diskTouched = await c.ExecuteScalarAsync<bool>(
             "SELECT COALESCE(bool_or(disk_touched), false) FROM reimage_jobs WHERE machine_id = @machineId AND state = 'failed'",
             new { machineId }, tx);
@@ -261,11 +297,11 @@ public sealed class ImageRepository(NpgsqlDataSource db)
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
         {
-            return null;
+            return (CreateJobResult.AlreadyRequested, null);
         }
 
         await tx.CommitAsync();
-        return await FindJobAsync(id);
+        return (CreateJobResult.Created, await FindJobAsync(id));
     }
 
     /// <summary>Отмена возможна, только пока WinPE не тронул диск: иначе на диске нет рабочего загрузчика.</summary>

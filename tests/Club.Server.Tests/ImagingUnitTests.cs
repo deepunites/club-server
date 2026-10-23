@@ -1,3 +1,6 @@
+using System.Buffers.Binary;
+using System.Text;
+using System.Xml.Linq;
 using Club.Server.Imaging;
 
 namespace Club.Server.Tests;
@@ -6,6 +9,45 @@ namespace Club.Server.Tests;
 public sealed class ImagingUnitTests
 {
     public static string WimFixture => Path.Combine(AppContext.BaseDirectory, "Imaging", "two-images.wim");
+
+    /// <summary>
+    /// Копия <see cref="WimFixture"/> с другим описанием образа 1 (как <c>wimlib-imagex capture … &lt;описание&gt;</c>):
+    /// XML-ресурс в фикстуре — последний в файле, он заменяется новым, заголовок переписывается.
+    /// </summary>
+    internal static void WriteWimWithDescription(string path, string description)
+    {
+        var wim = File.ReadAllBytes(WimFixture);
+        var size = (int)(BinaryPrimitives.ReadUInt64LittleEndian(wim.AsSpan(72)) & 0x00FF_FFFF_FFFF_FFFF);
+        var offset = (int)BinaryPrimitives.ReadInt64LittleEndian(wim.AsSpan(80));
+        Assert.Equal(wim.Length, offset + size);
+        var xml = XDocument.Parse(Encoding.Unicode.GetString(wim, offset, size).TrimStart('\uFEFF'));
+        xml.Root!.Elements("IMAGE").First().Element("DESCRIPTION")!.Value = description;
+        byte[] resource = [.. Encoding.Unicode.GetPreamble(), .. Encoding.Unicode.GetBytes(xml.Root.ToString(SaveOptions.DisableFormatting))];
+        byte[] result = [.. wim.AsSpan(0, offset), .. resource];
+        BinaryPrimitives.WriteUInt64LittleEndian(result.AsSpan(72), (uint)resource.Length | ((ulong)wim[79] << 56));
+        BinaryPrimitives.WriteInt64LittleEndian(result.AsSpan(88), resource.Length);
+        File.WriteAllBytes(path, result);
+    }
+
+    [Fact]
+    public void Reference_wim_description_marks_the_image_not_generalized()
+    {
+        var file = Path.GetTempFileName();
+        try
+        {
+            WriteWimWithDescription(file, "ssd/club/golden@img-v2-2026-10-22, not generalized, fixed for a local SSD, 2026-10-23");
+            var images = WimFile.ReadImages(file);
+            Assert.Equal((2, "Windows 11 Pro", "Professional"), (images.Count, images[0].Name, images[0].EditionId));
+            Assert.True(ImageLibrary.MarkedNotGeneralized(images[0]));
+            Assert.False(ImageLibrary.MarkedNotGeneralized(images[1])); // без описания
+            Assert.False(ImageLibrary.MarkedNotGeneralized(WimFile.ReadImages(WimFixture)[0])); // «Клуб: золотой образ»
+            Assert.True(ImageLibrary.MarkedNotGeneralized(images[0] with { Description = "Reference, NOT GENERALIZED" }));
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
 
     [Fact]
     public void Reads_images_from_a_real_wim()

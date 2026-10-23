@@ -728,7 +728,7 @@
       const editions = i.wimImages.map((w) => el("div", { class: w.index === i.imageIndex ? "picked" : "muted" },
         `${w.index}. ${w.name}`, w.build ? ` · ${w.build}` : "", w.architecture ? ` · ${w.architecture}` : ""));
       const actions = [];
-      if (i.state === "ready" && i.role !== "current") {
+      if (i.state === "ready" && i.role !== "current" && i.generalized !== false) {
         actions.push(el("button", { class: "small", onclick: () => {
           if (confirm(t("imgPublishConfirm", { label: i.label }))) imageAct(`/images/${encodeURIComponent(i.label)}/publish`, "POST");
         } }, t("imgPublish")));

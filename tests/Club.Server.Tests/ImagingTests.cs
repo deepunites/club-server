@@ -209,6 +209,27 @@ public sealed class ImagingTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Rollback_never_makes_an_image_without_sysprep_current()
+    {
+        await ImportAsync("v1");
+        await ImportAsync("v2");
+
+        // Заливка уже после публикации показала: у v1 (теперь откатной) sysprep не было.
+        var repository = _server.Services.GetRequiredService<ImageRepository>();
+        await repository.SetGeneralizedAsync((await repository.FindImageAsync("v1"))!.Id, false);
+        Assert.Equal((HttpStatusCode.Conflict, "imageNotGeneralized"), await PanelPostAsync("/panel/api/v1/images/rollback"));
+        var images = await ImagesAsync();
+        Assert.Equal(("v2", "v1"), (images.GetProperty("current").GetString(), images.GetProperty("rollback").GetString()));
+
+        // Без sysprep оказалась текущая — откат убирает её из версии по умолчанию.
+        await repository.SetGeneralizedAsync((await repository.FindImageAsync("v1"))!.Id, true);
+        await repository.SetGeneralizedAsync((await repository.FindImageAsync("v2"))!.Id, false);
+        Assert.Equal((HttpStatusCode.NoContent, (string?)null), await PanelPostAsync("/panel/api/v1/images/rollback"));
+        images = await ImagesAsync();
+        Assert.Equal(("v1", "v2"), (images.GetProperty("current").GetString(), images.GetProperty("rollback").GetString()));
+    }
+
+    [Fact]
     public async Task Evicted_image_is_kept_while_a_reinstall_uses_it()
     {
         await PrepareAsync();
@@ -377,14 +398,14 @@ public sealed class ImagingTests : IAsyncLifetime
 
         (status, body) = await StartAsync();
         var jobBase = $"/deploy/v1/jobs/{body.GetProperty("jobId").GetGuid()}";
-        (status, body) = await DeployAsync(HttpMethod.Post, $"{jobBase}/unattend", new { existing = (string?)null, generalized = false });
+        (status, body) = await DeployAsync(HttpMethod.Post, $"{jobBase}/unattend", new { existing = (string?)null, generalized = false, systemHiveLoaded = true });
         Assert.Equal(HttpStatusCode.Conflict, status);
         Assert.Equal("notGeneralized", body.GetProperty("error").GetProperty("details").GetProperty("reason").GetString());
         Assert.False((await ImagesAsync()).GetProperty("images")[0].GetProperty("generalized").GetBoolean());
         Assert.Equal("club-reimage", await KeaClassAsync());
         var reimage = await ReimageViewAsync();
         Assert.Equal(("failed", "notGeneralized"), (reimage.GetProperty("state").GetString(), reimage.GetProperty("failure").GetString()));
-        Assert.Equal("ImageState=none, GeneralizationState=none", reimage.GetProperty("message").GetString()); // куст прочитан, значения нет
+        Assert.Equal("ImageState=none, GeneralizationState=none", reimage.GetProperty("message").GetString()); // кусты прочитаны, значений нет
     }
 
     [Fact]
@@ -401,7 +422,7 @@ public sealed class ImagingTests : IAsyncLifetime
         Assert.Equal((HttpStatusCode.Conflict, "notGeneralized"), (status, body.GetProperty("error").GetProperty("details").GetProperty("reason").GetString()));
         var reimage = await ReimageViewAsync();
         Assert.Equal(("failed", "notGeneralized"), (reimage.GetProperty("state").GetString(), reimage.GetProperty("failure").GetString()));
-        Assert.Equal("ImageState=unknown, GeneralizationState=none", reimage.GetProperty("message").GetString());
+        Assert.Equal("ImageState=unknown, GeneralizationState=unknown", reimage.GetProperty("message").GetString());
         Assert.False((await ImagesAsync()).GetProperty("images")[0].TryGetProperty("generalized", out _));
 
         // Эталонный ПК: явное разрешение на это задание — заливка без sysprep проходит до конца. /addlast — из настройки
@@ -430,6 +451,101 @@ public sealed class ImagingTests : IAsyncLifetime
         Assert.Null(await KeaClassAsync());
         using var again = await Panel().PostAsJsonAsync($"/panel/api/v1/machines/{machine.MachineId}/reimage", new { allowNotGeneralized = true });
         Assert.Equal(HttpStatusCode.Accepted, again.StatusCode);
+    }
+
+    [Fact]
+    public async Task Reference_wim_is_known_not_generalized_from_import_and_is_never_published()
+    {
+        (await Panel().PutAsJsonAsync("/panel/api/v1/network/settings", NetworkSettings)).EnsureSuccessStatusCode();
+        await ImportAsync("win11-2609"); // текущая, о sysprep ещё ничего не известно
+        var machine = await MachineAsync();
+
+        // Эталон гибрида (make-hybrid-ref.py пишет «not generalized» в описание) и явный флаг импорта.
+        ImagingUnitTests.WriteWimWithDescription(Path.Combine(_root, "incoming", "ref-v2.wim"),
+            "ssd/club/golden@img-v2-2026-10-22, not generalized, fixed for a local SSD, 2026-10-23");
+        (await Panel().PostAsJsonAsync("/panel/api/v1/images/import", new { file = "ref-v2.wim", label = "ref-v2", index = 1 })).EnsureSuccessStatusCode();
+        File.Copy(ImagingUnitTests.WimFixture, Path.Combine(_root, "incoming", "ref-flag.wim"));
+        (await Panel().PostAsJsonAsync("/panel/api/v1/images/import", new { file = "ref-flag.wim", label = "ref-flag", notGeneralized = true })).EnsureSuccessStatusCode();
+        await WorkerAsync();
+
+        var images = (await ImagesAsync()).GetProperty("images").EnumerateArray().ToDictionary(i => i.GetProperty("label").GetString()!);
+        Assert.Equal(("ready", false), (images["ref-v2"].GetProperty("state").GetString(), images["ref-v2"].GetProperty("generalized").GetBoolean()));
+        Assert.Equal(("ready", false), (images["ref-flag"].GetProperty("state").GetString(), images["ref-flag"].GetProperty("generalized").GetBoolean()));
+        Assert.False(images["win11-2609"].TryGetProperty("generalized", out _));
+
+        foreach (var label in new[] { "ref-v2", "ref-flag" })
+        {
+            var (response, reason) = await PanelPostAsync($"/panel/api/v1/images/{label}/publish");
+            Assert.Equal((HttpStatusCode.Conflict, "imageNotGeneralized"), (response, reason));
+        }
+
+        Assert.Equal("win11-2609", (await ImagesAsync()).GetProperty("current").GetString());
+
+        // По метке — только с allowNotGeneralized (диск не тронут: задание не создаётся).
+        var reimagePath = $"/panel/api/v1/machines/{machine.MachineId}/reimage";
+        Assert.Equal((HttpStatusCode.Conflict, "notGeneralized"), await PanelPostAsync(reimagePath, new { image = "ref-v2" }));
+        Assert.False((await MachineViewAsync()).TryGetProperty("reimage", out _));
+
+        // Версия, импортированная до пометки при импорте (generalized пуст), узнаётся по описанию в WIM.
+        await using (var c = await _server.Services.GetRequiredService<Npgsql.NpgsqlDataSource>().OpenConnectionAsync())
+        {
+            await using var command = new Npgsql.NpgsqlCommand("UPDATE windows_images SET generalized = NULL WHERE label = 'ref-v2'", c);
+            await command.ExecuteNonQueryAsync();
+        }
+
+        Assert.False((await ImagesAsync()).GetProperty("images").EnumerateArray().Single(i => i.GetProperty("label").GetString() == "ref-v2").GetProperty("generalized").GetBoolean());
+        Assert.Equal((HttpStatusCode.Conflict, "imageNotGeneralized"), await PanelPostAsync("/panel/api/v1/images/ref-v2/publish"));
+        Assert.Equal((HttpStatusCode.Conflict, "notGeneralized"), await PanelPostAsync(reimagePath, new { image = "ref-v2" }));
+
+        // Текущая версия (запрос без image), про которую стало известно «без sysprep», — тот же отказ.
+        var repository = _server.Services.GetRequiredService<ImageRepository>();
+        await repository.SetGeneralizedAsync((await repository.FindImageAsync("win11-2609"))!.Id, false);
+        Assert.Equal((HttpStatusCode.Conflict, "notGeneralized"), await PanelPostAsync(reimagePath));
+        Assert.False((await MachineViewAsync()).TryGetProperty("reimage", out _));
+        Assert.Equal((HttpStatusCode.Conflict, "imageNotGeneralized"), await PanelPostAsync("/panel/api/v1/images/win11-2609/publish"));
+
+        Assert.Equal((HttpStatusCode.Accepted, (string?)null), await PanelPostAsync(reimagePath, new { image = "ref-v2", allowNotGeneralized = true }));
+        var reimage = await ReimageViewAsync();
+        Assert.Equal(("ref-v2", true), (reimage.GetProperty("image").GetString(), reimage.GetProperty("allowNotGeneralized").GetBoolean()));
+    }
+
+    /// <summary>
+    /// Несколько ПК заливаются образом, о sysprep которого ещё ничего не известно. Первый дошедший до identity помечает
+    /// образ; у остальных задание уже взведено — WinPE получает отказ до плана, диск не тронут.
+    /// </summary>
+    [Fact]
+    public async Task Scheduled_reinstall_is_refused_before_the_plan_once_the_image_is_found_not_generalized()
+    {
+        await PrepareAsync();
+        var first = await MachineAsync();
+        var second = await MachineAsync("hw-2", "02:00:00:00:00:02");
+        (await Panel().PostAsJsonAsync($"/panel/api/v1/machines/{first.MachineId}/reimage", new { })).EnsureSuccessStatusCode();
+        (await Panel().PostAsJsonAsync($"/panel/api/v1/machines/{second.MachineId}/reimage", new { })).EnsureSuccessStatusCode();
+
+        var (status, body) = await DeployAsync(HttpMethod.Post, "/deploy/v1/start", new { macs = new[] { "02:00:00:00:00:02" }, firmware = "uefi", disks = Disks() });
+        Assert.Equal(HttpStatusCode.OK, status);
+        (status, _) = await DeployAsync(HttpMethod.Post, $"/deploy/v1/jobs/{body.GetProperty("jobId").GetGuid()}/unattend",
+            new { existing = (string?)null, generalized = false, systemHiveLoaded = true });
+        Assert.Equal(HttpStatusCode.Conflict, status);
+
+        // Первый ПК: и после перезагрузки (повтор) — тот же отказ, плана нет; PXE-флаг на месте, задание можно отменить.
+        for (var boot = 0; boot < 2; boot++)
+        {
+            (status, body) = await StartAsync();
+            Assert.Equal((HttpStatusCode.Conflict, "notGeneralized"), (status, body.GetProperty("error").GetProperty("details").GetProperty("reason").GetString()));
+        }
+
+        var reimage = await ReimageViewAsync();
+        Assert.Equal(("failed", "notGeneralized", false), (reimage.GetProperty("state").GetString(), reimage.GetProperty("failure").GetString(), reimage.GetProperty("diskTouched").GetBoolean()));
+        Assert.Equal(0, reimage.GetProperty("attempts").GetInt32()); // попытка заливки не начиналась
+        Assert.Equal("club-reimage", await KeaClassAsync());
+        Assert.Equal(HttpStatusCode.NoContent, (await Panel().PostAsync($"/panel/api/v1/machines/{first.MachineId}/reimage/cancel", null)).StatusCode);
+        Assert.Null(await KeaClassAsync());
+
+        // Эталонный ПК с явным разрешением этим образом по-прежнему заливается.
+        (await Panel().PostAsJsonAsync($"/panel/api/v1/machines/{first.MachineId}/reimage", new { allowNotGeneralized = true })).EnsureSuccessStatusCode();
+        (status, body) = await StartAsync();
+        Assert.Equal((HttpStatusCode.OK, true), (status, body.GetProperty("allowNotGeneralized").GetBoolean()));
     }
 
     [Fact]
@@ -463,6 +579,98 @@ public sealed class ImagingTests : IAsyncLifetime
         Assert.Equal((HttpStatusCode.NoContent, (string?)null), await PanelPutAsync(bootModePath, new { mode = "diskless" }));
     }
 
+    /// <summary>
+    /// Гонка «запрос перезаливки ↔ переключение в diskless»: переключение уже проверило задания и держит строку машины
+    /// (транзакция теста), запрос перезаливки ждёт блокировку и после коммита видит diskless.
+    /// </summary>
+    [Fact]
+    public async Task Reinstall_request_racing_a_switch_to_diskless_is_refused()
+    {
+        await PrepareAsync();
+        var machine = await MachineAsync();
+        var db = _server.Services.GetRequiredService<Npgsql.NpgsqlDataSource>();
+        await using (var c = await db.OpenConnectionAsync())
+        {
+            await using var tx = await c.BeginTransactionAsync();
+            await ExecAsync(c, tx, "SELECT 1 FROM machines WHERE id = @id FOR UPDATE", machine.MachineId);
+            await ExecAsync(c, tx, "UPDATE machines SET boot_mode = 'diskless' WHERE id = @id", machine.MachineId);
+            var request = PanelPostAsync($"/panel/api/v1/machines/{machine.MachineId}/reimage");
+            await WaitForLockWaitersAsync(db, 1, request);
+            await tx.CommitAsync();
+            Assert.Equal((HttpStatusCode.Conflict, "disklessMachine"), await request);
+        }
+
+        Assert.False((await MachineViewAsync()).TryGetProperty("reimage", out _)); // задание не создано
+    }
+
+    /// <summary>
+    /// Та же гонка с другой стороны: запрос перезаливки уже вставил задание и держит строку машины, переключения в
+    /// diskless и в мастера ждут блокировку и после коммита видят взведённое задание. Если флаг всё же оказался у
+    /// бездискового ПК (в обход проверок), WinPE получает отказ до плана — диск не тронут, задание можно отменить.
+    /// </summary>
+    [Fact]
+    public async Task Switch_to_diskless_or_master_racing_a_reinstall_request_is_refused()
+    {
+        await PrepareAsync();
+        var machine = await MachineAsync();
+        var db = _server.Services.GetRequiredService<Npgsql.NpgsqlDataSource>();
+        await using (var c = await db.OpenConnectionAsync())
+        {
+            await using var tx = await c.BeginTransactionAsync();
+            await ExecAsync(c, tx, "SELECT 1 FROM machines WHERE id = @id FOR UPDATE", machine.MachineId);
+            await ExecAsync(c, tx, "INSERT INTO reimage_jobs (id, machine_id, image_id, state, pxe_armed) SELECT gen_random_uuid(), @id, id, 'requested', true FROM windows_images", machine.MachineId);
+            var bootMode = PanelPutAsync($"/panel/api/v1/machines/{machine.MachineId}/boot-mode", new { mode = "diskless" });
+            var master = PanelPutAsync("/panel/api/v1/diskless/master", new { machineId = machine.MachineId, install = false });
+            await WaitForLockWaitersAsync(db, 2, bootMode, master);
+            await tx.CommitAsync();
+            Assert.Equal((HttpStatusCode.Conflict, "reimageActive"), await bootMode);
+            Assert.Equal((HttpStatusCode.Conflict, "reimageActive"), await master);
+        }
+
+        var diskless = await (await Panel().GetAsync("/panel/api/v1/diskless")).Content.ReadFromJsonAsync<JsonElement>();
+        Assert.False(diskless.TryGetProperty("masterMachineId", out _));
+        Assert.Equal("local", diskless.GetProperty("machines")[0].GetProperty("bootMode").GetString());
+
+        await using (var c = await db.OpenConnectionAsync())
+        {
+            await ExecAsync(c, null, "UPDATE machines SET boot_mode = 'diskless' WHERE id = @id", machine.MachineId);
+        }
+
+        var (status, body) = await StartAsync();
+        Assert.Equal((HttpStatusCode.Conflict, "disklessMachine"), (status, body.GetProperty("error").GetProperty("details").GetProperty("reason").GetString()));
+        var reimage = await ReimageViewAsync();
+        Assert.Equal(("failed", "disklessMachine", false), (reimage.GetProperty("state").GetString(), reimage.GetProperty("failure").GetString(), reimage.GetProperty("diskTouched").GetBoolean()));
+        Assert.Equal(HttpStatusCode.NoContent, (await Panel().PostAsync($"/panel/api/v1/machines/{machine.MachineId}/reimage/cancel", null)).StatusCode);
+    }
+
+    private static async Task ExecAsync(Npgsql.NpgsqlConnection c, Npgsql.NpgsqlTransaction? tx, string sql, Guid id)
+    {
+        await using var command = new Npgsql.NpgsqlCommand(sql, c, tx);
+        command.Parameters.AddWithValue("id", id);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>Ждёт (до 10 с), пока <paramref name="count"/> запросов встанут на блокировке строки машины (pg_stat_activity).</summary>
+    private static async Task WaitForLockWaitersAsync(Npgsql.NpgsqlDataSource db, int count, params Task[] requests)
+    {
+        for (var i = 0; i < 200; i++)
+        {
+            Assert.DoesNotContain(requests, r => r.IsCompleted); // ответ раньше коммита — запрос блокировку не ждал
+            await using var command = db.CreateCommand("""
+                SELECT count(*) FROM pg_stat_activity
+                WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FROM machines WHERE id = % FOR UPDATE%'
+                """);
+            if ((long)(await command.ExecuteScalarAsync())! >= count)
+            {
+                return;
+            }
+
+            await Task.Delay(50);
+        }
+
+        Assert.Fail($"{count} request(s) did not wait for the machine row lock");
+    }
+
     private async Task<(HttpStatusCode, string?)> PanelPutAsync(string path, object body)
     {
         using var response = await Panel().PutAsJsonAsync(path, body);
@@ -493,9 +701,9 @@ public sealed class ImagingTests : IAsyncLifetime
         Assert.Equal("notArmed", error.GetProperty("error").GetProperty("details").GetProperty("reason").GetString());
     }
 
-    private async Task<(HttpStatusCode, string?)> PanelPostAsync(string path)
+    private async Task<(HttpStatusCode, string?)> PanelPostAsync(string path, object? body = null)
     {
-        using var response = await Panel().PostAsJsonAsync(path, new { });
+        using var response = await Panel().PostAsJsonAsync(path, body ?? new { });
         var text = await response.Content.ReadAsStringAsync();
         return (response.StatusCode, response.IsSuccessStatusCode ? null : JsonDocument.Parse(text).RootElement.GetProperty("error").GetProperty("details").GetProperty("reason").GetString());
     }

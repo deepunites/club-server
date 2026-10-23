@@ -13,7 +13,6 @@ namespace Club.Server.Diskless;
 public sealed partial class DisklessImages(
     DisklessRepository repository,
     MachineRepository machines,
-    Imaging.ImageRepository reimages,
     TrueNasStorage storage,
     DisklessOptions options,
     TimeProvider clock,
@@ -70,11 +69,9 @@ public sealed partial class DisklessImages(
             {
                 throw new LibraryRequestException("notApproved", "Machine is not approved");
             }
-
-            await EnsureNotReimagingAsync(id);
         }
 
-        await repository.SetMasterAsync(machineId, install, clock.GetUtcNow());
+        Check(await repository.SetMasterAsync(machineId, install, clock.GetUtcNow()));
         logger.LogInformation("Diskless master mode: {Machine} (install: {Install}) by {User}", machineId?.ToString() ?? "off", install, requestedBy);
     }
 
@@ -91,24 +88,23 @@ public sealed partial class DisklessImages(
             throw new LibraryRequestException("notApproved", "Machine is not approved");
         }
 
-        if (mode == "diskless")
-        {
-            await EnsureNotReimagingAsync(machineId);
-        }
-
-        await repository.SetBootModeAsync(machineId, mode);
+        Check(await repository.SetBootModeAsync(machineId, mode));
         logger.LogInformation("Machine {Machine} boot mode set to {Mode} by {User}", machine.Name, mode, requestedBy);
     }
 
     /// <summary>
     /// Взведённая перезаливка (PXE-флаг, в том числе у упавшего задания) перехватывает загрузку по сети раньше iSCSI:
     /// ПК в режиме diskless или мастера попал бы в WinPE, и тот стёр бы локальный диск. Сначала отменить или довести.
+    /// Проверяет репозиторий под блокировкой строки машины — запрос перезаливки не проскочит между проверкой и записью.
     /// </summary>
-    private async Task EnsureNotReimagingAsync(Guid machineId)
+    private static void Check(DisklessRepository.NetworkBootResult result)
     {
-        if (await reimages.ActiveJobAsync(machineId) is { PxeArmed: true })
+        switch (result)
         {
-            throw new LibraryRequestException("reimageActive", "Windows reinstall is armed for this machine (it would boot WinPE instead); cancel or finish the reinstall first");
+            case DisklessRepository.NetworkBootResult.NoMachine:
+                throw new LibraryRequestException("noMachine", "Machine not found");
+            case DisklessRepository.NetworkBootResult.ReimageActive:
+                throw new LibraryRequestException("reimageActive", "Windows reinstall is armed for this machine (it would boot WinPE instead); cancel or finish the reinstall first");
         }
     }
 }

@@ -213,6 +213,25 @@ public sealed class DeployScriptTests : IAsyncLifetime
         Assert.False((await ImageAsync()).TryGetProperty("generalized", out _)); // разовый сбой reg load не клеймит образ
     }
 
+    /// <summary>GeneralizationState в сообщении задания: none — куст SYSTEM прочитан, значения нет; unknown — куст не прочитан.</summary>
+    [PwshTheory]
+    [InlineData("MOCK_GENERALIZATION_STATE", "none", "none", "none")]
+    [InlineData("MOCK_REG_LOAD_FAIL", "SYSTEM", "unreadable", "unknown")]
+    public async Task Job_message_tells_a_missing_value_from_an_unreadable_system_hive(string mock, string value, string onScreen, string inJob)
+    {
+        await ArmAsync();
+        var (exit, output, calls) = await RunScriptAsync(new() { ["MOCK_IMAGE_STATE"] = "IMAGE_STATE_COMPLETE", [mock] = value });
+        Assert.True(exit == 0, output);
+        Assert.Contains("FAILED at step identity (notGeneralized)", output);
+        Assert.Contains($"ImageState=IMAGE_STATE_COMPLETE, GeneralizationState={onScreen}", output);
+        Assert.DoesNotContain(calls, c => c.StartsWith("bcdboot", StringComparison.Ordinal));
+
+        var reimage = await ReimageAsync();
+        Assert.Equal(("failed", "notGeneralized"), (reimage.GetProperty("state").GetString(), reimage.GetProperty("failure").GetString()));
+        Assert.Equal($"ImageState=IMAGE_STATE_COMPLETE, GeneralizationState={inJob}", reimage.GetProperty("message").GetString());
+        Assert.False((await ImageAsync()).GetProperty("generalized").GetBoolean()); // SOFTWARE прочитан: образ помечен
+    }
+
     [PwshFact]
     public async Task Reference_deploy_allows_an_image_without_sysprep_for_its_job_only()
     {

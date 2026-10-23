@@ -69,10 +69,16 @@ function ProviderPath([string]$Path) {
     $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
 }
 
+$script:AssignedLetters = @()
+# Get-Volume и Get-PSDrive отстают от только что назначенных букв (кэш поставщика хранилища): на PC-11 2026-10-23
+# вторая Set-Partition получила ту же W и упала с «The requested access path is already in use». Поэтому ещё живой
+# список Windows (DriveInfo = GetLogicalDrives) и буквы, уже выданные этим скриптом.
 function Get-FreeLetter {
-    $used = (Get-Volume | Where-Object DriveLetter | ForEach-Object { [string]$_.DriveLetter }) + (Get-PSDrive -PSProvider FileSystem | ForEach-Object Name)
+    $used = @(Get-Volume | Where-Object DriveLetter | ForEach-Object { [string]$_.DriveLetter }) +
+        @(Get-PSDrive -PSProvider FileSystem | ForEach-Object Name) +
+        @([System.IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0, 1) }) + $script:AssignedLetters
     foreach ($letter in 'W', 'S', 'T', 'R', 'Q', 'P', 'O', 'N', 'M') {
-        if ($used -notcontains $letter) { return $letter }
+        if ($used -notcontains $letter) { $script:AssignedLetters += $letter; return $letter }
     }
     throw [DeployError]::new('noDriveLetter', 'No free drive letter')
 }
@@ -157,7 +163,8 @@ function Format-OfflineValue($Read, $Value) {
 # ImageState = IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE. Другое значение или нет значения — не генерализован (false,
 # сервер помечает образ). Куст SOFTWARE не загрузился — ответа нет (null): сервер тоже откажет, но образ не пометит,
 # чтобы разовый сбой reg load не заклеймил хороший образ. SYSTEM\Setup\Status\SysprepStatus\GeneralizationState —
-# только для диагностики (на экран и серверу).
+# только для диагностики (на экран и серверу); SystemHiveLoaded — куст SYSTEM загрузился: без него сервер не может
+# отличить «значения нет» (none) от «куст не прочитан» (unknown).
 function Test-Generalized([string]$WindowsDrive) {
     $software = Get-OfflineValue $WindowsDrive 'SOFTWARE' 'Microsoft\Windows\CurrentVersion\Setup\State' 'ImageState'
     $system = Get-OfflineValue $WindowsDrive 'SYSTEM' 'Setup\Status\SysprepStatus' 'GeneralizationState'
@@ -168,6 +175,7 @@ function Test-Generalized([string]$WindowsDrive) {
         Generalized = $generalized
         ImageState = $imageState
         GeneralizationState = $generalizationState
+        SystemHiveLoaded = $system.Loaded
         Text = 'ImageState={0}, GeneralizationState={1}' -f (Format-OfflineValue $software $imageState), (Format-OfflineValue $system $generalizationState)
     }
 }
@@ -239,6 +247,7 @@ try {
     $existing = if (Test-Path $unattendPath) { [System.IO.File]::ReadAllText((ProviderPath $unattendPath), [System.Text.Encoding]::UTF8) } else { $null }
     $identity = Invoke-Api POST "$script:JobBase/unattend" @{
         existing = $existing; generalized = $sysprep.Generalized; imageState = $sysprep.ImageState; generalizationState = $sysprep.GeneralizationState
+        systemHiveLoaded = $sysprep.SystemHiveLoaded
     }
     if (-not $sysprep.Generalized) {
         if (-not $plan.allowNotGeneralized) { throw [DeployError]::new('notGeneralized', "Image is not generalized with sysprep ($($sysprep.Text))") }

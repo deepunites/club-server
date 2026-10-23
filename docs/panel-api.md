@@ -122,16 +122,28 @@ bootTime, volume { state, libraryVersion, readOnlyVerified, outdated, error, per
 | Метод и путь | Что делает | Ответы |
 |---|---|---|
 | `GET /images` | `enabled, current, rollback, images [{ label, state, role, sizeBytes, sha256, imageIndex, wimImages, generalized, createdAt, importedAt, publishedAt, lastError }], incoming [{ name, sizeBytes, modifiedAt }], warnings` | 200 |
-| `POST /images/import` `{ file, label, index }` | Импорт файла из `incoming/` (фоновый: перенос, разбор WIM, sha256) | 202; 400 (`file`/`label`); 409 (`labelTaken`, `imagingDisabled`) |
-| `POST /images/{label}/publish` | Сделать текущей; прежняя — откатная, более старая удаляется | 204; 404; 409 (`imageNotReady`) |
-| `POST /images/rollback` | Поменять текущую и откатную местами | 204; 409 (`noRollback`) |
+| `POST /images/import` `{ file, label, index, notGeneralized? }` | Импорт файла из `incoming/` (фоновый: перенос, разбор WIM, sha256) | 202; 400 (`file`/`label`); 409 (`labelTaken`, `imagingDisabled`) |
+| `POST /images/{label}/publish` | Сделать текущей; прежняя — откатная, более старая удаляется | 204; 404; 409 (`imageNotReady`, `imageNotGeneralized`) |
+| `POST /images/rollback` | Поменять текущую и откатную местами | 204; 409 (`noRollback`, `imageNotGeneralized`) |
 | `DELETE /images/{label}` | Удалить неопубликованную версию | 204; 409 (`inUse`) |
 | `POST /machines/{id}/reimage` `{ image?, allowNewDisk?, allowNotGeneralized? }` | Перезалить (по умолчанию текущей версией) | 202; 409 (`noImage`, `imageNotReady`, `noReservation`, `alreadyRequested`, `keaDisabled`, `imagingDisabled`, `notApproved`, `disklessMachine`, `notGeneralized`, `bootFilesMissing`, `secureBootThirdPartyCa`, `bootFilesNotSigned`, `needsCa2023BootManager`) |
 | `POST /machines/{id}/reimage/cancel` | Отменить, пока диск не тронут | 204; 404; 409 (`diskTouched`) |
 
+`generalized: false` ставит уже импорт: описание образа в WIM содержит «not generalized» (так подписывает эталон
+гибрида `scripts/server/make-hybrid-ref.py`) или в запросе `notGeneralized: true` (по умолчанию `false`, только API).
+Иначе `generalized` пуст до первой заливки (её шаг identity); версия, импортированная раньше этой пометки, с таким
+описанием и без сведений от заливки тоже считается `generalized: false`. Такую версию нельзя опубликовать —
+`imageNotGeneralized`: текущая версия — то, что получает любой ПК по умолчанию. По той же причине откат отказывает
+`imageNotGeneralized`, если откатная версия — `generalized: false` (это могла показать заливка уже после публикации).
+
 `disklessMachine` — у машины `bootMode: diskless` или она в режиме мастера (Windows на сервере): перезаливка
-локального диска только в режиме `local` и без мастера. `notGeneralized` — прошлая заливка уже нашла, что образ без
-sysprep (`generalized: false`), а `allowNotGeneralized` не задан: задание не создаётся.
+локального диска только в режиме `local` и без мастера. Запрос перезаливки и переключение в `diskless`/мастера
+(`reimageActive`) проверяют друг друга под блокировкой строки машины, так что гонка двух запросов не проходит; если
+флаг всё же оказался у такого ПК, WinPE получает отказ `disklessMachine` ещё до плана (диск не тронут, задание
+можно отменить). `notGeneralized` — импорт или прошлая заливка уже показали, что
+образ без sysprep (`generalized: false`), а `allowNotGeneralized` не задан: задание не создаётся. Если это выяснилось
+уже после создания задания (заливка другого ПК), WinPE получает отказ `notGeneralized` до плана (диск не тронут,
+задание можно отменить).
 `allowNotGeneralized: true` (по умолчанию `false`, только API — в панели нет) — залить образ без sysprep: эталонный ПК
 гибрида (`docs/imaging.md`, «Личность машины»). Флаг хранится в задании и действует только на него: WinPE получает
 его в плане и не отказывает, сервер не превращает `generalized: false` в `notGeneralized`. Следующее задание без
@@ -149,17 +161,19 @@ pxeArmed, attempts, updatedAt, allowNotGeneralized }`, статус `reimaging`,
 если включена отправка списка ПК (`docs/machine-feed.md`): `state` — `pending` (ещё не отправлялся) | `ok` | `failing`,
 `target` — только хост получателя.
 `failure` — шаг или причина: `systemDiskNotFound`, `ambiguousDisks`, `diskTooSmall`, `noInternalDisk`,
-`biosNotSupported`, `imageUnavailable`, `notGeneralized`, `partition`, `download`, `verify`, `apply`, `identity`, `bcdboot`.
-У `notGeneralized` в `message` — что нашёл WinPE: `ImageState=…, GeneralizationState=…` (`none` — значения нет,
-`unknown` — WinPE не прочитал куст SOFTWARE; образ тогда не помечается).
+`biosNotSupported`, `imageUnavailable`, `disklessMachine`, `notGeneralized`, `partition`, `download`, `verify`, `apply`,
+`identity`, `bcdboot`. У `notGeneralized` в `message` — что нашёл WinPE: `ImageState=…, GeneralizationState=…`
+(`none` — куст прочитан, значения в нём нет; `unknown` — куст не прочитан или WinPE ничего не сообщил: для
+`ImageState` это куст SOFTWARE, образ тогда не помечается; для `GeneralizationState` — куст SYSTEM).
 
 Для WinPE и iPXE (без авторизации): `GET /pxe/v1/boot.ipxe`, `/pxe/v1/machines/{mac}/boot.ipxe`,
 `/pxe/v1/winpe/{club-deploy.ps1|winpeshl.ini|clubdeploy.json}`, `/pxe/v1/files/{путь в PxeRoot}`;
 `POST /deploy/v1/start`, `PUT /deploy/v1/jobs/{id}/progress`, `GET /deploy/v1/jobs/{id}/image` (Range),
 `POST /deploy/v1/jobs/{id}/unattend|fail|complete`. План (`start`) кроме диска, образа и имени несёт
 `allowNotGeneralized` (из задания) и `bcdbootAddLast` (`Imaging:BcdbootAddLast`: `bcdboot … /addlast`); `unattend`
-принимает `{ existing, generalized, imageState, generalizationState }`, `generalized` не `true` — «не генерализован»
-(`false` помечает образ, `null` — нет).
+принимает `{ existing, generalized, imageState, generalizationState, systemHiveLoaded }`, `generalized` не `true` —
+«не генерализован» (`false` помечает образ, `null` — нет); `systemHiveLoaded` — куст SYSTEM загрузился (без него
+пустой `generalizationState` в сообщении — `unknown`, а не `none`).
 
 
 ## Полный бездиск

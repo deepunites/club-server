@@ -70,11 +70,11 @@ public sealed class ReimageService(
             throw Conflict("imageNotReady", $"Image {image.Label} is not ready ({image.State})");
         }
 
-        if (image.Generalized == false && !allowNotGeneralized)
+        if (image.KnownNotGeneralized && !allowNotGeneralized)
         {
-            // Прошлая заливка уже показала: sysprep не было. Без этой проверки диск стёрся бы, а отказ пришёл бы только
-            // на шаге identity — ПК остался бы без Windows.
-            throw Conflict("notGeneralized", $"Image {image.Label} is not generalized with sysprep (found at an earlier reinstall); only the reference PC may get it (allowNotGeneralized)");
+            // Импорт или прошлая заливка уже показали: sysprep не было. Без этой проверки диск стёрся бы, а отказ пришёл
+            // бы только на шаге identity — ПК остался бы без Windows.
+            throw Conflict("notGeneralized", $"Image {image.Label} is not generalized with sysprep (marked at import or found at an earlier reinstall); only the reference PC may get it (allowNotGeneralized)");
         }
 
         var settings = await network.GetAsync();
@@ -86,8 +86,17 @@ public sealed class ReimageService(
 
         CheckBootChain(machine);
 
-        var job = await images.CreateJobAsync(machineId, image.Id, allowNewDisk, allowNotGeneralized, requestedBy, clock.GetUtcNow())
-            ?? throw Conflict("alreadyRequested", "This machine is already being reinstalled");
+        // Проверки бездиска выше — для понятного ответа; решающая — в CreateJobAsync, под блокировкой строки машины:
+        // переключение в diskless или в мастера могло пройти между ними.
+        var (result, job) = await images.CreateJobAsync(machineId, image.Id, allowNewDisk, allowNotGeneralized, requestedBy, clock.GetUtcNow());
+        switch (result)
+        {
+            case ImageRepository.CreateJobResult.AlreadyRequested:
+                throw Conflict("alreadyRequested", "This machine is already being reinstalled");
+            case ImageRepository.CreateJobResult.DisklessMachine:
+                throw Conflict("disklessMachine", "Machine boots diskless or is in diskless master mode; reinstalling Windows to a local disk needs boot mode local and master mode off");
+        }
+
         if (allowNotGeneralized)
         {
             logger.LogWarning("Reimage of {Machine} with {Image} requested by {By}; a non-generalized image is allowed for this job", machine.Name, image.Label, requestedBy);
@@ -98,7 +107,7 @@ public sealed class ReimageService(
         }
 
         await TrySyncAsync(ct);
-        return job;
+        return job!;
     }
 
     public static Diskless.SecureBootReport? SecureBoot(MachineRow machine) =>
@@ -179,6 +188,15 @@ public sealed class ReimageService(
         var macs = (request.Macs ?? []).Select(NormalizeMac).OfType<string>().Distinct().ToList();
         var job = await images.ArmedJobForMacsAsync(macs) ?? throw Conflict("notArmed", "No reinstall is scheduled for this PC");
         var machine = (await machines.FindAsync(job.MachineId))!;
+        if (machine.BootMode == "diskless" || (await diskless.GetImageAsync()).MasterMachineId == machine.Id)
+        {
+            // Последний рубеж (запрос и переключение режима сериализованы на строке машины): Windows этого ПК — на
+            // сервере, локальный диск не трогаем. Задание падает до плана; диск не тронут — его можно отменить.
+            await images.FailAsync(job.Id, "disklessMachine", null, clock.GetUtcNow());
+            logger.LogWarning("Reimage of {Machine} refused in WinPE: the machine boots diskless or is the diskless master", machine.Name);
+            throw Conflict("disklessMachine", "Machine boots diskless or is in diskless master mode; its local disk is not touched. Cancel the reinstall.");
+        }
+
         if (!string.Equals(request.Firmware, "uefi", StringComparison.OrdinalIgnoreCase))
         {
             await images.FailAsync(job.Id, "biosNotSupported", null, clock.GetUtcNow());
@@ -190,6 +208,15 @@ public sealed class ReimageService(
         {
             await images.FailAsync(job.Id, "imageUnavailable", null, clock.GetUtcNow());
             throw Conflict("imageUnavailable", "Image is not available on the server");
+        }
+
+        if (image.KnownNotGeneralized && !job.AllowNotGeneralized)
+        {
+            // Задание создано, когда об этом ещё не знали (например, образ с тех пор пометила заливка другого ПК).
+            // Отказ до плана: диск не тронут, задание можно отменить (иначе он стёрся бы до отказа на шаге identity).
+            await images.FailAsync(job.Id, "notGeneralized", "marked at import or found at an earlier reinstall", clock.GetUtcNow());
+            logger.LogWarning("Reimage of {Machine} refused in WinPE: image {Image} is known to be not generalized", machine.Name, image.Label);
+            throw Conflict("notGeneralized", $"Image {image.Label} is not generalized with sysprep (marked at import or found at an earlier reinstall); the disk is not touched. Cancel the reinstall or rebuild the image.");
         }
 
         var systemDisk = machine.SystemDiskJson is null ? null : JsonSerializer.Deserialize<SystemDisk>(machine.SystemDiskJson, JsonSerializerOptions.Web);
@@ -265,9 +292,12 @@ public sealed class ReimageService(
 
         if (request.Generalized != true)
         {
-            // none — значения нет в залитом реестре; unknown — WinPE ничего не сообщил (куст не прочитан).
+            // none — куст прочитан, значения в нём нет; unknown — куст не прочитан или WinPE ничего не сообщил.
+            // ImageState — из SOFTWARE (generalized: null — куст не прочитан), GeneralizationState — из SYSTEM (systemHiveLoaded).
             var imageState = Truncate(request.ImageState, 64) ?? (request.Generalized is null ? "unknown" : "none");
-            var facts = $"ImageState={imageState}, GeneralizationState={request.GeneralizationState?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "none"}";
+            var generalizationState = request.GeneralizationState?.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                ?? (request.SystemHiveLoaded == true ? "none" : "unknown");
+            var facts = $"ImageState={imageState}, GeneralizationState={generalizationState}";
             if (!job.AllowNotGeneralized)
             {
                 await images.FailAsync(jobId, "notGeneralized", facts, clock.GetUtcNow());
@@ -353,10 +383,12 @@ public sealed record DeployProgress(string? Step, int? Percent, string? Message)
 public sealed record DeployFailure(string? Step, string? Message);
 
 /// <summary>
-/// <c>Generalized</c> — по ImageState залитого реестра (null — WinPE не прочитал куст или не сообщил: считается «нет»,
-/// но образ не помечается). <c>ImageState</c>
-/// (SOFTWARE\…\Setup\State) и <c>GeneralizationState</c> (SYSTEM\Setup\Status\SysprepStatus) — для диагностики.
+/// <c>Generalized</c> — по ImageState залитого реестра (null — WinPE не прочитал куст SOFTWARE или не сообщил: считается
+/// «нет», но образ не помечается). <c>ImageState</c> (SOFTWARE\…\Setup\State) и <c>GeneralizationState</c>
+/// (SYSTEM\Setup\Status\SysprepStatus) — для диагностики; <c>SystemHiveLoaded</c> — куст SYSTEM прочитан (тогда нет
+/// GeneralizationState — «none», иначе «unknown»).
 /// </summary>
-public sealed record DeployUnattendRequest(string? Existing, bool? Generalized, string? ImageState = null, int? GeneralizationState = null);
+public sealed record DeployUnattendRequest(
+    string? Existing, bool? Generalized, string? ImageState = null, int? GeneralizationState = null, bool? SystemHiveLoaded = null);
 
 public sealed record DeployUnattendResponse(string Xml);

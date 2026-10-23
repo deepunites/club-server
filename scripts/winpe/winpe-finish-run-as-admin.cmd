@@ -1,7 +1,9 @@
 @echo off
-rem Club: finishes the WinPE build after MakeWinPEMedia failed on the "active" step (GPT stick; 2026-10-23, PC-01).
-rem The stick is already FAT32 with the label WINPE. UEFI boots from \EFI\Boot\bootx64.efi on FAT32, so the media files
-rem are simply copied; no active partition or bootsect is needed (all club PCs boot UEFI, CSM off).
+rem Club: finishes the WinPE build when the USB step of build-winpe.cmd failed after the stick was formatted (first
+rem time: MakeWinPEMedia failed on the "active" step, GPT stick; 2026-10-23, PC-01; build-winpe.cmd now copies too).
+rem The stick is already FAT32 with the label WINPE (if not: format E: /FS:FAT32 /Q /V:WINPE). UEFI boots from
+rem \EFI\Boot\bootx64.efi on FAT32, so the media files are simply copied; no active partition or bootsect is needed
+rem (all club PCs boot UEFI, CSM off).
 rem Also copies the network-boot files to this flash drive (winpe-out next to this file). Run as administrator.
 setlocal
 net session >nul 2>&1

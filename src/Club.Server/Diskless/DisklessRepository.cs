@@ -100,12 +100,35 @@ public sealed class DisklessRepository(NpgsqlDataSource db)
             """, new { now }) == 1;
     }
 
-    public async Task SetMasterAsync(Guid? machineId, bool install, DateTimeOffset now)
+    public enum NetworkBootResult
+    {
+        Done,
+        NoMachine,
+        ReimageActive,
+    }
+
+    /// <summary>
+    /// Режим мастера. Машина (не null) — под блокировкой её строки, как в <see cref="SetBootModeAsync"/>:
+    /// с взведённой перезаливкой — <see cref="NetworkBootResult.ReimageActive"/>.
+    /// </summary>
+    public async Task<NetworkBootResult> SetMasterAsync(Guid? machineId, bool install, DateTimeOffset now)
     {
         await using var c = await db.OpenConnectionAsync();
+        await using var tx = await c.BeginTransactionAsync();
+        if (machineId is { } id)
+        {
+            var locked = await LockWithoutArmedReimageAsync(c, tx, id);
+            if (locked != NetworkBootResult.Done)
+            {
+                return locked;
+            }
+        }
+
         await c.ExecuteAsync(
             "UPDATE diskless_image SET master_machine_id = @machineId, master_install = @install, master_install_at = NULL, updated_at = @now",
-            new { machineId, install = machineId is not null && install, now });
+            new { machineId, install = machineId is not null && install, now }, tx);
+        await tx.CommitAsync();
+        return NetworkBootResult.Done;
     }
 
     /// <summary>
@@ -122,10 +145,38 @@ public sealed class DisklessRepository(NpgsqlDataSource db)
             """, new { now, since = now - window }) == 1;
     }
 
-    public async Task<bool> SetBootModeAsync(Guid machineId, string mode)
+    /// <summary>
+    /// Режим загрузки. В <c>diskless</c> — только без взведённой перезаливки (PXE отдал бы WinPE раньше iSCSI, и тот
+    /// стёр бы локальный диск): строка машины блокируется (<c>FOR UPDATE</c>, как в
+    /// <see cref="Imaging.ImageRepository.CreateJobAsync"/>), и только потом — отдельным запросом, со свежим снимком —
+    /// проверка заданий. Одно <c>UPDATE … WHERE NOT EXISTS</c> не годится: в READ COMMITTED оно не увидит задание,
+    /// созданное параллельно.
+    /// </summary>
+    public async Task<NetworkBootResult> SetBootModeAsync(Guid machineId, string mode)
     {
         await using var c = await db.OpenConnectionAsync();
-        return await c.ExecuteAsync("UPDATE machines SET boot_mode = @mode WHERE id = @machineId", new { machineId, mode }) == 1;
+        await using var tx = await c.BeginTransactionAsync();
+        var locked = await LockWithoutArmedReimageAsync(c, tx, machineId, checkReimage: mode == "diskless");
+        if (locked != NetworkBootResult.Done)
+        {
+            return locked;
+        }
+
+        await c.ExecuteAsync("UPDATE machines SET boot_mode = @mode WHERE id = @machineId", new { machineId, mode }, tx);
+        await tx.CommitAsync();
+        return NetworkBootResult.Done;
+    }
+
+    private static async Task<NetworkBootResult> LockWithoutArmedReimageAsync(NpgsqlConnection c, NpgsqlTransaction tx, Guid machineId, bool checkReimage = true)
+    {
+        if (await c.ExecuteScalarAsync<int?>("SELECT 1 FROM machines WHERE id = @machineId FOR UPDATE", new { machineId }, tx) is null)
+        {
+            return NetworkBootResult.NoMachine;
+        }
+
+        var armed = checkReimage && await c.ExecuteScalarAsync<bool>(
+            "SELECT EXISTS (SELECT 1 FROM reimage_jobs WHERE machine_id = @machineId AND pxe_armed)", new { machineId }, tx);
+        return armed ? NetworkBootResult.ReimageActive : NetworkBootResult.Done;
     }
 
     /// <summary>Машины, которым Kea отдаёт загрузчик всегда (PXE-флаг в резервации): бездиск и режим мастера.</summary>

@@ -43,7 +43,18 @@ public sealed partial class ImageLibrary(ImagingOptions options, ImageRepository
         LabelTaken,
     }
 
-    public async Task<ImportResult> RequestImportAsync(string file, string label, int index, string? requestedBy)
+    /// <summary>
+    /// Описание образа в WIM, по которому импорт сразу помечает его «не генерализован»: так подписывает эталон гибрида
+    /// <c>scripts/server/make-hybrid-ref.py</c> («&lt;zvol&gt;@img-&lt;версия&gt;, not generalized, …»). Такую версию нельзя
+    /// опубликовать, а заливать — только с <c>allowNotGeneralized</c>.
+    /// </summary>
+    public const string NotGeneralizedMarker = "not generalized";
+
+    public static bool MarkedNotGeneralized(WimImage image) =>
+        image.Description?.Contains(NotGeneralizedMarker, StringComparison.OrdinalIgnoreCase) == true;
+
+    /// <summary><paramref name="notGeneralized"/> — администратор сам говорит, что образ без sysprep (то же, что метка в описании WIM).</summary>
+    public async Task<ImportResult> RequestImportAsync(string file, string label, int index, bool notGeneralized, string? requestedBy)
     {
         if (!LabelPattern().IsMatch(label))
         {
@@ -55,7 +66,7 @@ public sealed partial class ImageLibrary(ImagingOptions options, ImageRepository
             return ImportResult.NoSuchFile;
         }
 
-        var ok = await repository.CreateImportAsync(Guid.NewGuid(), label, file, Path.Combine("images", label, ImageFileName), Math.Max(1, index), requestedBy);
+        var ok = await repository.CreateImportAsync(Guid.NewGuid(), label, file, Path.Combine("images", label, ImageFileName), Math.Max(1, index), notGeneralized, requestedBy);
         return ok ? ImportResult.Accepted : ImportResult.LabelTaken;
     }
 
@@ -129,8 +140,15 @@ public sealed partial class ImageLibrary(ImagingOptions options, ImageRepository
             sha256 = Convert.ToHexStringLower(await SHA256.HashDataAsync(stream, ct));
         }
 
-        await repository.MarkImportedAsync(image.Id, size, sha256, images, clock.GetUtcNow());
+        var marked = MarkedNotGeneralized(images.First(i => i.Index == image.ImageIndex));
+        await repository.MarkImportedAsync(image.Id, size, sha256, images, marked ? false : null, clock.GetUtcNow());
         logger.LogInformation("Image {Label} imported: {Size} bytes, sha256 {Sha256}", image.Label, size, sha256);
+        if (marked || image.Generalized == false)
+        {
+            logger.LogWarning("Image {Label} is not generalized ({Why}): it cannot be published, only reinstalled with allowNotGeneralized",
+                image.Label, marked ? "WIM description" : "import request");
+        }
+
         return null;
     }
 
