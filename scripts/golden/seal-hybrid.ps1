@@ -295,7 +295,8 @@ if ($psStart -le 1.5) { Write-Pass ('запуск PowerShell {0:N1} с' -f $psSt
 
 # Блокер sysprep /generalize: пакет установлен пользователю, а в образе (provisioned) его нет или он другой версии —
 # так бывает с обновлёнными Store приложениями и с кодеками fixes-v2.ps1 (в образ и отдельно текущему пользователю).
-# Системные (SignatureKind System), неудаляемые, платформы (framework) и ресурсные пакеты sysprep не проверяет.
+# Системные (SignatureKind System), платформы (framework) и ресурсные пакеты sysprep не проверяет; неудаляемые
+# (NonRemovable) — проверяет, они снимаются через EndOfLife (ниже).
 Write-Title 'Приложения Store (Appx): пакеты пользователей, которых нет в образе'
 $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 try {
@@ -303,13 +304,32 @@ try {
     foreach ($p in @(Get-AppxProvisionedPackage -Online -ErrorAction Stop)) { $provisioned[$p.DisplayName] = "$($p.Version)" }
     $found = 0
     foreach ($pkg in @(Get-AppxPackage -AllUsers -ErrorAction Stop)) {
-        if ($pkg.IsFramework -or $pkg.IsResourcePackage -or $pkg.NonRemovable -or "$($pkg.SignatureKind)" -eq 'System') { continue }
+        if ($pkg.IsFramework -or $pkg.IsResourcePackage -or "$($pkg.SignatureKind)" -eq 'System') { continue }
         $users = @($pkg.PackageUserInformation | Where-Object { "$($_.InstallState)" -eq 'Installed' })
         if (-not $users) { continue }
         $inImage = $provisioned[$pkg.Name]
         if ($inImage -and $inImage -eq "$($pkg.Version)") { continue }
         $found++
         $why = if ($inImage) { 'в образе версия {0}' -f $inImage } else { 'в образе его нет' }
+        if ($pkg.NonRemovable) {
+            # Неудаляемый пакет Windows, установленный пользователям, но не в образе: на PC-11 2026-10-24 это
+            # Microsoft.SecHealthUI («Безопасность Windows»; ISO из UUP без встроенных приложений, пакет пришёл с
+            # обновлением только пользователю) — sysprep остановился с 0x80073cf2. Remove-AppxPackage удаляет такой
+            # пакет только с пометкой EndOfLife для каждого пользователя; Deprovisioned — новым пользователям не ставить.
+            # Defender работает без этого приложения; TPM, Secure Boot и HVCI античиты читают у системы, не у него.
+            $store = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore'
+            try {
+                foreach ($sid in @(@($users | ForEach-Object { "$($_.UserSecurityId.Sid)" }) + 'S-1-5-18' | Select-Object -Unique)) {
+                    New-Item -Path "$store\EndOfLife\$sid\$($pkg.PackageFullName)" -Force -ErrorAction Stop | Out-Null
+                }
+                New-Item -Path "$store\Deprovisioned\$($pkg.PackageFamilyName)" -Force -ErrorAction Stop | Out-Null
+                Remove-AppxPackage -Package $pkg.PackageFullName -AllUsers -ErrorAction Stop
+                Write-Warn ('{0} {1} ({2}, неудаляемый): удалён у всех пользователей' -f $pkg.Name, $pkg.Version, $why) 'запустить скрипт снова'
+            } catch {
+                Write-Warn ('{0} {1} ({2}, неудаляемый): не удалён: {3}' -f $pkg.Name, $pkg.Version, $why, $_.Exception.Message) "Remove-AppxPackage -Package $($pkg.PackageFullName) -AllUsers"
+            }
+            continue
+        }
         foreach ($u in $users) {
             $sid = "$($u.UserSecurityId.Sid)"
             $who = if ("$($u.UserSecurityId.Username)") { "$($u.UserSecurityId.Username)" } else { $sid }
