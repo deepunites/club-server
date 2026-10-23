@@ -126,13 +126,22 @@ bootTime, volume { state, libraryVersion, readOnlyVerified, outdated, error, per
 | `POST /images/{label}/publish` | Сделать текущей; прежняя — откатная, более старая удаляется | 204; 404; 409 (`imageNotReady`) |
 | `POST /images/rollback` | Поменять текущую и откатную местами | 204; 409 (`noRollback`) |
 | `DELETE /images/{label}` | Удалить неопубликованную версию | 204; 409 (`inUse`) |
-| `POST /machines/{id}/reimage` `{ image?, allowNewDisk? }` | Перезалить (по умолчанию текущей версией) | 202; 409 (`noImage`, `imageNotReady`, `noReservation`, `alreadyRequested`, `keaDisabled`, `imagingDisabled`, `notApproved`, `bootFilesMissing`, `secureBootThirdPartyCa`, `bootFilesNotSigned`, `needsCa2023BootManager`) |
+| `POST /machines/{id}/reimage` `{ image?, allowNewDisk?, allowNotGeneralized? }` | Перезалить (по умолчанию текущей версией) | 202; 409 (`noImage`, `imageNotReady`, `noReservation`, `alreadyRequested`, `keaDisabled`, `imagingDisabled`, `notApproved`, `disklessMachine`, `notGeneralized`, `bootFilesMissing`, `secureBootThirdPartyCa`, `bootFilesNotSigned`, `needsCa2023BootManager`) |
 | `POST /machines/{id}/reimage/cancel` | Отменить, пока диск не тронут | 204; 404; 409 (`diskTouched`) |
+
+`disklessMachine` — у машины `bootMode: diskless` или она в режиме мастера (Windows на сервере): перезаливка
+локального диска только в режиме `local` и без мастера. `notGeneralized` — прошлая заливка уже нашла, что образ без
+sysprep (`generalized: false`), а `allowNotGeneralized` не задан: задание не создаётся.
+`allowNotGeneralized: true` (по умолчанию `false`, только API — в панели нет) — залить образ без sysprep: эталонный ПК
+гибрида (`docs/imaging.md`, «Личность машины»). Флаг хранится в задании и действует только на него: WinPE получает
+его в плане и не отказывает, сервер не превращает `generalized: false` в `notGeneralized`. Следующее задание без
+флага снова требует sysprep (и после первой заливки отказывает сразу). Остальным ПК такой образ не заливать: у всех
+будет один MachineGUID.
 
 `GET /images` также отдаёт `bootFiles { tftpChecked, files [{ name, location (tftp|pxe), required, status (ok|missing|invalid|unsigned|badSignature|wrongSigner), sizeBytes, sha256, component, signedBy, expected }] }` — цепочка загрузки и подписи.
 
 В `GET /machines` у машины `secureBoot { enabled, thirdPartyCa2011, windowsCa2023, pca2011Revoked }` (по отчёту помощника), `imageVersion` и `reimage { state, image, step, percent, message, failure, diskTouched,
-pxeArmed, attempts, updatedAt }`, статус `reimaging`, в обзоре `currentImageVersion` и `reimaging`. Мастер-том на ПК —
+pxeArmed, attempts, updatedAt, allowNotGeneralized }`, статус `reimaging`, в обзоре `currentImageVersion` и `reimaging`. Мастер-том на ПК —
 `masterState` (`mounted|mounting|failed`) и `masterError` (причина у `failed` и `mounting`), в обзоре `masterDriveLetter`
 (`Library:MasterDriveLetter`) — буква для отметки мастер-тома.
 
@@ -141,11 +150,16 @@ pxeArmed, attempts, updatedAt }`, статус `reimaging`, в обзоре `cur
 `target` — только хост получателя.
 `failure` — шаг или причина: `systemDiskNotFound`, `ambiguousDisks`, `diskTooSmall`, `noInternalDisk`,
 `biosNotSupported`, `imageUnavailable`, `notGeneralized`, `partition`, `download`, `verify`, `apply`, `identity`, `bcdboot`.
+У `notGeneralized` в `message` — что нашёл WinPE: `ImageState=…, GeneralizationState=…` (`none` — значения нет,
+`unknown` — WinPE не прочитал куст SOFTWARE; образ тогда не помечается).
 
 Для WinPE и iPXE (без авторизации): `GET /pxe/v1/boot.ipxe`, `/pxe/v1/machines/{mac}/boot.ipxe`,
 `/pxe/v1/winpe/{club-deploy.ps1|winpeshl.ini|clubdeploy.json}`, `/pxe/v1/files/{путь в PxeRoot}`;
 `POST /deploy/v1/start`, `PUT /deploy/v1/jobs/{id}/progress`, `GET /deploy/v1/jobs/{id}/image` (Range),
-`POST /deploy/v1/jobs/{id}/unattend|fail|complete`.
+`POST /deploy/v1/jobs/{id}/unattend|fail|complete`. План (`start`) кроме диска, образа и имени несёт
+`allowNotGeneralized` (из задания) и `bcdbootAddLast` (`Imaging:BcdbootAddLast`: `bcdboot … /addlast`); `unattend`
+принимает `{ existing, generalized, imageState, generalizationState }`, `generalized` не `true` — «не генерализован»
+(`false` помечает образ, `null` — нет).
 
 
 ## Полный бездиск
@@ -157,9 +171,9 @@ pxeArmed, attempts, updatedAt }`, статус `reimaging`, в обзоре `cur
 | `GET /diskless` | Эталон (`currentVersion`, `rollbackVersion`, `imageZvol`), режим мастера (`masterMachineId`, `masterMachineName`, `masterInstall`), версии (`versions`: `version`, `comment`, `createdBy`, `createdAt`), личные диски мест (`seats`: `number`, `machineName`, `kind` seat/master, `target`, `baseVersion`, `state` new/ready/failed, `error`, `boots`, `lastBootAt`), одобренные машины (`machines`: `id`, `number`, `name`, `bootMode`, `online`) |
 | `POST /diskless/versions` `{label, comment}` | Снапшот zvol эталона `@img-<label>` — новая текущая версия, прежняя — откатная. `400 label` — формат `^[a-z0-9][a-z0-9-]{0,39}$`; `409 exists`, `409 noImage` (нет zvol эталона), `409 masterConnected` (ПК мастера подключён к эталону — выключить) |
 | `POST /diskless/rollback` | Текущая и откатная меняются местами; `409 noRollback` |
-| `PUT /diskless/master` `{machineId, install}` | Режим мастера: машина грузится с самого эталона; `install: true` — установщик Windows на эталон (файлы в `Imaging:PxeRoot/winsetup`). `machineId: null` — выключить. `404 noMachine`, `409 notApproved` |
+| `PUT /diskless/master` `{machineId, install}` | Режим мастера: машина грузится с самого эталона; `install: true` — установщик Windows на эталон (файлы в `Imaging:PxeRoot/winsetup`). `machineId: null` — выключить. `404 noMachine`, `409 notApproved`, `409 reimageActive` (взведена перезаливка: PXE отдал бы WinPE) |
 | `POST /machines` `{macAddress, number?, name?, bootMode?}` | Новый ПК по MAC (бездисковый ПК без своей Windows не может зарегистрироваться сам): сразу одобрен, `bootMode` по умолчанию `diskless`, номер — следующий свободный. Первая регистрация помощника с этим MAC (из эталона) попадает в эту запись: HWID и факты — от помощника, номер, имя и режим остаются. `201 {id, number, name}`; `400 format`, `409 macTaken`, `409 numberTaken` |
-| `PUT /machines/{id}/boot-mode` `{mode}` | `local` (с диска ПК) или `diskless` (по сети с личного диска места). `400 mode`, `404 noMachine`, `409 notApproved` |
+| `PUT /machines/{id}/boot-mode` `{mode}` | `local` (с диска ПК) или `diskless` (по сети с личного диска места). `400 mode`, `404 noMachine`, `409 notApproved`, `409 reimageActive` (в `diskless`, пока взведена перезаливка) |
 
 Версии доходят до мест при их следующей загрузке; у работающего места (свежий отчёт помощника и сессия к его диску)
 диск не сбрасывается. В строке машины на «Рабочих станциях» — `bootMode`.

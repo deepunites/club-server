@@ -9,9 +9,14 @@ function global:Log([string]$Text) { $global:Calls.Add($Text) }
 $env:SystemRoot = Join-Path $Root 'X'
 
 function global:Get-CimInstance { param([Parameter(Position = 0)]$ClassName) [pscustomobject]@{ PhysicalAdapter = $true; MACAddress = '02:00:00:00:00:01' } }
+# Офлайн-кусты залитого образа: ImageState — из MOCK_IMAGE_STATE (по умолчанию после sysprep /oobe, 'none' — нет значения).
 function global:Get-ItemProperty {
     [CmdletBinding()] param([Parameter(Position = 0)][string]$Path)
-    if ($Path -like '*ClubOffline*') { return [pscustomobject]@{ GeneralizationState = 7 } }
+    if ($Path -like '*ClubOfflineSOFTWARE*\Setup\State') {
+        $state = $env:MOCK_IMAGE_STATE ?? 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE'
+        return $(if ($state -eq 'none') { $null } else { [pscustomobject]@{ ImageState = $state } })
+    }
+    if ($Path -like '*ClubOfflineSYSTEM*\SysprepStatus') { return [pscustomobject]@{ GeneralizationState = 7 } }
     [pscustomobject]@{ PEFirmwareType = 2 }
 }
 $global:MockDisks = @(
@@ -37,9 +42,25 @@ function global:Resize-Partition { param($DriveLetter, $Size) Log "Resize-Partit
 function global:Get-PartitionSupportedSize { param($DriveLetter) [pscustomobject]@{ SizeMax = 1 } }
 function global:Start-Sleep { param($Seconds) }
 function global:Read-Host { Log 'Read-Host'; '' }
-function global:dism.exe { Log "dism $($args -join ' ')"; $global:LASTEXITCODE = 0 }
-function global:reg.exe { $global:LASTEXITCODE = 0 }
+# MOCK_SYSPREP_UNATTEND — образ «с unattend от sysprep»: dism /Apply-Image кладёт его в Windows\Panther (UTF-8 с BOM).
+function global:dism.exe {
+    Log "dism $($args -join ' ')"
+    $applyDir = $args | Where-Object { $_ -like '/ApplyDir:*' } | ForEach-Object { $_.Substring('/ApplyDir:'.Length) }
+    if ($applyDir -and $env:MOCK_SYSPREP_UNATTEND) {
+        $panther = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath("${applyDir}Windows\Panther")
+        New-Item -ItemType Directory -Force -Path $panther | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $panther 'unattend.xml'), $env:MOCK_SYSPREP_UNATTEND, [System.Text.UTF8Encoding]::new($true))
+    }
+    $global:LASTEXITCODE = 0
+}
+# MOCK_REG_LOAD_FAIL=SOFTWARE — этот куст не загружается (reg load с кодом 1).
+function global:reg.exe {
+    Log "reg $($args[0]) $($args[1])"
+    $fail = $args[0] -eq 'load' -and $env:MOCK_REG_LOAD_FAIL -and $args[1] -like "*\ClubOffline$($env:MOCK_REG_LOAD_FAIL)"
+    $global:LASTEXITCODE = $(if ($fail) { 1 } else { 0 })
+}
 function global:bcdboot.exe { Log "bcdboot $($args -join ' ')"; $global:LASTEXITCODE = [int]($env:MOCK_BCDBOOT_EXIT ?? '0') }
+function global:bcdedit.exe { Log "bcdedit $($args -join ' ')"; 'Firmware Boot Manager'; $global:LASTEXITCODE = [int]($env:MOCK_BCDEDIT_EXIT ?? '0') }
 function global:wpeutil.exe {
     Log "wpeutil $($args -join ' ')"
     $global:Calls | ConvertTo-Json | Set-Content -Path (Join-Path $Root 'calls.json')

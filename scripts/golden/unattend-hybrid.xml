@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Файл ответов sysprep для гибридного образа (Windows на локальном SSD), docs/imaging.md.
+  На эталоне гибрида его передаёт sysprep seal-hybrid.ps1:
+    sysprep /generalize /oobe /shutdown /unattend:unattend-hybrid.xml
+  Sysprep кладёт копию в %WINDIR%\Panther\unattend.xml; при заливке сервер дописывает туда имя ПК (ComputerName в
+  компонент Microsoft-Windows-Shell-Setup прохода specialize, Unattend.cs). Поэтому ComputerName здесь НЕТ.
+
+  Учётные записи не создаются: sysprep /generalize оставляет локальные учётные записи эталона, OOBE пропускается
+  целиком. Эталон ставился без файла ответов (install.cmd из extract-winsetup.sh, OOBE руками, docs/diskless-pilot.md),
+  так что автовхода из файла ответов у него нет. AutoLogon здесь не задаётся: ему нужен пароль открытым текстом, а WIM
+  во время перезаливки скачивается по HTTP без авторизации. Ключа продукта нет.
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+  <!-- Только при заливке через Setup или DISM /Apply-Unattend; sysprep этот проход не выполняет, поэтому тот же запрет
+       ниже ставится и командой в specialize. -->
+  <settings pass="offlineServicing">
+    <component name="Microsoft-Windows-SecureStartup-FilterDriver" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <PreventDeviceEncryption>true</PreventDeviceEncryption>
+    </component>
+  </settings>
+  <settings pass="generalize">
+    <!-- Образ идёт на разные платы (Z490M + I219-V, B450 + Realtek): устройства PC-11 не сохраняются, драйверы ставятся
+         заново из хранилища драйверов при первой загрузке. -->
+    <component name="Microsoft-Windows-PnpSysprep" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <PersistAllDeviceInstalls>false</PersistAllDeviceInstalls>
+    </component>
+  </settings>
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <CopyProfile>false</CopyProfile>
+      <TimeZone>West Asia Standard Time</TimeZone>
+    </component>
+    <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>Prevent automatic device encryption (BitLocker)</Description>
+          <Path>reg.exe add HKLM\SYSTEM\CurrentControlSet\Control\BitLocker /v PreventDeviceEncryption /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+  <settings pass="oobeSystem">
+    <!-- Язык и раскладки как в эталоне (ISO ru-RU): без них OOBE показывает страницы региона и клавиатуры. -->
+    <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <InputLocale>0419:00000419;0409:00000409</InputLocale>
+      <SystemLocale>ru-RU</SystemLocale>
+      <UILanguage>ru-RU</UILanguage>
+      <UserLocale>ru-RU</UserLocale>
+    </component>
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideLocalAccountScreen>true</HideLocalAccountScreen>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+    </component>
+  </settings>
+</unattend>

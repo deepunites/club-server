@@ -22,11 +22,12 @@ public sealed record MachineView(
 /// <summary>
 /// Перезаливка машины (последнее задание, если оно не закрыто или закрыто меньше суток назад). <c>state</c>:
 /// <c>requested</c> → <c>deploying</c> (<c>step</c>: partition, download, verify, apply, identity, bcdboot) →
-/// <c>booting</c> → <c>done</c>; <c>failed</c> (машина остаётся в PXE), <c>cancelled</c>.
+/// <c>booting</c> → <c>done</c>; <c>failed</c> (машина остаётся в PXE), <c>cancelled</c>. <c>allowNotGeneralized</c> —
+/// задание разрешает образ без sysprep (эталонный ПК).
 /// </summary>
 public sealed record ReimageView(
     string State, string Image, string? Step, int? Percent, string? Message, string? Failure, bool DiskTouched, bool PxeArmed,
-    int Attempts, DateTimeOffset UpdatedAt);
+    int Attempts, DateTimeOffset UpdatedAt, bool AllowNotGeneralized);
 
 public sealed record ZoneView(string Id, string Name);
 
@@ -43,7 +44,8 @@ public sealed record MachinesOverview(
     int Online, int Offline, int Pending, int Maintenance, string? CurrentImageVersion = null, int Reimaging = 0,
     MachineFeedView? MachineFeed = null, string? MasterDriveLetter = null);
 
-public sealed record ReimageRequest(string? Image, bool? AllowNewDisk);
+/// <summary><c>allowNotGeneralized</c> — только API (в панели нет): залить образ без sysprep, только этим заданием.</summary>
+public sealed record ReimageRequest(string? Image, bool? AllowNewDisk, bool? AllowNotGeneralized);
 
 public sealed record MachinePatch(int? Number, string? Name, string? Zone, bool? Maintenance);
 
@@ -85,7 +87,8 @@ public static class MachinesPanelEndpoints
 
         panel.MapPost("/machines/{id:guid}/reimage", async (Guid id, ReimageRequest? request, Imaging.ReimageService reimage, CancellationToken ct) =>
         {
-            var job = await reimage.RequestAsync(id, string.IsNullOrWhiteSpace(request?.Image) ? null : request.Image.Trim(), request?.AllowNewDisk ?? false, "panel", ct);
+            var job = await reimage.RequestAsync(id, string.IsNullOrWhiteSpace(request?.Image) ? null : request.Image.Trim(), request?.AllowNewDisk ?? false,
+                request?.AllowNotGeneralized ?? false, "panel", ct);
             return Results.Json(new { state = job.State, jobId = job.Id }, ApiJson.Options, statusCode: StatusCodes.Status202Accepted);
         });
 
@@ -169,7 +172,7 @@ public static class MachinesPanelEndpoints
             m.ImageVersion,
             job is not null && (activeJob || job.FinishedAt is null || now - job.FinishedAt < TimeSpan.FromDays(1))
                 ? new ReimageView(job.State, labels.GetValueOrDefault(job.ImageId, "?"), job.Step, job.Percent, job.Message, job.Failure,
-                    job.DiskTouched, job.PxeArmed, job.Attempts, job.UpdatedAt)
+                    job.DiskTouched, job.PxeArmed, job.Attempts, job.UpdatedAt, job.AllowNotGeneralized)
                 : null,
             Imaging.ReimageService.SecureBoot(m),
             m.MasterState is "mounted" or "mounting" or "failed" ? m.MasterState : null,

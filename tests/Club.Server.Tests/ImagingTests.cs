@@ -382,7 +382,95 @@ public sealed class ImagingTests : IAsyncLifetime
         Assert.Equal("notGeneralized", body.GetProperty("error").GetProperty("details").GetProperty("reason").GetString());
         Assert.False((await ImagesAsync()).GetProperty("images")[0].GetProperty("generalized").GetBoolean());
         Assert.Equal("club-reimage", await KeaClassAsync());
+        var reimage = await ReimageViewAsync();
+        Assert.Equal(("failed", "notGeneralized"), (reimage.GetProperty("state").GetString(), reimage.GetProperty("failure").GetString()));
+        Assert.Equal("ImageState=none, GeneralizationState=none", reimage.GetProperty("message").GetString()); // куст прочитан, значения нет
     }
+
+    [Fact]
+    public async Task Generalization_is_required_unless_this_job_allows_it()
+    {
+        await PrepareAsync();
+        var machine = await MachineAsync();
+        (await Panel().PostAsJsonAsync($"/panel/api/v1/machines/{machine.MachineId}/reimage", new { })).EnsureSuccessStatusCode();
+
+        // WinPE ничего не сообщил о sysprep (куст не прочитан) — «не генерализован»; сам образ при этом не помечается.
+        var (_, plan) = await StartAsync();
+        Assert.Equal((false, false), (plan.GetProperty("allowNotGeneralized").GetBoolean(), plan.GetProperty("bcdbootAddLast").GetBoolean()));
+        var (status, body) = await DeployAsync(HttpMethod.Post, $"/deploy/v1/jobs/{plan.GetProperty("jobId").GetGuid()}/unattend", new { existing = (string?)null });
+        Assert.Equal((HttpStatusCode.Conflict, "notGeneralized"), (status, body.GetProperty("error").GetProperty("details").GetProperty("reason").GetString()));
+        var reimage = await ReimageViewAsync();
+        Assert.Equal(("failed", "notGeneralized"), (reimage.GetProperty("state").GetString(), reimage.GetProperty("failure").GetString()));
+        Assert.Equal("ImageState=unknown, GeneralizationState=none", reimage.GetProperty("message").GetString());
+        Assert.False((await ImagesAsync()).GetProperty("images")[0].TryGetProperty("generalized", out _));
+
+        // Эталонный ПК: явное разрешение на это задание — заливка без sysprep проходит до конца. /addlast — из настройки
+        // сервера (Imaging:BcdbootAddLast).
+        _server.Services.GetRequiredService<ImagingOptions>().BcdbootAddLast = true;
+        (await Panel().PostAsJsonAsync($"/panel/api/v1/machines/{machine.MachineId}/reimage", new { allowNotGeneralized = true })).EnsureSuccessStatusCode();
+        Assert.True((await ReimageViewAsync()).GetProperty("allowNotGeneralized").GetBoolean());
+        (_, plan) = await StartAsync();
+        Assert.Equal((true, true), (plan.GetProperty("allowNotGeneralized").GetBoolean(), plan.GetProperty("bcdbootAddLast").GetBoolean()));
+        var jobBase = $"/deploy/v1/jobs/{plan.GetProperty("jobId").GetGuid()}";
+        (status, body) = await DeployAsync(HttpMethod.Post, $"{jobBase}/unattend", new
+        {
+            existing = (string?)null, generalized = false, imageState = "IMAGE_STATE_COMPLETE", generalizationState = 7,
+        });
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Contains("<ComputerName>PC-01</ComputerName>", body.GetProperty("xml").GetString());
+        Assert.False((await ImagesAsync()).GetProperty("images")[0].GetProperty("generalized").GetBoolean());
+        Assert.Equal(HttpStatusCode.OK, (await DeployAsync(HttpMethod.Post, $"{jobBase}/complete")).Status);
+        Assert.Null(await KeaClassAsync());
+
+        // Образ теперь известен как не генерализованный: задание без разрешения не создаётся вовсе (диск не тронут),
+        // с разрешением — снова можно.
+        var (response, reason) = await PanelPostAsync($"/panel/api/v1/machines/{machine.MachineId}/reimage");
+        Assert.Equal((HttpStatusCode.Conflict, "notGeneralized"), (response, reason));
+        Assert.Equal("booting", (await ReimageViewAsync()).GetProperty("state").GetString()); // прежнее задание
+        Assert.Null(await KeaClassAsync());
+        using var again = await Panel().PostAsJsonAsync($"/panel/api/v1/machines/{machine.MachineId}/reimage", new { allowNotGeneralized = true });
+        Assert.Equal(HttpStatusCode.Accepted, again.StatusCode);
+    }
+
+    [Fact]
+    public async Task Diskless_machine_is_never_reimaged()
+    {
+        await PrepareAsync();
+        var machine = await MachineAsync();
+        var reimagePath = $"/panel/api/v1/machines/{machine.MachineId}/reimage";
+        var bootModePath = $"/panel/api/v1/machines/{machine.MachineId}/boot-mode";
+        (await Panel().PutAsJsonAsync(bootModePath, new { mode = "diskless" })).EnsureSuccessStatusCode();
+
+        var (response, reason) = await PanelPostAsync(reimagePath);
+        Assert.Equal((HttpStatusCode.Conflict, "disklessMachine"), (response, reason));
+        Assert.False((await MachineViewAsync()).TryGetProperty("reimage", out _)); // задание не создано
+
+        // Режим мастера грузит эталон по iSCSI при любом bootMode — тоже отказ.
+        (await Panel().PutAsJsonAsync(bootModePath, new { mode = "local" })).EnsureSuccessStatusCode();
+        (await Panel().PutAsJsonAsync("/panel/api/v1/diskless/master", new { machineId = machine.MachineId, install = false })).EnsureSuccessStatusCode();
+        (response, reason) = await PanelPostAsync(reimagePath);
+        Assert.Equal((HttpStatusCode.Conflict, "disklessMachine"), (response, reason));
+        (await Panel().PutAsJsonAsync("/panel/api/v1/diskless/master", new { machineId = (Guid?)null, install = false })).EnsureSuccessStatusCode();
+
+        (response, _) = await PanelPostAsync(reimagePath);
+        Assert.Equal(HttpStatusCode.Accepted, response);
+
+        // Пока перезаливка взведена, PXE отдаёт WinPE раньше iSCSI: в diskless и в мастера не переключить.
+        Assert.Equal((HttpStatusCode.Conflict, "reimageActive"), await PanelPutAsync(bootModePath, new { mode = "diskless" }));
+        Assert.Equal((HttpStatusCode.Conflict, "reimageActive"), await PanelPutAsync("/panel/api/v1/diskless/master", new { machineId = machine.MachineId, install = false }));
+        Assert.Equal((HttpStatusCode.NoContent, (string?)null), await PanelPutAsync(bootModePath, new { mode = "local" }));
+        Assert.Equal(HttpStatusCode.NoContent, (await Panel().PostAsync($"{reimagePath}/cancel", null)).StatusCode);
+        Assert.Equal((HttpStatusCode.NoContent, (string?)null), await PanelPutAsync(bootModePath, new { mode = "diskless" }));
+    }
+
+    private async Task<(HttpStatusCode, string?)> PanelPutAsync(string path, object body)
+    {
+        using var response = await Panel().PutAsJsonAsync(path, body);
+        var text = await response.Content.ReadAsStringAsync();
+        return (response.StatusCode, response.IsSuccessStatusCode ? null : JsonDocument.Parse(text).RootElement.GetProperty("error").GetProperty("details").GetProperty("reason").GetString());
+    }
+
+    private async Task<JsonElement> ReimageViewAsync() => (await MachineViewAsync()).GetProperty("reimage");
 
     [Fact]
     public async Task Reinstall_needs_a_dhcp_reservation_and_an_image()

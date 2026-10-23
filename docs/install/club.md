@@ -184,7 +184,7 @@
 | Зона | Платы | Что выставить |
 |---|---|---|
 | 1–2 (бездиск) | H410/H510 (Gigabyte, MSI, Colorful), A520 | Boot mode **UEFI** (CSM выкл.); **Network Stack / PXE IPv4 — вкл.**, IPv6 PXE — выкл.; первым в Boot Order — **UEFI: PXE IPv4 (сетевая карта)**; **Secure Boot — выкл.**; Fast Boot — выкл.; Wake on LAN — вкл. (по желанию); энергосбережение сети (ErP/EuP) — выкл. |
-| 3–5 и новые (гибрид) | H510/B560, Z490, B450 | UEFI, **TPM (PTT/fTPM) — вкл.**, **Secure Boot — вкл.** (FACEIT, Valorant); сеть в загрузке — после диска (для перезаливки по PXE включается из панели) |
+| 3–5 и новые (гибрид) | H510/B560, Z490, B450 | UEFI, **TPM (PTT/fTPM) — вкл.**, **Secure Boot — вкл.** (FACEIT, Valorant); порядок загрузки — диск первым, для перезаливки F12 → UEFI IPv4; или сеть первой плюс `Imaging__BcdbootAddLast=true` (docs/imaging.md) |
 
 Где искать: Gigabyte — Settings → IO Ports → Network Stack Configuration; Boot → CSM Support. MSI — Settings →
 Advanced → Integrated Peripherals → Network Stack; Boot → Boot mode select. Colorful — Advanced → Network Stack.

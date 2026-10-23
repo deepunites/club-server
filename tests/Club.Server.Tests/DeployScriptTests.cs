@@ -6,12 +6,14 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Club.TestSupport;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Club.Server.Tests;
 
 /// <summary>
 /// Скрипт заливки WinPE (club-deploy.ps1) в настоящем PowerShell против настоящего HTTP-сервера клуба. Команды Windows —
-/// заглушки (WinPE/harness.ps1). Нужен <c>PWSH</c> (путь к pwsh); без него тест ничего не проверяет.
+/// заглушки (WinPE/harness.ps1). Нужен <c>PWSH</c> (путь к pwsh); без него тесты пропускаются (Skip), а не проходят
+/// впустую.
 /// </summary>
 public sealed class DeployScriptTests : IAsyncLifetime
 {
@@ -21,7 +23,7 @@ public sealed class DeployScriptTests : IAsyncLifetime
     private KeaDatabase _kea = null!;
     private string _baseUrl = "";
 
-    private static string? Pwsh => Environment.GetEnvironmentVariable("PWSH") is { Length: > 0 } p ? p : null;
+    internal static string? Pwsh => Environment.GetEnvironmentVariable("PWSH") is { Length: > 0 } p ? p : null;
 
     public async Task InitializeAsync()
     {
@@ -71,7 +73,7 @@ public sealed class DeployScriptTests : IAsyncLifetime
         return http;
     }
 
-    private async Task<Guid> ArmAsync()
+    private async Task<Guid> ArmAsync(object? request = null)
     {
         var panel = Http(panel: true);
         (await panel.PutAsJsonAsync("/panel/api/v1/network/settings", new
@@ -96,7 +98,7 @@ public sealed class DeployScriptTests : IAsyncLifetime
         }
 
         await Network.NetworkWorker.RunOnceAsync(_server.Services, TimeProvider.System, CancellationToken.None);
-        (await panel.PostAsJsonAsync($"/panel/api/v1/machines/{machine.MachineId}/reimage", new { })).EnsureSuccessStatusCode();
+        (await panel.PostAsJsonAsync($"/panel/api/v1/machines/{machine.MachineId}/reimage", request ?? new { })).EnsureSuccessStatusCode();
         return machine.MachineId;
     }
 
@@ -130,26 +132,34 @@ public sealed class DeployScriptTests : IAsyncLifetime
     private async Task<JsonElement> ReimageAsync() =>
         (await Http(panel: true).GetFromJsonAsync<JsonElement>("/panel/api/v1/machines")).GetProperty("machines")[0].GetProperty("reimage");
 
-    [Fact]
+    private async Task<JsonElement> ImageAsync() =>
+        (await Http(panel: true).GetFromJsonAsync<JsonElement>("/panel/api/v1/images")).GetProperty("images")[0];
+
+    /// <summary>Unattend, который sysprep оставил в Windows\Panther (настройки OOBE эталона).</summary>
+    private const string SysprepUnattend = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <unattend xmlns="urn:schemas-microsoft-com:unattend"><settings pass="oobeSystem"><component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"><UILanguage>ru-RU</UILanguage></component></settings></unattend>
+        """;
+
+    [PwshFact]
     public async Task Script_installs_windows_and_reboots_only_after_the_flag_is_cleared()
     {
-        if (Pwsh is null)
-        {
-            return;
-        }
-
         await ArmAsync();
-        var (exit, output, calls) = await RunScriptAsync();
+        var (exit, output, calls) = await RunScriptAsync(new() { ["MOCK_SYSPREP_UNATTEND"] = SysprepUnattend });
         Assert.True(exit == 0 && !calls.Contains("Read-Host"), output);
 
-        // Стёрт только системный диск; порядок: разметка → dism → bcdboot → перезагрузка.
+        // Стёрт только системный диск; порядок: разметка → dism → bcdboot → (записи прошивки) → перезагрузка.
         Assert.Contains("Clear-Disk 1", calls);
         Assert.DoesNotContain("Clear-Disk 0", calls);
         var dism = Array.FindIndex(calls, c => c.StartsWith("dism /Apply-Image", StringComparison.Ordinal));
         var bcdboot = Array.FindIndex(calls, c => c.StartsWith("bcdboot", StringComparison.Ordinal));
         Assert.True(Array.IndexOf(calls, "Clear-Disk 1") < dism && dism < bcdboot && bcdboot < Array.IndexOf(calls, "wpeutil reboot"), string.Join('\n', calls));
+        Assert.True(Array.IndexOf(calls, "bcdedit /enum firmware") > bcdboot, string.Join('\n', calls));
         Assert.Contains("/Index:1", calls[dism]);
         Assert.Contains("/f UEFI", calls[bcdboot]);
+        Assert.DoesNotContain("/addlast", calls[bcdboot]); // Imaging:BcdbootAddLast по умолчанию выключен
+        Assert.Contains(@"reg load HKLM\ClubOfflineSOFTWARE", calls); // ImageState — из куста SOFTWARE залитой Windows
+        Assert.Contains("ImageState=IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE, GeneralizationState=7", output);
 
         // Образ скачан целиком и совпал; личность записана на «диск Windows».
         var letters = calls.Where(c => c.StartsWith("Set-Partition ", StringComparison.Ordinal)).Select(c => c[^1..]).ToArray();
@@ -157,6 +167,7 @@ public sealed class DeployScriptTests : IAsyncLifetime
         Assert.Equal(await File.ReadAllBytesAsync(ImagingUnitTests.WimFixture), await File.ReadAllBytesAsync(Path.Combine(_root, "run", temp, "install.wim")));
         var unattend = await File.ReadAllTextAsync(Path.Combine(_root, "run", windows, "Windows", "Panther", "unattend.xml"));
         Assert.Contains("<ComputerName>PC-01</ComputerName>", unattend);
+        Assert.Contains("<UILanguage>ru-RU</UILanguage>", unattend); // unattend от sysprep дописан, а не заменён
         var marker = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(_root, "run", windows, "ProgramData", "ClubDiskless", "image.json"))).RootElement;
         Assert.Equal("win11-2609", marker.GetProperty("label").GetString());
         Assert.Contains($"/s {system}:", calls[bcdboot]);
@@ -164,16 +175,64 @@ public sealed class DeployScriptTests : IAsyncLifetime
         var reimage = await ReimageAsync();
         Assert.Equal(("booting", false, 1), (reimage.GetProperty("state").GetString(), reimage.GetProperty("pxeArmed").GetBoolean(), reimage.GetProperty("attempts").GetInt32()));
         Assert.Null((await _kea.HostsAsync()).Single().Classes);
+        Assert.True((await ImageAsync()).GetProperty("generalized").GetBoolean());
     }
 
-    [Fact]
+    [PwshTheory]
+    [InlineData("IMAGE_STATE_COMPLETE")]
+    [InlineData("none")]
+    public async Task Script_refuses_an_image_without_sysprep(string imageState)
+    {
+        await ArmAsync();
+        var (exit, output, calls) = await RunScriptAsync(new() { ["MOCK_IMAGE_STATE"] = imageState });
+        Assert.True(exit == 0, output);
+        Assert.Contains("FAILED at step identity (notGeneralized)", output);
+        Assert.Contains($"ImageState={imageState}, GeneralizationState=7", output);
+        Assert.Contains("Read-Host", calls);
+        Assert.DoesNotContain(calls, c => c.StartsWith("bcdboot", StringComparison.Ordinal));
+
+        var reimage = await ReimageAsync();
+        Assert.Equal(("failed", "notGeneralized", true), (reimage.GetProperty("state").GetString(), reimage.GetProperty("failure").GetString(), reimage.GetProperty("pxeArmed").GetBoolean()));
+        Assert.Equal("club-reimage", (await _kea.HostsAsync()).Single().Classes);
+        Assert.False((await ImageAsync()).GetProperty("generalized").GetBoolean());
+    }
+
+    [PwshFact]
+    public async Task Unreadable_registry_refuses_but_does_not_mark_the_image()
+    {
+        await ArmAsync();
+        var (exit, output, calls) = await RunScriptAsync(new() { ["MOCK_REG_LOAD_FAIL"] = "SOFTWARE" });
+        Assert.True(exit == 0, output);
+        Assert.Contains("FAILED at step identity (notGeneralized)", output);
+        Assert.Contains("ImageState=unreadable, GeneralizationState=7", output);
+        Assert.DoesNotContain(calls, c => c.StartsWith("bcdboot", StringComparison.Ordinal));
+
+        var reimage = await ReimageAsync();
+        Assert.Equal(("failed", "notGeneralized"), (reimage.GetProperty("state").GetString(), reimage.GetProperty("failure").GetString()));
+        Assert.Equal("ImageState=unknown, GeneralizationState=7", reimage.GetProperty("message").GetString());
+        Assert.False((await ImageAsync()).TryGetProperty("generalized", out _)); // разовый сбой reg load не клеймит образ
+    }
+
+    [PwshFact]
+    public async Task Reference_deploy_allows_an_image_without_sysprep_for_its_job_only()
+    {
+        _server.Services.GetRequiredService<Imaging.ImagingOptions>().BcdbootAddLast = true;
+        await ArmAsync(new { allowNotGeneralized = true });
+        var (exit, output, calls) = await RunScriptAsync(new() { ["MOCK_IMAGE_STATE"] = "IMAGE_STATE_COMPLETE", ["MOCK_BCDEDIT_EXIT"] = "1" });
+        Assert.True(exit == 0 && !calls.Contains("Read-Host"), output);
+        Assert.Contains("WARNING: image is not generalized", output);
+        var bcdboot = calls.Single(c => c.StartsWith("bcdboot", StringComparison.Ordinal));
+        Assert.EndsWith("/f UEFI /addlast", bcdboot);
+        Assert.Contains("bcdedit exited with code 1 (ignored)", output); // диагностика заливку не останавливает
+
+        var reimage = await ReimageAsync();
+        Assert.Equal(("booting", true), (reimage.GetProperty("state").GetString(), reimage.GetProperty("allowNotGeneralized").GetBoolean()));
+        Assert.False((await ImageAsync()).GetProperty("generalized").GetBoolean());
+    }
+
+    [PwshFact]
     public async Task Script_failure_is_reported_and_keeps_the_machine_in_pxe()
     {
-        if (Pwsh is null)
-        {
-            return;
-        }
-
         await ArmAsync();
         var (exit, output, calls) = await RunScriptAsync(new() { ["MOCK_BCDBOOT_EXIT"] = "1" });
         Assert.True(exit == 0, output);
@@ -189,5 +248,29 @@ public sealed class DeployScriptTests : IAsyncLifetime
         Assert.True(exit == 0, output);
         reimage = await ReimageAsync();
         Assert.Equal(("booting", 2), (reimage.GetProperty("state").GetString(), reimage.GetProperty("attempts").GetInt32()));
+    }
+}
+
+/// <summary>Тест скрипта WinPE в pwsh: без <c>PWSH</c> — пропущен.</summary>
+public sealed class PwshFactAttribute : FactAttribute
+{
+    public PwshFactAttribute()
+    {
+        if (DeployScriptTests.Pwsh is null)
+        {
+            Skip = "PWSH (path to pwsh 7) is not set";
+        }
+    }
+}
+
+/// <summary>То же для теста с данными.</summary>
+public sealed class PwshTheoryAttribute : TheoryAttribute
+{
+    public PwshTheoryAttribute()
+    {
+        if (DeployScriptTests.Pwsh is null)
+        {
+            Skip = "PWSH (path to pwsh 7) is not set";
+        }
     }
 }

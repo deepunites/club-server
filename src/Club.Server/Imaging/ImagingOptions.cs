@@ -23,6 +23,15 @@ public sealed class ImagingOptions
     /// <summary>Адрес этого сервера для ПК по HTTP (iPXE и WinPE), например <c>http://192.168.77.1:5080</c>.</summary>
     public string PublicBaseUrl { get; set; } = "";
 
+    /// <summary>
+    /// bcdboot в WinPE с <c>/addlast</c>: запись Windows Boot Manager — в конец порядка загрузки прошивки. Задумано для
+    /// ПК с сетевой загрузкой первой: если bcdboot поставит Windows первой, после заливки ПК грузится сразу с диска, и
+    /// следующая перезаливка повиснет в «ждёт загрузки по сети». [ГИПОТЕЗА: WinPE вызывает bcdboot с <c>/s</c>, а с ним,
+    /// по описанию Microsoft, запись в NVRAM не создаётся — тогда ключ ничего не меняет; проверить на стенде,
+    /// docs/imaging.md.]
+    /// </summary>
+    public bool BcdbootAddLast { get; set; }
+
     public bool RunWorker { get; set; } = true;
 
     public int WorkerIntervalSec { get; set; } = 5;

@@ -134,20 +134,41 @@ function Save-Image([string]$Url, [string]$Path, [long]$Size) {
     $client.Dispose()
 }
 
-# Генерализован ли образ: SysprepStatus\GeneralizationState = 7 после sysprep /generalize.
-# [ГИПОТЕЗА: значение 7 — по опыту развёртываний, проверить на стенде на образе до и после sysprep.]
-function Test-Generalized([string]$WindowsDrive) {
-    $hive = "${WindowsDrive}:\Windows\System32\config\SYSTEM"
-    & reg.exe load 'HKLM\ClubOffline' $hive | Out-Null
-    if ($LASTEXITCODE -ne 0) { return $null }
+# Значение из куста реестра (SOFTWARE, SYSTEM) залитой Windows. Loaded — куст загрузился; Value — значение или null.
+function Get-OfflineValue([string]$WindowsDrive, [string]$Hive, [string]$Key, [string]$Name) {
+    $mount = "ClubOffline$Hive"
+    & reg.exe load "HKLM\$mount" "${WindowsDrive}:\Windows\System32\config\$Hive" | Out-Null
+    if ($LASTEXITCODE -ne 0) { return [pscustomobject]@{ Loaded = $false; Value = $null } }
     try {
-        $state = (Get-ItemProperty -Path 'HKLM:\ClubOffline\Setup\Status\SysprepStatus' -ErrorAction SilentlyContinue).GeneralizationState
-        if ($null -eq $state) { return $null }
-        return [int]$state -eq 7
+        return [pscustomobject]@{ Loaded = $true; Value = (Get-ItemProperty -Path "HKLM:\$mount\$Key" -ErrorAction SilentlyContinue).$Name }
     }
     finally {
         [GC]::Collect(); [GC]::WaitForPendingFinalizers()
-        & reg.exe unload 'HKLM\ClubOffline' | Out-Null
+        & reg.exe unload "HKLM\$mount" | Out-Null
+    }
+}
+
+# Для экрана и сообщения: unreadable — куст не загрузился, none — значения нет.
+function Format-OfflineValue($Read, $Value) {
+    if (-not $Read.Loaded) { 'unreadable' } elseif ($null -eq $Value) { 'none' } else { [string]$Value }
+}
+
+# Генерализован ли образ: после sysprep /generalize /oobe в SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State
+# ImageState = IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE. Другое значение или нет значения — не генерализован (false,
+# сервер помечает образ). Куст SOFTWARE не загрузился — ответа нет (null): сервер тоже откажет, но образ не пометит,
+# чтобы разовый сбой reg load не заклеймил хороший образ. SYSTEM\Setup\Status\SysprepStatus\GeneralizationState —
+# только для диагностики (на экран и серверу).
+function Test-Generalized([string]$WindowsDrive) {
+    $software = Get-OfflineValue $WindowsDrive 'SOFTWARE' 'Microsoft\Windows\CurrentVersion\Setup\State' 'ImageState'
+    $system = Get-OfflineValue $WindowsDrive 'SYSTEM' 'Setup\Status\SysprepStatus' 'GeneralizationState'
+    $imageState = if ($null -ne $software.Value) { [string]$software.Value } else { $null }
+    $generalizationState = if ($null -ne $system.Value) { $system.Value -as [int] } else { $null }
+    $generalized = if ($software.Loaded) { $imageState -eq 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE' } else { $null }
+    [pscustomobject]@{
+        Generalized = $generalized
+        ImageState = $imageState
+        GeneralizationState = $generalizationState
+        Text = 'ImageState={0}, GeneralizationState={1}' -f (Format-OfflineValue $software $imageState), (Format-OfflineValue $system $generalizationState)
     }
 }
 
@@ -208,18 +229,40 @@ try {
     Resize-Partition -DriveLetter $W -Size (Get-PartitionSupportedSize -DriveLetter $W).SizeMax
 
     # 5. Личность: имя компьютера в unattend (поверх unattend от sysprep), метка версии образа для помощника.
+    # Образ без sysprep: отказывает сервер (кроме задания с allowNotGeneralized), проверка здесь — второй рубеж.
     Report 'identity'
+    $sysprep = Test-Generalized $W
+    Say "Sysprep check: $($sysprep.Text)"
     $unattendPath = "${W}:\Windows\Panther\unattend.xml"
-    $existing = if (Test-Path $unattendPath) { Get-Content -Raw -Path $unattendPath -Encoding UTF8 } else { $null }
-    $identity = Invoke-Api POST "$script:JobBase/unattend" @{ existing = $existing; generalized = (Test-Generalized $W) }
+    # Не Get-Content: в PowerShell 5.1 (WinPE) его строка несёт PSPath и др., и ConvertTo-Json шлёт объект вместо
+    # строки (сервер ответил бы 400). ReadAllText сам видит BOM (UTF-8 и UTF-16).
+    $existing = if (Test-Path $unattendPath) { [System.IO.File]::ReadAllText((ProviderPath $unattendPath), [System.Text.Encoding]::UTF8) } else { $null }
+    $identity = Invoke-Api POST "$script:JobBase/unattend" @{
+        existing = $existing; generalized = $sysprep.Generalized; imageState = $sysprep.ImageState; generalizationState = $sysprep.GeneralizationState
+    }
+    if (-not $sysprep.Generalized) {
+        if (-not $plan.allowNotGeneralized) { throw [DeployError]::new('notGeneralized', "Image is not generalized with sysprep ($($sysprep.Text))") }
+        Say "WARNING: image is not generalized ($($sysprep.Text)); allowed for this job only (reference PC)"
+    }
     New-Item -ItemType Directory -Force -Path "${W}:\Windows\Panther" | Out-Null
     [System.IO.File]::WriteAllText((ProviderPath $unattendPath), [string]$identity.xml, (New-Object System.Text.UTF8Encoding($false)))
     New-Item -ItemType Directory -Force -Path "${W}:\ProgramData\ClubDiskless" | Out-Null
     [System.IO.File]::WriteAllText((ProviderPath "${W}:\ProgramData\ClubDiskless\image.json"), [string]$plan.marker, (New-Object System.Text.UTF8Encoding($false)))
 
-    # 6. Загрузчик. Только после него сервер снимает PXE-флаг.
+    # 6. Загрузчик. Только после него сервер снимает PXE-флаг. /addlast (Imaging:BcdbootAddLast) — Windows Boot
+    # Manager в конец порядка загрузки прошивки, чтобы сеть осталась первой. [ГИПОТЕЗА: меняет ли bcdboot с /s записи
+    # прошивки вообще — не проверено (docs/imaging.md), поэтому ниже они выводятся на экран.]
     Report 'bcdboot'
-    Invoke-Tool 'bcdboot.exe' @("${W}:\Windows", '/s', "${S}:", '/f', 'UEFI') 'bcdboot'
+    $bcdboot = @("${W}:\Windows", '/s', "${S}:", '/f', 'UEFI')
+    if ($plan.bcdbootAddLast) { $bcdboot += '/addlast' }
+    Invoke-Tool 'bcdboot.exe' $bcdboot 'bcdboot'
+    # Только диагностика: записи загрузки прошивки после bcdboot. Сбой bcdedit заливку не останавливает.
+    try {
+        Say 'Firmware boot entries after bcdboot (bcdedit /enum firmware):'
+        & bcdedit.exe /enum firmware | ForEach-Object { Write-Host "  $_" }
+        if ($LASTEXITCODE -ne 0) { Say "bcdedit exited with code $LASTEXITCODE (ignored)" }
+    }
+    catch { Say "bcdedit /enum firmware failed (ignored): $($_.Exception.Message)" }
 
     # 7. Сервер снимает флаг и убирает класс из Kea; перезагружаемся только после его «да».
     Invoke-Api POST "$script:JobBase/complete" -Tries 100000 | Out-Null

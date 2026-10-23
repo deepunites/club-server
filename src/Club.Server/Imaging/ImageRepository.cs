@@ -42,6 +42,8 @@ public sealed class ReimageJob
     public bool PxeArmed { get; init; }
     public bool DiskTouched { get; init; }
     public bool AllowNewDisk { get; init; }
+    /// <summary>Залить и негенерализованный образ (эталонный ПК гибрида) — только этим заданием.</summary>
+    public bool AllowNotGeneralized { get; init; }
     public string? Step { get; init; }
     public short? Percent { get; init; }
     public string? Message { get; init; }
@@ -67,9 +69,9 @@ public sealed class ImageRepository(NpgsqlDataSource db)
 
     private const string JobColumns = """
         id, machine_id AS MachineId, image_id AS ImageId, state, pxe_armed AS PxeArmed, disk_touched AS DiskTouched,
-        allow_new_disk AS AllowNewDisk, step, percent, message, failure, target_disk::text AS TargetDiskJson, attempts,
-        requested_by AS RequestedBy, created_at AS CreatedAt, updated_at AS UpdatedAt, bcdboot_at AS BcdbootAt,
-        finished_at AS FinishedAt
+        allow_new_disk AS AllowNewDisk, allow_not_generalized AS AllowNotGeneralized, step, percent, message, failure,
+        target_disk::text AS TargetDiskJson, attempts, requested_by AS RequestedBy, created_at AS CreatedAt,
+        updated_at AS UpdatedAt, bcdboot_at AS BcdbootAt, finished_at AS FinishedAt
         """;
 
     static ImageRepository() => DapperSetup.Ensure();
@@ -233,7 +235,7 @@ public sealed class ImageRepository(NpgsqlDataSource db)
     /// чтобы залить другой версией). Признак «диск тронут» наследуется от упавшего: иначе отмена нового задания сняла
     /// бы PXE-флаг с машины, у которой уже нет загрузчика.
     /// </summary>
-    public async Task<ReimageJob?> CreateJobAsync(Guid machineId, Guid imageId, bool allowNewDisk, string? requestedBy, DateTimeOffset now)
+    public async Task<ReimageJob?> CreateJobAsync(Guid machineId, Guid imageId, bool allowNewDisk, bool allowNotGeneralized, string? requestedBy, DateTimeOffset now)
     {
         await using var c = await db.OpenConnectionAsync();
         await using var tx = await c.BeginTransactionAsync();
@@ -252,10 +254,10 @@ public sealed class ImageRepository(NpgsqlDataSource db)
         {
             await c.ExecuteAsync(
                 """
-                INSERT INTO reimage_jobs (id, machine_id, image_id, state, pxe_armed, disk_touched, allow_new_disk, requested_by, created_at, updated_at)
-                VALUES (@id, @machineId, @imageId, 'requested', true, @diskTouched, @allowNewDisk, @requestedBy, @now, @now)
+                INSERT INTO reimage_jobs (id, machine_id, image_id, state, pxe_armed, disk_touched, allow_new_disk, allow_not_generalized, requested_by, created_at, updated_at)
+                VALUES (@id, @machineId, @imageId, 'requested', true, @diskTouched, @allowNewDisk, @allowNotGeneralized, @requestedBy, @now, @now)
                 """,
-                new { id, machineId, imageId, diskTouched, allowNewDisk, requestedBy, now }, tx);
+                new { id, machineId, imageId, diskTouched, allowNewDisk, allowNotGeneralized, requestedBy, now }, tx);
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
         {
