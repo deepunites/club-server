@@ -335,6 +335,7 @@ sudo apt install python3-hivex        # один раз; wimtools, ntfs-3g, open
 tmux                                  # снятие идёт долго, обрыв ssh не должен оставить его без присмотра
 sudo python3 ~/scripts/server/make-hybrid-ref.py v2-2026-10-22    # → incoming/ref-v2-2026-10-22.wim (--label — другая метка)
 sudo python3 ~/scripts/server/make-hybrid-ref.py --cleanup v2-2026-10-22   # только убрать остатки прерванного запуска
+sudo python3 ~/scripts/server/test-wof.py -v   # тесты шага WOF (без TrueNAS; на VM — с компрессорами libwim)
 ```
 
 `--cleanup` убирает временное в TrueNAS и на VM и недописанный `incoming/<метка>.wim.partial` (версия или `--label` —
@@ -350,13 +351,27 @@ sudo python3 ~/scripts/server/make-hybrid-ref.py --cleanup v2-2026-10-22   # т�
    На VM диск сразу переводится в read-only (`blockdev --setro`).
 2. Вход по iSCSI: запись узла только для этого таргета; discovery без записи в базу узлов, чтобы не задеть том
    образов. Раздел Windows — NTFS с `Windows\System32\config\SYSTEM` (проба ntfs-3g только на чтение). Его куст SYSTEM
-   проверяется сразу, до снятия: чистый (см. п. 4), в наборе `Select\Current` есть `storahci`, `stornvme`, `MSiSCSI`.
-3. `wimlib-imagex capture` прямо с раздела (режим NTFS-3G: ACL, потоки, точки повторной обработки, короткие имена),
+   проверяется сразу, до снятия: чистый (см. п. 5), в наборе `Select\Current` есть `storahci`, `stornvme`, `MSiSCSI`.
+3. Файлы со «сжатием системы» (WOF, `compact /CompactOS`: точка повторной обработки 0x80000017, провайдер FILE —
+   `servicing\Packages`, `CatRoot`, `WinSxS\Catalogs`, Defender, `WindowsApps`, Chrome…) становятся обычными файлами
+   **на клоне**. Снятие в режиме NTFS-3G хранит их как есть (точка + поток `WofCompressedData`, данных нет), и DISM на
+   таком WIM падает на 1 % с «Error: 1 Incorrect function» (PC-11, 2026-10-23). Только на этот шаг диск делается
+   доступным на запись (`blockdev --setrw`; клон одноразовый, эталон и его снимок не трогаются), раздел монтируется
+   ntfs-3g на запись (`norecover,noatime,streams_interface=windows`; тайм-ауты FUSE через `-o` ntfs-3g не передаёт,
+   поэтому первый `lstat` файла после снятия точки может дать EIO — он повторяется). Обход всего тома: у каждой
+   записи читается точка повторной обработки; провайдер WIM (WIMBoot) или непонятные данные — отказ до первого
+   изменения. Каждый файл (жёсткие ссылки — один раз): точка снимается, поток разжимается libwim через ctypes
+   (XPRESS4K/8K/16K, LZX — форматы WIM), пишется в сам файл, поток удаляется; атрибуты и время (создание, запись,
+   доступ) возвращаются, дескриптор безопасности не трогается и сверяется. Затем диск снова read-only, свежий
+   монтаж только на чтение: ни одной WOF, размеры и sha256 совпадают. В лог — sha256 нескольких файлов (по одному на
+   формат) для сверки с `Get-FileHash` на месте с этой версией. Любой сбой — клон уничтожается обычной очисткой.
+4. `wimlib-imagex capture` прямо с раздела (режим NTFS-3G: ACL, потоки, точки повторной обработки, короткие имена),
    LZX, таблица целостности. Исключения — как у DISM (pagefile, hiberfil, System Volume Information…) и файлы помощника
-   `credentials.bin*`, `assignment.json*`. Сразу после — выход из iSCSI и удаление всего временного в TrueNAS. Не
+   `credentials.bin*`, `assignment.json*`. Затем `wimlib-imagex dir --detailed`: в WIM нет ни тега 0x80000017, ни
+   потока `WofCompressedData` — иначе отказ. Сразу после — выход из iSCSI и удаление всего временного в TrueNAS. Не
    удалось (например, сорвался reload SCST и zvol занят) — только предупреждение: WIM доделывается, удаление
    повторяется в конце.
-4. Реестр внутри WIM (куст SYSTEM, набор из `Select\Current`, hivex):
+5. Реестр внутри WIM (куст SYSTEM, набор из `Select\Current`, hivex):
    - `storahci`, `stornvme`: Start=0, подключ `StartOverride` удалён (иначе 0x7B на AHCI/NVMe);
    - службы, которым подготовка бездиска поставила загрузку при старте (`iScsiPrt`, `e1dexpress`, `rt640x64` и др. —
      `install.cmd` из `extract-winsetup.sh`, `prepare-golden.ps1`; плюс драйверы всех сетевых карт PCI, которые видел
@@ -364,7 +379,7 @@ sudo python3 ~/scripts/server/make-hybrid-ref.py --cleanup v2-2026-10-22   # т�
    - `MSiSCSI`: автоматически (её ждёт помощник для G:).
 
    Куст с неприменённым журналом (`SYSTEM.LOG1/LOG2`) — отказ: снимок сделан не после чистого выключения.
-5. `wimlib-imagex verify`, `.wim.partial` → `.wim`, размер и sha256. Лог — `/var/log/make-hybrid-ref.log`.
+6. `wimlib-imagex verify`, `.wim.partial` → `.wim`, размер и sha256. Лог — `/var/log/make-hybrid-ref.log`.
 
 Сбой, Ctrl+C, обрыв ssh — та же очистка (всё ищется по имени), `.wim.partial` удаляется; остаётся только проверенный,
 если имя `<метка>.wim` за это время заняли (переименовать его вручную в другую метку). Повторный запуск сначала
@@ -376,10 +391,17 @@ sudo python3 ~/scripts/server/make-hybrid-ref.py --cleanup v2-2026-10-22   # т�
 версию «без sysprep», публикация — отказ `imageNotGeneralized`. Залить им только эталонный ПК — запрос с
 `image: "<метка>"` и `allowNotGeneralized: true` («Личность машины» выше).
 
+Проверка разжатия без TrueNAS, на одном образце (root не нужен): `python3 make-hybrid-ref.py --selftest-wof <точка>
+<поток> <размер> [--out файл]` печатает формат, число блоков и sha256. Образец берётся с любого NTFS с такими файлами
+без монтирования: `ntfscat -a 0xC0 <раздел> <путь> | xxd -p` (точка), `ntfscat -a 0x80 -n WofCompressedData <раздел>
+<путь> > поток`, `ntfscat <раздел> <путь> | wc -c` (размер).
+
 [ГИПОТЕЗЫ — проверить первым запуском: время снятия (порядок 30–60 мин) и нагрузка на пул ssd, с которого работают
-места, — запускать, когда клуб не загружен; размер WIM. Заменённый `SYSTEM` хранится в WIM без своего дескриптора
-безопасности: DISM даст ему ACL, унаследованный от `config` (на PC-11 сверить `icacls C:\Windows\System32\config\SYSTEM`
-с соседними кустами).]
+места, — запускать, когда клуб не загружен; размер WIM. Шаг WOF: время (два обхода тома и запись нескольких ГБ),
+сколько места клон займёт в пуле (разжатые данные пишутся в него), sha256 из лога = `Get-FileHash` на месте;
+после заливки PC-11 — `sfc /verifyonly`. Сжатие на PC-11 при желании вернуть: `compact /CompactOS:always`.
+Заменённый `SYSTEM` хранится в WIM без своего дескриптора безопасности: DISM даст ему ACL, унаследованный от `config`
+(на PC-11 сверить `icacls C:\Windows\System32\config\SYSTEM` с соседними кустами).]
 
 ## Снятие гибридного образа с эталонного ПК (capture-hybrid.cmd)
 

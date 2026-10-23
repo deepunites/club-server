@@ -13,19 +13,35 @@
 #      <image zvol parent>/hybrid-ref-tmp of <Diskless__ImageZvol>@img-<version>, an initiator group with only this
 #      VM's IQN, a writable extent, a target without CHAP, LUN 0, then a SendTargets check from here;
 #   2. iscsiadm login (a node record for this one target only), the disk set read-only, the Windows NTFS partition
-#      found by a read-only ntfs-3g probe; its SYSTEM hive is checked already here (clean, the services of step 4);
-#   3. wimlib-imagex capture straight from the partition (NTFS-3G mode: ACLs, named streams, reparse points, short
-#      names) into <Imaging__Root>/incoming/<label>.wim.partial; logout, everything created in TrueNAS removed (if
-#      that fails, only a warning: the WIM is finished and the removal tried again at the end);
-#   4. the SYSTEM hive extracted from the WIM and edited with hivex in the Select\Current control set: storahci and
+#      found by a read-only ntfs-3g probe; its SYSTEM hive is checked already here (clean, the services of step 5);
+#   3. the system-compressed files (WOF, compact /CompactOS: reparse tag 0x80000017, provider FILE) made plain files
+#      on the clone. The NTFS-3G capture would store them raw (reparse point + WofCompressedData stream, no data), and
+#      DISM cannot apply that ("Error: 1 Incorrect function" at 1 %, PC-11 2026-10-23). The disk is writable for this
+#      step only: an ntfs-3g read-write mount, every entry's reparse point read; each WofCompressedData stream
+#      decompressed with libwim (ctypes: WOF's XPRESS/LZX are the WIM codecs), written as the file's data, the reparse
+#      point and the stream removed, attributes and times put back, the security descriptor untouched. Then the disk is
+#      read-only again and a fresh read-only mount is checked (no WOF left, sizes, sha256). A WIMBoot pointer (provider
+#      WIM) or any unexpected WOF data fails the run before the first change;
+#   4. wimlib-imagex capture straight from the partition (NTFS-3G mode: ACLs, named streams, reparse points, short
+#      names) into <Imaging__Root>/incoming/<label>.wim.partial, checked for WOF reparse tags and streams
+#      (wimlib-imagex dir --detailed); logout, everything created in TrueNAS removed (if that fails, only a warning:
+#      the WIM is finished and the removal tried again at the end);
+#   5. the SYSTEM hive extracted from the WIM and edited with hivex in the Select\Current control set: storahci and
 #      stornvme boot-start without StartOverride; the NIC/iSCSI services the diskless preparation made boot-start
 #      (Start=0, BootFlags=1: install.cmd of extract-winsetup.sh, prepare-golden.ps1) back to Start=3 without
 #      BootFlags; MSiSCSI automatic. Put back with wimlib-imagex update, together with the removal of the helper's
 #      per-machine state files (credentials.bin*, assignment.json*) should any be there;
-#   5. wimlib-imagex verify, rename to <label>.wim (the panel lists only top-level *.wim), size and sha256.
+#   6. wimlib-imagex verify, rename to <label>.wim (the panel lists only top-level *.wim), size and sha256.
 # A failure deletes the .partial, except a verified one whose final name was taken meanwhile.
-# Needs: wimtools, ntfs-3g, open-iscsi, python3-websocket, python3-hivex.
+# Offline check of the WOF decoder on one sample (no root, no TrueNAS; unit tests: scripts/server/test-wof.py):
+#   python3 make-hybrid-ref.py --selftest-wof <reparse data: hex or a file> <WofCompressedData file> <size> [--out <file>]
+# Needs: wimtools (with its libwim15t64), ntfs-3g, open-iscsi, python3-websocket, python3-hivex.
 import argparse
+import collections
+import contextlib
+import ctypes
+import ctypes.util
+import errno
 import fcntl
 import glob
 import hashlib
@@ -36,6 +52,7 @@ import re
 import shutil
 import signal
 import ssl
+import stat
 import struct
 import subprocess
 import sys
@@ -82,6 +99,24 @@ STORAGE_SERVICES = ("storahci", "stornvme")
 # prepare-golden.ps1 (iScsiPrt and the boot NIC's driver, whatever its name: the drivers of all PCI network cards the
 # image has seen are added at run time).
 BOOT_START_SERVICES = ("iScsiPrt", "rt640x64", "rtcx21x64", "e1dexpress", "e1iexpress", "e2fexpress")
+# WOF "system compression", provider FILE (ntfs-3g-system-compression, wimlib include/wimlib/wof.h, Linux fs/ntfs3):
+# reparse data {tag, length 16, 0} {WOF version 1, provider} {provider version 1, format}; the unnamed $DATA is sparse
+# with the real size; WofCompressedData = a table of chunk count - 1 offsets (u32, u64 above 4 GiB - 1) counted from the
+# end of the table, then the chunks, each compressed on its own, stored as is when that would not make it smaller.
+WOF_TAG = 0x80000017                               # IO_REPARSE_TAG_WOF
+WOF_PROVIDER_WIM, WOF_PROVIDER_FILE = 1, 2         # WIM = WIMBoot pointer files: no data of their own in the volume
+WOF_FORMATS = {0: ("XPRESS4K", 4096), 1: ("LZX", 32768), 2: ("XPRESS8K", 8192), 3: ("XPRESS16K", 16384)}  # chunk size
+WOF_STREAM = "WofCompressedData"
+REPARSE_XATTR = "system.ntfs_reparse_data"         # ntfs-3g: the whole $REPARSE_POINT attribute, header included
+FILE_ATTR_NORMAL, FILE_ATTR_SPARSE, FILE_ATTR_REPARSE = 0x80, 0x200, 0x400
+FILE_ATTR_SETTABLE = 0x1 | 0x2 | 0x4 | 0x20 | 0x100 | 0x1000 | 0x2000  # R H S A T O NCI: what system.ntfs_attrib sets
+# ntfs-3g read-write mount of the clone: norecover (an unclean NTFS journal fails instead of being reset; a hibernated
+# Windows is refused read-write, see ntfs_mounted), noatime (reading must not change the access times the WIM keeps),
+# streams_interface=windows (file:stream paths; the xattr interface refuses the streams of a reparse point). No FUSE
+# timeouts: ntfs-3g hands options it does not know only to fuse_mount(), which drops attr_timeout/entry_timeout; its
+# own are attr_timeout=0 read-write, entry_timeout the default 1 s (the stale inode this leaves: lstat_new_type).
+NTFS_RW = "rw,norecover,noatime,nodev,nosuid,noexec,streams_interface=windows"
+NTFS_CHECK = "ro,nodev,nosuid,noexec,streams_interface=windows"
 
 
 class Failure(Exception):
@@ -273,7 +308,8 @@ def ensure(create, query, what):
 def expose(tn, cfg):
     """Clone and iSCSI objects, in the server's order for a seat disk (SeatDisks.ExposeAsync), but without CHAP: the
     initiator group admits only this VM. Writable extent on purpose: on TrueNAS 25.10 a read-only device breaks the
-    `scstadmin -force` reloads (TargetVerifier.cs); the clone is disposable, and this host only reads it."""
+    `scstadmin -force` reloads (TargetVerifier.cs); the clone is disposable, and this host writes to it only in the
+    WOF step (decompress_wof)."""
     if get_snapshot(tn, cfg.snapshot) is None:
         rows = tn.call("pool.snapshot.query", [["id", "^", f"{cfg.image_zvol}@{SNAPSHOT_PREFIX}"]])
         known = ", ".join(sorted(r["id"].split("@", 1)[1][len(SNAPSHOT_PREFIX):] for r in rows)) or "none"
@@ -425,7 +461,9 @@ def login(cfg):
             raise Failure(f"no block device for {cfg.iqn} after login (/dev/disk/by-path/…-iscsi-{cfg.iqn}-lun-0)")
         run(["udevadm", "settle"], check=False)
         time.sleep(1)
-    run(["blockdev", "--setro", disk])  # partitions follow the disk's flag; nothing on this host may write to the clone
+    # Partitions follow the disk's flag. Nothing on this host writes to the clone, except decompress_wof, which lifts
+    # the flag for its own read-write mount only.
+    run(["blockdev", "--setro", disk])
     size = int(run(["blockdev", "--getsize64", disk])[1].strip())
     log(f"disk {disk}: {size / GIB:.1f} GiB, read-only")
     return disk
@@ -481,6 +519,471 @@ def find_windows(disk, workdir):
     _, name, used, hive = max(found)
     check_hive(hive)
     return name, used
+
+
+# ---- system-compressed (WOF) files ----------------------------------------------------------------------------------
+
+class Libwim:
+    """
+    libwim.so.15 (wimtools' library) through ctypes. WOF's XPRESS and LZX are the WIM formats (ntfs-3g-system-compression
+    and Linux ntfs3 decompress them with wimlib's code). One decompressor per WOF format, made for exactly its chunk
+    size: LZX's window (32 KiB) decides the number of main-tree symbols.
+    """
+    XPRESS, LZX = 1, 2  # enum wimlib_compression_type
+
+    def __init__(self):
+        self.lib = None
+        for name in ("libwim.so.15", ctypes.util.find_library("wim")):
+            try:
+                self.lib = ctypes.CDLL(name) if name else None
+            except OSError:
+                continue
+            if self.lib:
+                break
+        if self.lib is None:
+            raise Failure("libwim.so.15 (sudo apt install libwim15t64; wimtools depends on it)")
+        self.lib.wimlib_create_decompressor.argtypes = [ctypes.c_int, ctypes.c_size_t, ctypes.POINTER(ctypes.c_void_p)]
+        self.lib.wimlib_create_decompressor.restype = ctypes.c_int
+        self.lib.wimlib_decompress.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
+        self.lib.wimlib_decompress.restype = ctypes.c_int
+        self._decompressors = {}
+        self._out = ctypes.create_string_buffer(max(chunk for _, chunk in WOF_FORMATS.values()))
+
+    def decompress(self, fmt, data, size):
+        """One chunk of WOF format fmt; exactly size bytes or Failure."""
+        name, chunk = WOF_FORMATS[fmt]
+        handle = self._decompressors.get(fmt)
+        if handle is None:
+            handle = ctypes.c_void_p()
+            rc = self.lib.wimlib_create_decompressor(self.LZX if name == "LZX" else self.XPRESS, chunk, ctypes.byref(handle))
+            if rc:
+                raise Failure(f"wimlib_create_decompressor({name}, {chunk}) returned {rc}")
+            self._decompressors[fmt] = handle
+        if self.lib.wimlib_decompress(data, len(data), self._out, size, handle):
+            raise Failure(f"{len(data)} bytes of {name} data do not decompress to {size} bytes")
+        return ctypes.string_at(self._out, size)
+
+
+def parse_wof_reparse(data):
+    """The format of a WOF reparse point (24 bytes: the whole attribute, as system.ntfs_reparse_data returns it)."""
+    if len(data) < 16 or struct.unpack_from("<I", data)[0] != WOF_TAG:
+        raise Failure(f"not a WOF reparse point: {data[:24].hex()}")
+    length, version, provider = struct.unpack_from("<H2xII", data, 4)
+    if provider == WOF_PROVIDER_WIM:
+        raise Failure("WOF provider WIM: a WIMBoot pointer file, its data is in a WIM outside the volume")
+    if version != 1 or provider != WOF_PROVIDER_FILE or length != 16 or len(data) != 24:
+        raise Failure(f"unknown WOF reparse data (version {version}, provider {provider}, {len(data)} bytes): {data.hex()}")
+    file_version, fmt = struct.unpack_from("<II", data, 16)
+    if file_version != 1 or fmt not in WOF_FORMATS:
+        raise Failure(f"unknown WOF FILE provider data (version {file_version}, format {fmt})")
+    return fmt
+
+
+def wof_layout(size, fmt):
+    """(chunk size, chunk count, offset width, table length) of the WofCompressedData of a size-byte file."""
+    chunk = WOF_FORMATS[fmt][1]
+    count = -(-size // chunk)
+    width = 4 if size <= 0xFFFFFFFF else 8
+    return chunk, count, width, max(count - 1, 0) * width
+
+
+def wof_chunks(size, fmt, csize, table):
+    """[(stored size, size)] of every chunk, from the offsets table; Failure if they do not fit csize exactly."""
+    chunk, count, width, table_len = wof_layout(size, fmt)
+    if csize < table_len or len(table) != table_len:
+        raise Failure(f"{WOF_STREAM} has {csize} bytes, less than its table of {count - 1} offsets for {size} bytes")
+    if not count:
+        if csize:
+            raise Failure(f"{WOF_STREAM} has {csize} bytes for an empty file")
+        return []
+    starts = [0, *struct.unpack(f"<{count - 1}{'I' if width == 4 else 'Q'}", table)]
+    ends = starts[1:] + [csize - table_len]
+    chunks = []
+    for i, (start, end) in enumerate(zip(starts, ends)):
+        expected = chunk if i < count - 1 else size - chunk * (count - 1)
+        if not 0 < end - start <= expected:  # also catches offsets that do not increase or run past the stream
+            raise Failure(f"{WOF_STREAM} chunk {i} of {count}: stored size {end - start} for {expected} bytes")
+        chunks.append((end - start, expected))
+    return chunks
+
+
+def read_exact(f, length):
+    data = f.read(length)
+    if len(data) != length:
+        raise Failure(f"{WOF_STREAM} ends early ({len(data)} of {length} bytes read)")
+    return data
+
+
+def wof_decode(src, size, fmt, csize, out, decompress):
+    """
+    The data of a WOF file: its WofCompressedData read from src (from the start, csize bytes), written to out.
+    decompress(fmt, data, size) does one chunk. Returns (sha256 hex, chunk count, chunks stored as they are).
+    """
+    table_len = wof_layout(size, fmt)[3]
+    chunks = wof_chunks(size, fmt, csize, read_exact(src, table_len))
+    digest, stored_raw = hashlib.sha256(), 0
+    for i, (stored, expected) in enumerate(chunks):
+        data = read_exact(src, stored)
+        if stored == expected:
+            stored_raw += 1  # incompressible: kept as it is
+        else:
+            try:
+                data = decompress(fmt, data, expected)
+            except Failure as error:
+                raise Failure(f"chunk {i} of {len(chunks)}: {error}") from None
+            if len(data) != expected:
+                raise Failure(f"chunk {i} of {len(chunks)}: {len(data)} bytes instead of {expected}")
+        digest.update(data)
+        out.write(data)
+    if src.read(1):
+        raise Failure(f"{WOF_STREAM} is longer than its {csize} bytes")
+    return digest.hexdigest(), len(chunks), stored_raw
+
+
+def xattr(path, name):
+    return os.getxattr(path, name, follow_symlinks=False)  # ntfs-3g shows a WOF file as a symlink: never followed
+
+
+def ntfs_attrib(path):
+    return struct.unpack("=I", xattr(path, "system.ntfs_attrib"))[0]  # CPU byte order
+
+
+def wof_scan(root):
+    """
+    Every inode with a WOF reparse point under root (an ntfs-3g mount): {inode: entry (path relative to root, format,
+    WofCompressedData size, the paths of its other hard links)}, the problems found and {other reparse tag: count}.
+    ntfs-3g without the system-compression plugin (none is packaged) shows WOF files as broken symlinks, with it as
+    regular files: the reparse data is read for every entry that is not a directory. Directories that are reparse
+    points (junctions) show as symlinks and are not entered.
+    """
+    found, problems, others, entries, seen_dirs = {}, [], collections.Counter(), 0, set()
+    progress = time.monotonic() + 30
+    pending = [""]
+    while pending:
+        directory = pending.pop()
+        try:
+            names = sorted(os.listdir(os.path.join(root, directory)))
+        except OSError as error:
+            raise Failure(f"cannot list /{directory}: {error}") from None
+        for name in names:
+            rel = f"{directory}/{name}" if directory else name
+            path = os.path.join(root, rel)
+            entries += 1
+            try:
+                st = os.lstat(path)
+                if stat.S_ISDIR(st.st_mode):
+                    if st.st_ino not in seen_dirs:
+                        seen_dirs.add(st.st_ino)
+                        pending.append(rel)
+                    continue
+                try:
+                    data = xattr(path, REPARSE_XATTR)
+                except OSError as error:
+                    if error.errno != errno.ENODATA:
+                        raise
+                    continue  # not a reparse point
+                tag = struct.unpack_from("<I", data)[0] if len(data) >= 4 else None
+                if tag != WOF_TAG:
+                    others[tag] += 1
+                elif st.st_ino in found:
+                    found[st.st_ino].links.append(rel)
+                else:
+                    fmt = parse_wof_reparse(data)
+                    csize = os.lstat(path + ":" + WOF_STREAM).st_size
+                    found[st.st_ino] = SimpleNamespace(path=rel, fmt=fmt, csize=csize, links=[])
+            except Failure as error:
+                problems.append(f"/{rel}: {error}")
+            except OSError as error:
+                raise Failure(f"/{rel}: {error}") from None
+            if time.monotonic() > progress:
+                progress = time.monotonic() + 30
+                log(f"  … {entries} entries, {len(found)} WOF files so far")
+    for entry in found.values():  # the first hard link by name, not by the order of the walk
+        entry.path, *entry.links = sorted([entry.path, *entry.links])
+    return found, problems, others, entries
+
+
+def lstat_new_type(path):
+    """
+    lstat after the reparse point is gone. The kernel still has the FUSE inode as the symlink it was (the dentry is
+    trusted for ntfs-3g's entry_timeout of 1 s, which -o cannot change): the first getattr sees the other type, marks
+    that inode bad and fails with EIO (fs/fuse, inode_wrong_type); the next lookup makes a new one (kernel 7.0, dev box
+    2026-10-23).
+    """
+    for attempt in range(10):
+        try:
+            st = os.lstat(path)
+        except OSError as error:
+            if error.errno != errno.EIO or attempt == 9:
+                raise
+            continue
+        if stat.S_ISREG(st.st_mode):
+            return st
+        time.sleep(0.2)
+    raise Failure(f"not a regular file after its reparse point was removed (mode {oct(st.st_mode)})")
+
+
+def wof_convert_file(root, entry, codec):
+    """
+    One WOF inode made a plain file through the ntfs-3g read-write mount at root. ntfs-3g opens the streams of a reparse
+    point only through a plugin, so the reparse point goes first: a failure after that leaves a broken file, acceptable
+    only because the clone is destroyed then. The data overwrites the sparse unnamed stream (ntfs-3g allocates the
+    holes and drops SPARSE once there are none); the times and attributes writing changes are put back; the security
+    descriptor, the other streams, the short name and the object ID are not touched (the descriptor is compared).
+    Returns (size, sha256, still sparse).
+    """
+    path = os.path.join(root, entry.path)
+    stream = path + ":" + WOF_STREAM
+    flags, times, acl = ntfs_attrib(path), xattr(path, "system.ntfs_times"), xattr(path, "system.ntfs_acl")
+    os.removexattr(path, REPARSE_XATTR, follow_symlinks=False)
+    size = lstat_new_type(path).st_size  # the unnamed stream's size: the size of the data
+    fd = os.open(path, os.O_WRONLY | os.O_NOFOLLOW)  # no O_TRUNC: the stream keeps its size, the writes fill it
+    with open(fd, "wb", buffering=1 << 20) as out, open(stream, "rb", buffering=1 << 20) as src:
+        digest, _, _ = wof_decode(src, size, entry.fmt, entry.csize, out, codec.decompress)
+        out.flush()
+        if os.fstat(fd).st_size != size:
+            raise Failure(f"{os.fstat(fd).st_size} bytes after writing {size}")
+    os.unlink(stream)
+    now = ntfs_attrib(path)
+    if (now ^ flags) & FILE_ATTR_SETTABLE:
+        os.setxattr(path, "system.ntfs_attrib", struct.pack("=I", flags & FILE_ATTR_SETTABLE), follow_symlinks=False)
+    # creation, last write, last access (CPU byte order); the 4th, the MFT change time, is always "now" (not in a WIM)
+    os.setxattr(path, "system.ntfs_times", times[:24], follow_symlinks=False)
+    now = ntfs_attrib(path)
+    # NORMAL is no change: ntfs-3g reports it for a file with no attribute at all (libntfs-3g ntfs_get_ntfs_attrib),
+    # e.g. one that had only REPARSE|SPARSE; wimlib's capture reads the attributes the same way, as Windows shows them.
+    if now & FILE_ATTR_REPARSE or (now ^ flags) & ~(FILE_ATTR_SPARSE | FILE_ATTR_REPARSE | FILE_ATTR_NORMAL):
+        raise Failure(f"attributes 0x{flags:x} became 0x{now:x}")
+    if xattr(path, "system.ntfs_times")[:24] != times[:24]:
+        raise Failure("the times were not put back")
+    if xattr(path, "system.ntfs_acl") != acl:
+        raise Failure("the security descriptor changed")
+    return size, digest, bool(now & FILE_ATTR_SPARSE)
+
+
+def mount_ntfs(device, mountpoint, options):
+    run(["ntfs-3g", "-o", options, device, mountpoint])
+
+
+def unmount(mountpoint):
+    run(["umount", mountpoint])  # fuseblk: returns once ntfs-3g has written everything and closed the device
+
+
+def mount_options(mountpoint):
+    target = os.path.realpath(mountpoint)
+    with open("/proc/self/mounts", encoding="utf-8") as f:
+        for line in f:
+            fields = line.split()
+            if len(fields) >= 4 and re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), fields[1]) == target:
+                return fields[3].split(",")
+    raise Failure(f"{mountpoint} is not mounted")
+
+
+@contextlib.contextmanager
+def ntfs_mounted(device, mountpoint, options):
+    """An ntfs-3g mount for the with-block; on a failure the unmount is only tried (cleanup() unmounts it again)."""
+    os.makedirs(mountpoint, exist_ok=True)
+    mount_ntfs(device, mountpoint, options)
+    try:
+        if options.split(",")[0] == "rw" and "rw" not in mount_options(mountpoint):
+            raise Failure(f"ntfs-3g mounted {device} read-only: Windows hibernated (Fast Startup) or not shut down cleanly")
+        yield mountpoint
+    except BaseException:
+        try:
+            unmount(mountpoint)
+        except Exception as error:
+            log(f"WARNING: {error}")
+        raise
+    unmount(mountpoint)
+
+
+def used_bytes(path):
+    st = os.statvfs(path)
+    return (st.f_blocks - st.f_bfree) * st.f_frsize
+
+
+def wof_convert_volume(partition, mountpoint, codec):
+    """The read-write part of decompress_wof: returns {inode: (path, size, sha256, other links)} and the bytes now used."""
+    with ntfs_mounted(partition, mountpoint, NTFS_RW):
+        used_before = used_bytes(mountpoint)
+        log(f"reading the reparse data of every entry on {partition} …")
+        files, problems, others, entries = wof_scan(mountpoint)
+        formats = collections.Counter(WOF_FORMATS[e.fmt][0] for e in files.values())
+        links = sum(len(e.links) for e in files.values())
+        log(f"  {entries} entries; WOF: {len(files)} file(s)" + (f" (+{links} more hard links)" if links else "")
+            + "".join(f", {name} {n}" for name, n in sorted(formats.items())))
+        if others:
+            log("  other reparse points, left as they are: " + ", ".join(
+                f"0x{tag:08x} {n}" if tag is not None else f"invalid {n}" for tag, n in sorted(others.items(), key=str)))
+        if problems:
+            raise Failure(f"{len(problems)} WOF file(s) this script cannot convert, nothing changed yet:\n  "
+                          + "\n  ".join(problems[:20]) + ("\n  …" if len(problems) > 20 else ""))
+        converted, written, sparse, samples = {}, 0, 0, {}
+        started, progress = time.monotonic(), time.monotonic() + 15
+        for n, (ino, entry) in enumerate(sorted(files.items(), key=lambda item: item[1].path), 1):
+            try:
+                size, digest, still_sparse = wof_convert_file(mountpoint, entry, codec)
+            except (Failure, OSError) as error:
+                raise Failure(f"/{entry.path}: {error}") from None
+            converted[ino] = (entry.path, size, digest, entry.links)
+            written += size
+            sparse += still_sparse
+            if size:
+                samples.setdefault(entry.fmt, (entry.path, digest))
+            if time.monotonic() > progress or n == len(files):
+                progress = time.monotonic() + 15
+                log(f"  {n}/{len(files)} files, {written / GIB:.2f} GiB written ({time.monotonic() - started:.0f} s)")
+        used = used_bytes(mountpoint)
+    if files:
+        log(f"  {sum(e.csize for e in files.values()) / GIB:.2f} GiB compressed → {written / GIB:.2f} GiB;"
+            f" used on the volume {used_before / GIB:.1f} → {used / GIB:.1f} GiB")
+        if sparse:
+            log(f"  {sparse} file(s) still flagged sparse (all data written; DISM applies them as such)")
+        log("  spot check, Get-FileHash on a seat of this version must print the same:")
+        for _, (path, digest) in sorted(samples.items()):
+            log(f"    {digest.upper()}  C:\\{path.replace('/', chr(92))}")
+    return converted, used
+
+
+def wof_verify_volume(partition, mountpoint, converted):
+    """
+    On a fresh read-only mount (nothing cached from the conversion, the disk read-only again): no WOF reparse point left,
+    every converted inode a regular file of its size, all its hard links too, no WofCompressedData, the same sha256.
+    """
+    with ntfs_mounted(partition, mountpoint, NTFS_CHECK):
+        log("check on a read-only mount …")
+        files, problems, _, _ = wof_scan(mountpoint)
+        if files or problems:
+            left = [f"/{e.path}" for e in files.values()] + problems
+            raise Failure(f"{len(left)} WOF file(s) left after the conversion, e.g. {', '.join(left[:5])}")
+        progress = time.monotonic() + 15
+        for n, (ino, (path, size, digest, links)) in enumerate(sorted(converted.items(), key=lambda item: item[1][0]), 1):
+            full = os.path.join(mountpoint, path)
+            for rel in (path, *links):
+                st = os.lstat(os.path.join(mountpoint, rel))
+                if not stat.S_ISREG(st.st_mode) or st.st_ino != ino or st.st_size != size:
+                    raise Failure(f"/{rel}: mode {oct(st.st_mode)}, inode {st.st_ino}, {st.st_size} bytes; "
+                                  f"expected a file, inode {ino}, {size} bytes")
+            if ntfs_attrib(full) & FILE_ATTR_REPARSE:
+                raise Failure(f"/{path}: still flagged as a reparse point")
+            if os.path.lexists(full + ":" + WOF_STREAM):
+                raise Failure(f"/{path}: {WOF_STREAM} is still there")
+            if sha256(full) != digest:
+                raise Failure(f"/{path}: the data read back is not the data written")
+            if time.monotonic() > progress or n == len(converted):
+                progress = time.monotonic() + 15
+                log(f"  {n}/{len(converted)} files checked")
+        return used_bytes(mountpoint)
+
+
+def decompress_wof(disk, partition, workdir, codec):
+    """
+    Step 3: the WOF files of the clone made plain files; returns the bytes used on the partition afterwards. The disk is
+    writable only for the read-write mount (the clone is disposable, the golden zvol and its snapshot are not touched):
+    there is no other way to give these files their data. Any failure leaves a half-converted clone, which the usual
+    cleanup destroys; the capture reads only a clone that passed the check.
+    """
+    mountpoint = os.path.join(workdir, "wof")
+    run(["blockdev", "--setrw", disk])
+    try:
+        if run(["blockdev", "--getro", partition])[1].strip() != "0":
+            raise Failure(f"{partition} is still read-only after blockdev --setrw {disk}")
+        log(f"disk {disk}: writable for this step")
+        converted, used = wof_convert_volume(partition, mountpoint, codec)
+    finally:
+        run(["blockdev", "--setro", disk], check=False)
+    if run(["blockdev", "--getro", partition])[1].strip() != "1":
+        raise Failure(f"{partition} is not read-only again (blockdev --setro {disk})")
+    log(f"disk {disk}: read-only again")
+    if not converted:
+        log("no system-compressed files")
+        return used
+    return wof_verify_volume(partition, mountpoint, converted)
+
+
+# Lines of `wimlib-imagex dir --detailed` (programs/imagex.c, print_dentry_detailed).
+WIM_DIR_PATH = re.compile(r'^Full Path\s*= "(.*)"$')
+WIM_DIR_TAG = re.compile(r"^Reparse Tag\s*= 0x([0-9a-fA-F]+)$")
+WIM_DIR_STREAM = re.compile(r'^\s*Named data stream "(.*)":$')
+
+
+def wim_wof_report(lines):
+    """(entries, {reparse tag: count}, paths with the WOF tag, paths with a WofCompressedData stream)."""
+    entries, tags, tagged, streams, path = 0, collections.Counter(), [], [], None
+    for line in lines:
+        line = line.rstrip("\n")
+        if m := WIM_DIR_PATH.match(line):
+            entries, path = entries + 1, m.group(1)
+        elif m := WIM_DIR_TAG.match(line):
+            tag = int(m.group(1), 16)
+            tags[tag] += 1
+            if tag == WOF_TAG:
+                tagged.append(path)
+        elif (m := WIM_DIR_STREAM.match(line)) and m.group(1).lower() == WOF_STREAM.lower():
+            streams.append(path)
+    return entries, tags, tagged, streams
+
+
+def check_wim_no_wof(wim):
+    """
+    After the capture: no file of the WIM has the WOF reparse tag or a WofCompressedData stream. The output is long
+    (every security descriptor in hex), so it is read as it comes. A Windows image always has other reparse points
+    (junctions such as \\Documents and Settings): none at all means the output was not understood.
+    """
+    cmd = ["wimlib-imagex", "dir", wim, "1", "--detailed"]
+    proc = subprocess.Popen(cmd, text=True, errors="replace", env=WIM_ENV, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    tail = collections.deque(maxlen=10)
+
+    def lines():
+        for line in proc.stdout:
+            tail.append(line)
+            yield line
+    try:
+        entries, tags, tagged, streams = wim_wof_report(lines())
+        proc.wait()
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        raise
+    if proc.returncode != 0:
+        raise Failure(f"{' '.join(cmd)} exited with {proc.returncode}:\n{''.join(tail).strip()}")
+    if not entries or not tags:
+        raise Failure(f"{' '.join(cmd)}: output not understood ({entries} entries, no reparse tags at all)")
+    if tagged or streams:
+        raise Failure(f"the WIM still has {len(tagged)} file(s) with reparse tag 0x{WOF_TAG:08x} and {len(streams)} with a "
+                      f"{WOF_STREAM} stream, e.g. {', '.join((tagged + streams)[:5])}")
+    log(f"  WIM: {entries} entries, reparse tags " + ", ".join(f"0x{t:08x} {n}" for t, n in sorted(tags.items()))
+        + f"; no 0x{WOF_TAG:08x}, no {WOF_STREAM}")
+
+
+def selftest_wof(reparse, stream, size, out=None, codec=None):
+    """
+    --selftest-wof: one WOF file decoded offline. reparse: the reparse data in hex (24 bytes, or the 16 after the
+    header, as a WIM stores them) or a file with it, raw or in hex. Samples from an NTFS partition that has such files,
+    read without mounting it: ntfscat -a 0xC0 <partition> <path> | xxd -p (reparse data),
+    ntfscat -a 0x80 -n WofCompressedData <partition> <path> > stream, ntfscat <partition> <path> | wc -c (the size).
+    """
+    if os.path.isfile(reparse):
+        with open(reparse, "rb") as f:
+            data = f.read()
+        try:
+            data = bytes.fromhex(data.decode("ascii"))
+        except ValueError:
+            pass  # raw bytes
+    else:
+        data = bytes.fromhex(reparse)
+    if len(data) == 16:
+        data = struct.pack("<IHH", WOF_TAG, 16, 0) + data
+    fmt = parse_wof_reparse(data)
+    size = int(size)
+    codec = codec or Libwim()
+    with open(stream, "rb") as src, open(out or os.devnull, "wb") as dst:
+        digest, chunks, stored_raw = wof_decode(src, size, fmt, os.fstat(src.fileno()).st_size, dst, codec.decompress)
+    print(f"{WOF_FORMATS[fmt][0]}: {chunks} chunk(s), {stored_raw} stored uncompressed, {size} bytes"
+          + (f" → {out}" if out else ""))
+    print(f"sha256 {digest}")
+    return 0
 
 
 # ---- WIM ------------------------------------------------------------------------------------------------------------
@@ -740,7 +1243,16 @@ def main():
     parser.add_argument("--cleanup", action="store_true",
                         help="only remove what an interrupted run left in TrueNAS and on this host, its unfinished "
                              "incoming/<label>.wim.partial included (with no version or --label: every *.wim.partial there)")
+    parser.add_argument("--selftest-wof", nargs=3, metavar=("REPARSE", "STREAM", "SIZE"),
+                        help="only decode one WOF sample offline (reparse data in hex or a file, its WofCompressedData, "
+                             "the file size) and print its sha256; no root, no TrueNAS")
+    parser.add_argument("--out", help="with --selftest-wof: write the decoded data to this file")
     args = parser.parse_args()
+    if args.selftest_wof:
+        try:
+            return selftest_wof(*args.selftest_wof, out=args.out)
+        except (Failure, OSError, ValueError) as error:
+            sys.exit(f"ERROR: {error}")
     if not args.cleanup and not args.version:
         parser.error("the version is required (or --cleanup)")
     if args.version and not LABEL.match(args.version):
@@ -755,6 +1267,10 @@ def main():
         ("blkid", "util-linux"), ("blockdev", "util-linux"), ("udevadm", "udev")) if shutil.which(tool) is None]
     missing += ["Python module websocket (sudo apt install python3-websocket)"] if websocket is None else []
     missing += ["Python module hivex (sudo apt install python3-hivex)"] if hivex is None else []
+    try:
+        codec = Libwim()
+    except Failure as error:
+        missing.append(str(error))
     if missing:
         sys.exit("missing:\n  " + "\n  ".join(missing))
     lock = open(LOCK_FILE, "w")
@@ -796,7 +1312,7 @@ def main():
     ok = False
     cleanup_pending = False  # the temporary objects are not all removed after the capture: retried at the end
     try:
-        step("1/6 leftovers of an earlier run")
+        step("1/7 leftovers of an earlier run")
         for path in stale_partials(cfg):  # first: needs no TrueNAS
             log(f"delete {path}")
             os.remove(path)
@@ -806,14 +1322,18 @@ def main():
             ok = True
             log("OK: nothing of make-hybrid-ref is left")
             return 0
-        step("2/6 temporary clone and iSCSI target in TrueNAS")
+        step("2/7 temporary clone and iSCSI target in TrueNAS")
         expose(tn, cfg)
         tn.close()
-        step("3/6 iSCSI login from this host, Windows partition")
-        partition, used = find_windows(login(cfg), workdir)
-        step(f"4/6 capture into {cfg.partial}")
+        step("3/7 iSCSI login from this host, Windows partition")
+        disk = login(cfg)
+        partition, _ = find_windows(disk, workdir)  # the used bytes are measured again after the WOF step
+        step("4/7 system-compressed (WOF) files on the clone made plain files")
+        used = decompress_wof(disk, partition, workdir, codec)
+        step(f"5/7 capture into {cfg.partial}")
         capture(cfg, partition, used, workdir)
-        step("5/6 remove the temporary objects")
+        check_wim_no_wof(cfg.partial)
+        step("6/7 remove the temporary objects")
         try:
             cleanup(tn, cfg)
         except Interrupted:
@@ -824,7 +1344,7 @@ def main():
             log(f"WARNING: the temporary objects are not all removed: {error}")
             log("         the WIM is kept and finished; the removal is tried again at the end")
         tn.close()
-        step("6/6 offline registry fixes for a local SSD, inside the WIM")
+        step("7/7 offline registry fixes for a local SSD, inside the WIM")
         fix_wim(cfg, workdir)
         step("check the WIM")
         finish(cfg)
