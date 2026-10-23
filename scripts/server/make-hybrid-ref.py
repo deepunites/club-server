@@ -694,7 +694,14 @@ def wof_scan(root):
             except Failure as error:
                 problems.append(f"/{rel}: {error}")
             except OSError as error:
-                raise Failure(f"/{rel}: {error}") from None
+                # ntfs-3g answers EIO for some reparse points it cannot present (2026-10-24 on img-v2: the App
+                # Execution Alias ...\WindowsApps\ActionsMcpHost.exe, tag 0x8000001b). Such an entry cannot be read
+                # here and is left as it is; should it be a WOF file after all, the check of the captured WIM
+                # (no 0x80000017 tag) still fails the run.
+                if error.errno != errno.EIO:
+                    raise Failure(f"/{rel}: {error}") from None
+                others["unreadable"] += 1
+                log(f"  unreadable through ntfs-3g (EIO), left as it is: /{rel}")
             if time.monotonic() > progress:
                 progress = time.monotonic() + 30
                 log(f"  … {entries} entries, {len(found)} WOF files so far")
@@ -814,7 +821,8 @@ def wof_convert_volume(partition, mountpoint, codec):
             + "".join(f", {name} {n}" for name, n in sorted(formats.items())))
         if others:
             log("  other reparse points, left as they are: " + ", ".join(
-                f"0x{tag:08x} {n}" if tag is not None else f"invalid {n}" for tag, n in sorted(others.items(), key=str)))
+                f"0x{tag:08x} {n}" if isinstance(tag, int) else f"{tag or 'invalid'} {n}"
+                for tag, n in sorted(others.items(), key=str)))
         if problems:
             raise Failure(f"{len(problems)} WOF file(s) this script cannot convert, nothing changed yet:\n  "
                           + "\n  ".join(problems[:20]) + ("\n  …" if len(problems) > 20 else ""))
