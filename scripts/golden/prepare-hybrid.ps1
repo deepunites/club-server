@@ -530,9 +530,18 @@ if (-not $iqn) {
 } elseif (Test-DefaultIqn $iqn) {
     Write-Pass ('IQN инициатора по умолчанию: {0}' -f $iqn)
 } else {
-    $hint = 'вернуть имя по умолчанию: iscsicli NodeName * (или iscsicpl -> «Конфигурация» -> «Изменить» -> «Сбросить»), затем этот скрипт ещё раз'
-    if ($iqn -match ':(seat-\d+|master)$') { Write-Warn ('IQN инициатора — имя бездискового места из iBFT: {0}' -f $iqn) $hint }
-    else { Write-Warn ('IQN инициатора не по умолчанию: {0} (ожидается {1}{2})' -f $iqn, $DefaultIqnPrefix, "$env:COMPUTERNAME".ToLowerInvariant()) $hint }
+    # Эталон из бездиска несёт IQN мастера из iBFT (iqn.2026-10.local.club:master, PC-11 2026-10-24): Windows записала его
+    # при загрузке по iSCSI. «*» возвращает имя по умолчанию (из имени компьютера; после sysprep — из нового имени).
+    # Помощник читает IQN один раз за запуск — перезапуск, чтобы сервер получил новый (личный диск G: пересоздастся).
+    Write-Line ('IQN инициатора не по умолчанию: {0} — возвращаю по умолчанию' -f $iqn)
+    & iscsicli.exe NodeName '*' | Out-Null
+    $iqn = Get-InitiatorIqn
+    if ($iqn -and (Test-DefaultIqn $iqn)) {
+        Write-Pass ('IQN инициатора теперь по умолчанию: {0}' -f $iqn)
+        Restart-Service -Name $HelperService -ErrorAction SilentlyContinue
+    } else {
+        Write-Warn ('IQN инициатора не вернулся к умолчанию: {0} (ожидается {1}{2})' -f $iqn, $DefaultIqnPrefix, "$env:COMPUTERNAME".ToLowerInvariant()) 'iscsicpl -> «Конфигурация» -> «Изменить» -> «Сбросить», затем этот скрипт ещё раз'
+    }
 }
 
 # Помощник бездиска и диск игр G:
