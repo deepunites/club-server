@@ -392,7 +392,8 @@ if ($pending) { Write-Warn ('ожидается перезагрузка: {0}' -
 else { Write-Pass 'перезагрузка не ожидается' }
 if (Get-Process -Name 'sysprep' -ErrorAction SilentlyContinue) { Write-Warn 'sysprep уже запущен' 'закрыть окно «Программа подготовки системы»' }
 
-# OOBE в unattend-hybrid.xml скрыта целиком и учётных записей не создаёт: после заливки остаются учётные записи эталона.
+# OOBE в unattend-hybrid.xml скрыта целиком; файл ответов создаёт локального администратора Club с автовходом, учётные
+# записи эталона после заливки тоже остаются.
 Write-Title 'Учётные записи'
 $current = $null
 try { $current = Get-LocalUser -SID $me -ErrorAction Stop } catch { }
@@ -406,9 +407,9 @@ foreach ($u in @(Get-LocalUser -ErrorAction SilentlyContinue | Where-Object { $_
 }
 $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
 if ("$(Get-RegValue $winlogon 'AutoAdminLogon')" -eq '1') {
-    Write-Info ('автовход сейчас включён ({0}); unattend-hybrid.xml автовход не задаёт — после заливки проверить, остался ли' -f (Get-RegValue $winlogon 'DefaultUserName'))
+    Write-Info ('автовход сейчас включён ({0}); после заливки автовход — Club из unattend-hybrid.xml' -f (Get-RegValue $winlogon 'DefaultUserName'))
 } else {
-    Write-Info 'автовход выключен (unattend-hybrid.xml его тоже не задаёт)'
+    Write-Info 'автовход выключен; после заливки автовход — Club из unattend-hybrid.xml'
 }
 
 Write-Host ''

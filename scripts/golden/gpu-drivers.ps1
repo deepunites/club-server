@@ -134,7 +134,10 @@ try {
     $cplAppx = Get-ChildItem -LiteralPath (Join-Path $Work 'nv\Display.Driver\NVCPL') -Filter '*.appx' -ErrorAction SilentlyContinue | Select-Object -First 1
     $cplLicense = Get-ChildItem -LiteralPath (Join-Path $Work 'nv\Display.Driver\NVCPL') -Filter '*License*.xml' -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($cplAppx -and $cplLicense) {
-        try { Add-AppxProvisionedPackage -Online -PackagePath $cplAppx.FullName -LicensePath $cplLicense.FullName -ErrorAction Stop | Out-Null; Write-Pass 'Панель управления NVIDIA добавлена в образ' }
+        # -Regions all: без Regions предустановленный пакет, не закреплённый в Пуске, Windows убирает при первом входе
+        # (гибриды PC-11/PC-21, 2026-10-24); лицензию Store sysprep всё равно стирает — после заливки панель заново
+        # ставит C:\Windows\Setup\Scripts\nvcp\Install-NVCP.ps1 (scripts/server/patch-hybrid-wim.sh).
+        try { Add-AppxProvisionedPackage -Online -PackagePath $cplAppx.FullName -LicensePath $cplLicense.FullName -Regions 'all' -ErrorAction Stop | Out-Null; Write-Pass 'Панель управления NVIDIA добавлена в образ' }
         catch { Write-Warn "Панель управления NVIDIA не добавлена: $($_.Exception.Message)" }
     } else { Write-Warn 'в архиве нет Панели управления NVIDIA (NVCPL)' }
 

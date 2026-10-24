@@ -5,11 +5,18 @@
     sysprep /generalize /oobe /shutdown /unattend:unattend-hybrid.xml
   Sysprep кладёт копию в %WINDIR%\Panther\unattend.xml; при заливке сервер дописывает туда имя ПК (ComputerName в
   компонент Microsoft-Windows-Shell-Setup прохода specialize, Unattend.cs). Поэтому ComputerName здесь НЕТ.
+  В уже снятый образ этот файл кладётся без пересъёмки: wimlib-imagex update, путь /Windows/Panther/unattend.xml
+  (так собраны h1b и h1c, 2026-10-24/25).
 
-  Учётные записи не создаются: sysprep /generalize оставляет локальные учётные записи эталона, OOBE пропускается
-  целиком. Эталон ставился без файла ответов (install.cmd из extract-winsetup.sh, OOBE руками, docs/diskless-pilot.md),
-  так что автовхода из файла ответов у него нет. AutoLogon здесь не задаётся: ему нужен пароль открытым текстом, а WIM
-  во время перезаливки скачивается по HTTP без авторизации. Ключа продукта нет.
+  OOBE пропускается целиком. Страницу «Кто будет использовать это устройство?» на Pro убирают только LocalAccounts или
+  AutoLogon (HideLocalAccountScreen действует лишь на Server), а «Administrator» в файле ответов — встроенная учётная
+  запись (RID 500), не учётная запись эталона. Поэтому создаётся локальный администратор Club без пароля с автовходом
+  (решение клуба 2026-10-24: на местах работает оболочка клуба, вход в Windows не нужен). Пароль пустой — WIM при
+  перезаливке скачивается по HTTP без авторизации, секретов в нём нет. Ключа продукта нет.
+
+  FirstLogonCommands при первом входе Club: снять счётчик автовхода (LogonCount ограничен) и запустить страховку
+  Панели управления NVIDIA (C:\Windows\Setup\Scripts\nvcp\Install-NVCP.ps1 -Mode User, отдельным процессом — вход её не
+  ждёт). Основная установка панели — SetupComplete.cmd до первого входа, см. Install-NVCP.ps1.
 -->
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
   <!-- Только при заливке через Setup или DISM /Apply-Unattend; sysprep этот проход не выполняет, поэтому тот же запрет
@@ -44,6 +51,13 @@
           <Description>Enable the CloudExperienceHost task that OOBE needs</Description>
           <Path>schtasks.exe /Change /TN "\Microsoft\Windows\CloudExperienceHost\CreateObjectTask" /Enable</Path>
         </RunSynchronousCommand>
+        <!-- Учётная запись из LocalAccounts получает срок пароля (по умолчанию 42 дня), пустой пароль тоже истекает:
+             через 42 дня без перезаливки автовход Club остановился бы на «Срок действия пароля истёк». -->
+        <RunSynchronousCommand wcm:action="add">
+          <Order>3</Order>
+          <Description>Local passwords never expire (Club auto-logon)</Description>
+          <Path>net.exe accounts /maxpwage:unlimited</Path>
+        </RunSynchronousCommand>
       </RunSynchronous>
     </component>
   </settings>
@@ -56,6 +70,27 @@
       <UserLocale>ru-RU</UserLocale>
     </component>
     <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <AutoLogon>
+        <Password>
+          <Value></Value>
+          <PlainText>true</PlainText>
+        </Password>
+        <Enabled>true</Enabled>
+        <LogonCount>999</LogonCount>
+        <Username>Club</Username>
+      </AutoLogon>
+      <FirstLogonCommands>
+        <SynchronousCommand wcm:action="add">
+          <CommandLine>reg.exe delete "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoLogonCount /f</CommandLine>
+          <Description>Keep auto-logon on (no logon counter)</Description>
+          <Order>1</Order>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <CommandLine>cmd.exe /c start "NVCP" /min powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\Windows\Setup\Scripts\nvcp\Install-NVCP.ps1 -Mode User</CommandLine>
+          <Description>NVIDIA Control Panel guard (detached)</Description>
+          <Order>2</Order>
+        </SynchronousCommand>
+      </FirstLogonCommands>
       <OOBE>
         <HideEULAPage>true</HideEULAPage>
         <HideLocalAccountScreen>true</HideLocalAccountScreen>
@@ -64,6 +99,19 @@
         <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
         <ProtectYourPC>3</ProtectYourPC>
       </OOBE>
+      <UserAccounts>
+        <LocalAccounts>
+          <LocalAccount wcm:action="add">
+            <Password>
+              <Value></Value>
+              <PlainText>true</PlainText>
+            </Password>
+            <Group>Administrators</Group>
+            <DisplayName>Club</DisplayName>
+            <Name>Club</Name>
+          </LocalAccount>
+        </LocalAccounts>
+      </UserAccounts>
     </component>
   </settings>
 </unattend>
