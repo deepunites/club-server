@@ -108,7 +108,8 @@ public static partial class DisklessEndpoints
         return new VolumeAssignment(current.Label, options.PortalAddress, iqn, ReadOnly: true, options.DriveLetter);
     }
 
-    private static async Task<IResult> RegisterAsync(HttpContext context, MachineRegisterRequest request, MachineRepository machines, TokenService tokens, AuthOptions options, TimeProvider clock)
+    private static async Task<IResult> RegisterAsync(HttpContext context, MachineRegisterRequest request, MachineRepository machines, TokenService tokens, AuthOptions options, TimeProvider clock,
+        ILoggerFactory logs)
     {
         var clubKey = context.Request.Headers["X-Club-Key"].ToString();
         if (string.IsNullOrEmpty(options.ClubApiKey) || string.IsNullOrEmpty(clubKey) || !Secrets.FixedTimeEquals(clubKey, options.ClubApiKey))
@@ -125,13 +126,38 @@ public static partial class DisklessEndpoints
             throw ApiException.Validation("macAddresses", "format");
         }
 
-        var registration = new MachineRegistration(request.Hwid, request.Hostname, macs, ClientIp(context), request.HelperVersion, request.OsVersion);
         var existing = await machines.FindByHwidAsync(request.Hwid);
         // ПК, добавленный в панели по MAC (бездиск без своей Windows), регистрируется в свою заготовку.
         var placeholder = existing is null ? await machines.FindPlaceholderAsync(macs) : null;
+
+        // Первым в списке машины будет MAC заготовки (AdoptAsync ставит его первым), иначе — первый из отчёта (основная карта):
+        // по нему резервация Kea, он остаётся всегда. Остальные MAC, основные у другой машины, — чужие: образ Windows приносит
+        // MAC ПК, на котором его снимали, в каком-то адаптере на все ПК из образа (стенд 2026-10-25: гибриды сообщали вторым
+        // MAC основной карты PC-01). Не сохраняем.
+        var first = placeholder?.MacAddresses.FirstOrDefault() ?? macs[0];
+        var owners = await machines.PrimaryOwnersAsync(macs, (existing ?? placeholder)?.Id);
+        var foreign = owners.Where(o => o.Mac != first).ToList();
+        macs = macs.Where(mac => mac == first || foreign.All(f => f.Mac != mac)).ToList();
+        var registration = new MachineRegistration(request.Hwid, request.Hostname, macs, ClientIp(context), request.HelperVersion, request.OsVersion);
         var machine = existing is not null ? await machines.ReregisterAsync(existing.Id, registration)
             : placeholder is not null ? await machines.AdoptAsync(placeholder.Id, registration)
             : await machines.CreateAsync(registration, options.AutoApprovePcs);
+        var log = logs.CreateLogger("Club.Server.Diskless");
+        if (foreign.Count > 0)
+        {
+            log.LogWarning(
+                "Machine {Machine} ({Hostname}) reported another machine's primary MAC, not stored: {Foreign} (an adapter carried over by the Windows image?)",
+                machine.Name, request.Hostname, string.Join(", ", foreign.Select(f => $"{f.Mac} of {f.Name}")));
+        }
+
+        if (owners.Where(o => o.Mac == first).Select(o => o.Name).ToList() is { Count: > 0 } twins)
+        {
+            // Две записи с одним основным MAC: резервация Kea — одной из них, перезаливка по сети — ни одной (неясно, какой ПК
+            // загрузится с этого MAC; ImageRepository.ArmedJobForMacsAsync).
+            log.LogWarning(
+                "Machine {Machine} ({Hostname}) has the same primary MAC {Mac} as {Twins}: network reinstall is refused for all of them until the duplicate record is removed",
+                machine.Name, request.Hostname, first, string.Join(", ", twins));
+        }
 
         if (!machine.Approved)
         {

@@ -75,10 +75,43 @@ public sealed class MachineRepository(NpgsqlDataSource db)
         return await c.QuerySingleOrDefaultAsync<MachineRow>($"SELECT {Columns} FROM machines WHERE hwid = @hwid", new { hwid });
     }
 
+    /// <summary>
+    /// SQL-условие «MAC <paramref name="mac"/> указывает на машину <paramref name="alias"/>». Основной MAC (первый в
+    /// списке) указывает на свою машину всегда; не первый — только если он есть в списке ровно одной машины (значит, и
+    /// ничей не основной), иначе — ни на кого. Образ Windows приносит MAC ПК, на котором его снимали, в каком-то
+    /// адаптере на все ПК из образа (стенд 2026-10-25: гибриды из образа сообщали вторым MAC основной карты PC-01) —
+    /// такой MAC ведёт к своему ПК, а не к гибридам. Основной MAC двух машин (две записи с одним MAC) указывает на обе — из
+    /// них выбирает вызывающий (как Kea: одобренная, меньший номер); <paramref name="exclusive"/> — ни на одну: так ищется
+    /// задание перезаливки — WinPE сотрёт диск, машина должна быть однозначной.
+    /// </summary>
+    public static string MacIdentifies(string alias, string mac, bool exclusive = false)
+    {
+        var twin = exclusive
+            ? $"\n    AND NOT EXISTS (SELECT 1 FROM machines twin WHERE twin.id <> {alias}.id AND twin.mac_addresses @> ARRAY[{mac}] AND twin.mac_addresses[1] = {mac})"
+            : "";
+        return $"""
+            ({alias}.mac_addresses @> ARRAY[{mac}] AND ({alias}.mac_addresses[1] = {mac}
+                OR NOT EXISTS (SELECT 1 FROM machines other WHERE other.id <> {alias}.id AND other.mac_addresses @> ARRAY[{mac}])){twin})
+            """;
+    }
+
+    /// <summary>Машина, на которую указывает MAC (<see cref="MacIdentifies"/>; основной MAC двух машин — одобренная, меньший номер).</summary>
     public async Task<MachineRow?> FindByMacAsync(string mac)
     {
         await using var c = await db.OpenConnectionAsync();
-        return await c.QuerySingleOrDefaultAsync<MachineRow>($"SELECT {Columns} FROM machines WHERE @mac = ANY(mac_addresses) ORDER BY approved DESC LIMIT 1", new { mac });
+        return await c.QuerySingleOrDefaultAsync<MachineRow>(
+            $"SELECT {Columns} FROM machines m WHERE {MacIdentifies("m", "@mac")} ORDER BY approved DESC, number LIMIT 1", new { mac });
+    }
+
+    /// <summary>
+    /// Чьи основные MAC — среди <paramref name="macs"/> (кроме машины <paramref name="self"/>): MAC и имя машины.
+    /// </summary>
+    public async Task<IReadOnlyList<(string Mac, string Name)>> PrimaryOwnersAsync(IReadOnlyList<string> macs, Guid? self)
+    {
+        await using var c = await db.OpenConnectionAsync();
+        return (await c.QueryAsync<(string, string)>(
+            "SELECT mac_addresses[1], name FROM machines WHERE mac_addresses && @macs AND mac_addresses[1] = ANY(@macs) AND id IS DISTINCT FROM @self ORDER BY number",
+            new { macs = macs.ToArray(), self })).ToList();
     }
 
     public async Task<IReadOnlyList<MachineRow>> AllAsync()
@@ -131,7 +164,8 @@ public sealed class MachineRepository(NpgsqlDataSource db)
         await using var c = await db.OpenConnectionAsync();
         await using var tx = await c.BeginTransactionAsync();
         await c.ExecuteAsync("LOCK TABLE machines IN SHARE ROW EXCLUSIVE MODE", transaction: tx);
-        if (await c.ExecuteScalarAsync<bool>("SELECT EXISTS (SELECT 1 FROM machines WHERE @mac = ANY(mac_addresses))", new { mac }, tx))
+        // Занят — если уже указывает на машину. Не первый MAC в списках нескольких машин (принесённый образом) — ничей.
+        if (await c.ExecuteScalarAsync<bool>($"SELECT EXISTS (SELECT 1 FROM machines m WHERE {MacIdentifies("m", "@mac")})", new { mac }, tx))
         {
             return (AddResult.MacTaken, null);
         }
@@ -155,12 +189,22 @@ public sealed class MachineRepository(NpgsqlDataSource db)
         return (AddResult.Added, await FindAsync(id));
     }
 
-    /// <summary>Заготовка из панели с одним из этих MAC (ещё без настоящего HWID).</summary>
+    /// <summary>
+    /// Заготовка из панели с одним из этих MAC (ещё без настоящего HWID); с первым MAC (основная карта) — раньше. Через не
+    /// первый MAC — только если его нет в списках других машин: MAC, который образ Windows разнёс по ПК, к заготовке
+    /// своего ПК не ведёт (её усыновил бы чужой ПК — с номером места, режимом загрузки и резервацией Kea).
+    /// </summary>
     public async Task<MachineRow?> FindPlaceholderAsync(IReadOnlyList<string> macs)
     {
         await using var c = await db.OpenConnectionAsync();
         return await c.QuerySingleOrDefaultAsync<MachineRow>(
-            $"SELECT {Columns} FROM machines WHERE hwid LIKE 'mac:%' AND mac_addresses && @macs ORDER BY number LIMIT 1", new { macs = macs.ToArray() });
+            $"""
+            SELECT {Columns} FROM machines p
+            WHERE hwid LIKE 'mac:%' AND mac_addresses && @macs
+              AND (mac_addresses[1] = @first OR NOT EXISTS (SELECT 1 FROM machines other WHERE other.id <> p.id AND other.mac_addresses @> p.mac_addresses[1:1]))
+            ORDER BY mac_addresses[1] = @first DESC, number LIMIT 1
+            """,
+            new { macs = macs.ToArray(), first = macs[0] });
     }
 
     /// <summary>

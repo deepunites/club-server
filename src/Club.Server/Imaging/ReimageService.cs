@@ -84,6 +84,13 @@ public sealed class ReimageService(
             throw Conflict("noReservation", "Machine has no DHCP reservation (see the Network screen)");
         }
 
+        // Тот же основной MAC у другой записи: какой ПК загрузится с него по сети, неясно — WinPE это задание не получит
+        // (ImageRepository.ArmedJobForMacsAsync), а получи — мог бы стереть диск чужого ПК.
+        if (await machines.PrimaryOwnersAsync([machine.MacAddresses[0]], machine.Id) is [var (mac, twin), ..])
+        {
+            throw Conflict("duplicateMac", $"MAC {mac} is also the main MAC of {twin}; remove the duplicate record before reinstalling");
+        }
+
         CheckBootChain(machine);
 
         // Проверки бездиска выше — для понятного ответа; решающая — в CreateJobAsync, под блокировкой строки машины:

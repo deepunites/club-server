@@ -56,6 +56,38 @@ public sealed class DisklessApiTests(ServerFixture server) : IClassFixture<Serve
         Contract.AssertError(await stale.Content.ReadFromJsonAsync<JsonElement>(), "unauthorized", "revoked");
     }
 
+    /// <summary>
+    /// Основной MAC другой машины не на первом месте (его приносит образ Windows) не сохраняется; второй NIC — сохраняется;
+    /// первый MAC — всегда.
+    /// </summary>
+    [Fact]
+    public async Task Primary_mac_of_another_pc_is_not_stored_from_a_later_position()
+    {
+        const string Master = "02:00:00:00:25:01", Hybrid = "02:00:00:00:25:11", SecondNic = "02:00:00:00:25:12";
+        var machines = server.Services.GetRequiredService<MachineRepository>();
+        async Task<string[]> MacsAsync(Guid id) => (await machines.FindAsync(id))!.MacAddresses;
+
+        // Гибрид зарегистрирован раньше эталона: тогда MAC эталона ещё ничей — сохранён.
+        var hybridHwid = Guid.NewGuid().ToString("N");
+        var (hybrid, _) = await TestMachine.RegisterAsync(_http, hybridHwid, Hybrid, Master);
+        var (master, _) = await TestMachine.RegisterAsync(_http, null, Master, Hybrid);
+        Assert.Equal([Hybrid, Master], await MacsAsync(hybrid.MachineId));
+        Assert.Equal([Master], await MacsAsync(master.MachineId));
+
+        // Повторная регистрация гибрида и новый ПК из того же образа: MAC эталона отброшен, свой второй NIC — на месте.
+        var (again, _) = await TestMachine.RegisterAsync(_http, hybridHwid, Hybrid, Master, SecondNic);
+        Assert.Equal(hybrid.MachineId, again.MachineId);
+        Assert.Equal([Hybrid, SecondNic], await MacsAsync(hybrid.MachineId));
+        var (fresh, _) = await TestMachine.RegisterAsync(_http, null, "02:00:00:00:25:21", Master);
+        Assert.Equal(["02:00:00:00:25:21"], await MacsAsync(fresh.MachineId));
+
+        // Свой основной MAC не на первом месте — свой; первый MAC не отбрасывается никогда, даже чужой основной.
+        await TestMachine.RegisterAsync(_http, hybridHwid, SecondNic, Hybrid);
+        Assert.Equal([SecondNic, Hybrid], await MacsAsync(hybrid.MachineId));
+        var (twin, _) = await TestMachine.RegisterAsync(_http, null, Master, "02:00:00:00:25:31");
+        Assert.Equal([Master, "02:00:00:00:25:31"], await MacsAsync(twin.MachineId));
+    }
+
     [Fact]
     public async Task No_published_library_means_no_volume()
     {

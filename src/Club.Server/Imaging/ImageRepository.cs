@@ -316,14 +316,26 @@ public sealed class ImageRepository(NpgsqlDataSource db)
             new { jobId, now }) == 1;
     }
 
+    /// <summary>
+    /// Взведённое задание машины, на которую указывают эти MAC (iPXE — один, WinPE — все свои): каждый MAC — своей машине
+    /// по <see cref="MachineRepository.MacIdentifies"/> (exclusive: основной MAC двух записей — ничей). MAC другого ПК в
+    /// списке гибрида (его принёс образ) к заданию гибрида не ведёт: иначе тот ПК загрузил бы WinPE чужого задания, а
+    /// проверка бездиска смотрела бы на машину задания — диск ПК был бы размечен и залит образом гибрида. Есть среди MAC
+    /// чей-то основной — это тот ПК: машины, найденные только по не первому MAC, не берутся (WinPE на PC-01 сообщает и его
+    /// основной MAC, и MAC адаптера, который есть только в списке гибрида).
+    /// </summary>
     public async Task<ReimageJob?> ArmedJobForMacsAsync(IReadOnlyList<string> macs)
     {
         await using var c = await db.OpenConnectionAsync();
         return await c.QuerySingleOrDefaultAsync<ReimageJob>(
             $"""
             SELECT {JobColumns} FROM reimage_jobs
-            WHERE id = (SELECT j.id FROM reimage_jobs j JOIN machines m ON m.id = j.machine_id
-                        WHERE j.pxe_armed AND m.mac_addresses && @macs LIMIT 1)
+            WHERE id = (SELECT j.id FROM unnest(@macs) WITH ORDINALITY AS q(mac, ord)
+                        JOIN machines m ON {MachineRepository.MacIdentifies("m", "q.mac", exclusive: true)}
+                        JOIN reimage_jobs j ON j.machine_id = m.id AND j.pxe_armed
+                        WHERE m.mac_addresses[1] = q.mac
+                           OR NOT EXISTS (SELECT 1 FROM machines p WHERE p.mac_addresses && @macs AND p.mac_addresses[1] = ANY(@macs))
+                        ORDER BY q.ord LIMIT 1)
             """,
             new { macs = macs.ToArray() });
     }

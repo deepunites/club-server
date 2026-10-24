@@ -87,9 +87,9 @@ public sealed class ImagingTests : IAsyncLifetime
         }
     }
 
-    private async Task<TestMachine> MachineAsync(string hwid = "hw-1", string mac = Mac, object? systemDisk = null)
+    private async Task<TestMachine> MachineAsync(string hwid = "hw-1", string mac = Mac, object? systemDisk = null, string[]? otherMacs = null)
     {
-        var (machine, _) = await TestMachine.RegisterAsync(_server.CreateClient(), hwid, mac);
+        var (machine, _) = await TestMachine.RegisterAsync(_server.CreateClient(), hwid, [mac, .. otherMacs ?? []]);
         using var report = await machine.SendAsync(HttpMethod.Put, $"/diskless/v1/machines/{machine.MachineId}/status", new
         {
             helperVersion = "1.0.0", volume = new { state = "none" },
@@ -641,6 +641,110 @@ public sealed class ImagingTests : IAsyncLifetime
         var reimage = await ReimageViewAsync();
         Assert.Equal(("failed", "disklessMachine", false), (reimage.GetProperty("state").GetString(), reimage.GetProperty("failure").GetString(), reimage.GetProperty("diskTouched").GetBoolean()));
         Assert.Equal(HttpStatusCode.NoContent, (await Panel().PostAsync($"/panel/api/v1/machines/{machine.MachineId}/reimage/cancel", null)).StatusCode);
+    }
+
+    /// <summary>
+    /// Стенд 2026-10-25: гибриды из образа сообщают вторым MAC основной карты PC-01 (бездиск) — какой-то адаптер в образе
+    /// несёт его. Перезаливка гибрида не должна доставаться PC-01: проверка бездиска в WinPE смотрит на машину задания —
+    /// диск PC-01 был бы размечен и залит образом гибрида.
+    /// </summary>
+    [Fact]
+    public async Task Reinstall_of_a_hybrid_never_reaches_the_pc_whose_mac_the_hybrid_lists()
+    {
+        await PrepareAsync();
+        var pc01 = await MachineAsync();
+        (await Panel().PutAsJsonAsync($"/panel/api/v1/machines/{pc01.MachineId}/boot-mode", new { mode = "diskless" })).EnsureSuccessStatusCode();
+        var hybrid = await MachineAsync("hw-2", "02:00:00:00:00:02", otherMacs: ["02:00:00:00:00:12"]);
+        // Как в базе стенда (теперь регистрация основной MAC другого ПК не сохраняет): у гибрида — MAC PC-01, у обоих — общий MAC.
+        await using (var c = await _server.Services.GetRequiredService<Npgsql.NpgsqlDataSource>().OpenConnectionAsync())
+        {
+            await ExecAsync(c, null, "UPDATE machines SET mac_addresses = mac_addresses || '{02:00:00:00:00:01,02:00:00:00:00:77}' WHERE id = @id", hybrid.MachineId);
+            await ExecAsync(c, null, "UPDATE machines SET mac_addresses = mac_addresses || '{02:00:00:00:00:77}' WHERE id = @id", pc01.MachineId);
+        }
+
+        (await Panel().PostAsJsonAsync($"/panel/api/v1/machines/{hybrid.MachineId}/reimage", new { })).EnsureSuccessStatusCode();
+        Assert.DoesNotContain("wimboot", await PxeScriptAsync());
+        Assert.DoesNotContain("wimboot", await PxeScriptAsync("02-00-00-00-00-77"));
+        Assert.Contains("kernel /pxe/v1/files/wimboot", await PxeScriptAsync("02-00-00-00-00-02"));
+        Assert.Contains("kernel /pxe/v1/files/wimboot", await PxeScriptAsync("02-00-00-00-00-12")); // второй NIC гибрида — только в его списке
+
+        // WinPE на PC-01 (его MAC, общий MAC; его MAC и MAC адаптера, который есть только в списке гибрида — так PC-01 мог
+        // загрузиться в WinPE гибрида): задания нет — диск не трогается.
+        var (status, body) = await StartAsync();
+        Assert.Equal((HttpStatusCode.Conflict, "notArmed"), (status, Reason(body)));
+        (status, body) = await StartWithAsync("02:00:00:00:00:77");
+        Assert.Equal((HttpStatusCode.Conflict, "notArmed"), (status, Reason(body)));
+        (status, body) = await StartWithAsync("02:00:00:00:00:12", "02:00:00:00:00:01");
+        Assert.Equal((HttpStatusCode.Conflict, "notArmed"), (status, Reason(body)));
+        Assert.Equal(("requested", 0), JobState(await ReimageViewOfAsync(hybrid.MachineId))); // задание гибрида не тронуто
+
+        // WinPE гибрида — со всеми его MAC, включая MAC PC-01, — получает своё задание.
+        (status, body) = await StartWithAsync("02:00:00:00:00:01", "02:00:00:00:00:77", "02-00-00-00-00-02");
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal(("PC-02", 2), (body.GetProperty("computerName").GetString(), body.GetProperty("seat").GetInt32()));
+    }
+
+    /// <summary>
+    /// Две записи с одним основным MAC (новый ПК зарегистрировался с MAC PC-01 первым): с какого из ПК пришла загрузка по
+    /// сети, неясно — задание ни одной из них по этому MAC не достаётся, а запрос перезаливки такой машины — отказ.
+    /// </summary>
+    [Fact]
+    public async Task Main_mac_of_two_records_leads_to_no_reinstall()
+    {
+        await PrepareAsync();
+        var pc01 = await MachineAsync();
+        (await Panel().PutAsJsonAsync($"/panel/api/v1/machines/{pc01.MachineId}/boot-mode", new { mode = "diskless" })).EnsureSuccessStatusCode();
+        var twin = await MachineAsync("hw-2", Mac, otherMacs: ["02:00:00:00:00:12"]);
+        Assert.Equal((HttpStatusCode.Conflict, "duplicateMac"), await PanelPostAsync($"/panel/api/v1/machines/{twin.MachineId}/reimage"));
+
+        // Задание взведено раньше, чем появилась вторая запись.
+        await using (var c = await _server.Services.GetRequiredService<Npgsql.NpgsqlDataSource>().OpenConnectionAsync())
+        {
+            await ExecAsync(c, null, "INSERT INTO reimage_jobs (id, machine_id, image_id, state, pxe_armed) SELECT gen_random_uuid(), @id, id, 'requested', true FROM windows_images", twin.MachineId);
+        }
+
+        Assert.DoesNotContain("wimboot", await PxeScriptAsync());
+        var (status, body) = await StartAsync();
+        Assert.Equal((HttpStatusCode.Conflict, "notArmed"), (status, Reason(body)));
+        (status, body) = await StartWithAsync(Mac, "02:00:00:00:00:12");
+        Assert.Equal((HttpStatusCode.Conflict, "notArmed"), (status, Reason(body)));
+        Assert.Equal(("requested", 0), JobState(await ReimageViewOfAsync(twin.MachineId)));
+    }
+
+    /// <summary>
+    /// WinPE сообщает основной MAC своего ПК и MAC, который есть только в списке другого взведённого ПК (адаптер, побывавший
+    /// на нём): план — своему ПК, на каком бы месте ни пришёл его MAC. Основного MAC в запросе нет — по не первому.
+    /// </summary>
+    [Fact]
+    public async Task WinPe_gets_the_job_of_the_pc_whose_main_mac_it_reports()
+    {
+        await PrepareAsync();
+        var first = await MachineAsync();
+        var second = await MachineAsync("hw-2", "02:00:00:00:00:02", otherMacs: ["02:00:00:00:00:12"]);
+        (await Panel().PostAsJsonAsync($"/panel/api/v1/machines/{first.MachineId}/reimage", new { })).EnsureSuccessStatusCode();
+        (await Panel().PostAsJsonAsync($"/panel/api/v1/machines/{second.MachineId}/reimage", new { })).EnsureSuccessStatusCode();
+
+        var (status, body) = await StartWithAsync("02:00:00:00:00:12", Mac);
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal(("PC-01", 1), (body.GetProperty("computerName").GetString(), body.GetProperty("seat").GetInt32()));
+        Assert.Equal(("requested", 0), JobState(await ReimageViewOfAsync(second.MachineId)));
+
+        (status, body) = await StartWithAsync("02:00:00:00:00:12", "AA:BB:CC:00:00:09");
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal(("PC-02", 2), (body.GetProperty("computerName").GetString(), body.GetProperty("seat").GetInt32()));
+    }
+
+    private Task<(HttpStatusCode Status, JsonElement Body)> StartWithAsync(params string[] macs) =>
+        DeployAsync(HttpMethod.Post, "/deploy/v1/start", new { macs, firmware = "uefi", disks = Disks() });
+
+    private static string? Reason(JsonElement body) => body.GetProperty("error").GetProperty("details").GetProperty("reason").GetString();
+
+    private static (string?, int) JobState(JsonElement job) => (job.GetProperty("state").GetString(), job.GetProperty("attempts").GetInt32());
+
+    private async Task<JsonElement> ReimageViewOfAsync(Guid machineId)
+    {
+        var overview = await (await Panel().GetAsync("/panel/api/v1/machines")).Content.ReadFromJsonAsync<JsonElement>();
+        return overview.GetProperty("machines").EnumerateArray().Single(m => m.GetProperty("id").GetGuid() == machineId).GetProperty("reimage");
     }
 
     private static async Task ExecAsync(Npgsql.NpgsqlConnection c, Npgsql.NpgsqlTransaction? tx, string sql, Guid id)

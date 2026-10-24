@@ -126,7 +126,7 @@ bootTime, volume { state, libraryVersion, readOnlyVerified, outdated, error, per
 | `POST /images/{label}/publish` | Сделать текущей; прежняя — откатная, более старая удаляется | 204; 404; 409 (`imageNotReady`, `imageNotGeneralized`) |
 | `POST /images/rollback` | Поменять текущую и откатную местами | 204; 409 (`noRollback`, `imageNotGeneralized`) |
 | `DELETE /images/{label}` | Удалить неопубликованную версию | 204; 409 (`inUse`) |
-| `POST /machines/{id}/reimage` `{ image?, allowNewDisk?, allowNotGeneralized? }` | Перезалить (по умолчанию текущей версией) | 202; 409 (`noImage`, `imageNotReady`, `noReservation`, `alreadyRequested`, `keaDisabled`, `imagingDisabled`, `notApproved`, `disklessMachine`, `notGeneralized`, `bootFilesMissing`, `secureBootThirdPartyCa`, `bootFilesNotSigned`, `needsCa2023BootManager`) |
+| `POST /machines/{id}/reimage` `{ image?, allowNewDisk?, allowNotGeneralized? }` | Перезалить (по умолчанию текущей версией) | 202; 409 (`noImage`, `imageNotReady`, `noReservation`, `duplicateMac`, `alreadyRequested`, `keaDisabled`, `imagingDisabled`, `notApproved`, `disklessMachine`, `notGeneralized`, `bootFilesMissing`, `secureBootThirdPartyCa`, `bootFilesNotSigned`, `needsCa2023BootManager`) |
 | `POST /machines/{id}/reimage/cancel` | Отменить, пока диск не тронут | 204; 404; 409 (`diskTouched`) |
 
 `generalized: false` ставит уже импорт: описание образа в WIM содержит «not generalized» (так подписывает эталон
@@ -140,7 +140,9 @@ bootTime, volume { state, libraryVersion, readOnlyVerified, outdated, error, per
 локального диска только в режиме `local` и без мастера. Запрос перезаливки и переключение в `diskless`/мастера
 (`reimageActive`) проверяют друг друга под блокировкой строки машины, так что гонка двух запросов не проходит; если
 флаг всё же оказался у такого ПК, WinPE получает отказ `disklessMachine` ещё до плана (диск не тронут, задание
-можно отменить). `notGeneralized` — импорт или прошлая заливка уже показали, что
+можно отменить). `duplicateMac` — основной MAC машины (первый в списке) — основной и у другой записи: неясно,
+какой ПК загрузится с него по сети, WinPE такое задание не получил бы; сначала удалить лишнюю запись.
+`notGeneralized` — импорт или прошлая заливка уже показали, что
 образ без sysprep (`generalized: false`), а `allowNotGeneralized` не задан: задание не создаётся. Если это выяснилось
 уже после создания задания (заливка другого ПК), WinPE получает отказ `notGeneralized` до плана (диск не тронут,
 задание можно отменить).

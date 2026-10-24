@@ -74,9 +74,9 @@ public sealed class DisklessBootTests : IAsyncLifetime
         return client;
     }
 
-    private async Task<TestMachine> DisklessSeatAsync(string mac = Mac)
+    private async Task<TestMachine> DisklessSeatAsync(string mac = Mac, params string[] otherMacs)
     {
-        var (machine, _) = await TestMachine.RegisterAsync(_server.CreateClient(), null, mac);
+        var (machine, _) = await TestMachine.RegisterAsync(_server.CreateClient(), null, [mac, .. otherMacs]);
         using var response = await Panel().PutAsJsonAsync($"/panel/api/v1/machines/{machine.MachineId}/boot-mode", new { mode = "diskless" });
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
         return machine;
@@ -380,6 +380,114 @@ public sealed class DisklessBootTests : IAsyncLifetime
         await PublishAsync("v1");
         Assert.Contains("booting from local disk", await BootScriptAsync());
         Assert.Null(await _storage.GetDatasetAsync($"{Seats}/seat-01"));
+    }
+
+    /// <summary>
+    /// Стенд 2026-10-25: гибриды из образа сообщают вторым MAC основной карты PC-01 (бездиск) — какой-то адаптер в образе
+    /// несёт его. Загрузка PC-01 по сети — на его диск, даже когда у гибрида взведена перезаливка (WinPE — только гибриду).
+    /// </summary>
+    [Fact]
+    public async Task Diskless_pc_boots_its_seat_although_hybrids_list_its_mac_second()
+    {
+        // Гибриды зарегистрированы раньше PC-01: тогда MAC ещё ничей, и регистрация его сохранила.
+        var hybrids = new List<TestMachine>();
+        foreach (var own in new[] { "02:00:00:00:21:01", "02:00:00:00:21:02" })
+        {
+            hybrids.Add((await TestMachine.RegisterAsync(_server.CreateClient(), null, own, Mac)).Machine);
+        }
+
+        var pc01 = await DisklessSeatAsync();
+        await PublishAsync("v1");
+        await using (var db = await _server.Services.GetRequiredService<Npgsql.NpgsqlDataSource>().OpenConnectionAsync())
+        await using (var cmd = new Npgsql.NpgsqlCommand(
+            """
+            INSERT INTO windows_images (id, label, state, source_file, file_path) VALUES (gen_random_uuid(), 'hybrid', 'ready', 'hybrid.wim', 'hybrid.wim');
+            INSERT INTO reimage_jobs (id, machine_id, image_id, state, pxe_armed) SELECT gen_random_uuid(), @id, id, 'requested', true FROM windows_images;
+            """, db))
+        {
+            cmd.Parameters.AddWithValue("id", hybrids[1].MachineId);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var script = await BootScriptAsync();
+        Assert.Contains($"sanboot iscsi:192.168.77.10::3260::{Basename}:seat-03 || goto failed", script);
+        Assert.DoesNotContain("wimboot", script);
+        Assert.Equal(pc01.MachineId, (await _server.Services.GetRequiredService<Data.MachineRepository>().FindByMacAsync(Mac))!.Id);
+        Assert.Contains("booting from local disk", await BootScriptAsync("02-00-00-00-21-01"));
+        Assert.Contains("kernel /pxe/v1/files/wimboot", await BootScriptAsync("02-00-00-00-21-02"));
+    }
+
+    [Fact]
+    public async Task Second_mac_leads_to_the_only_pc_that_lists_it_and_a_shared_one_to_none()
+    {
+        const string SecondNic = "02:00:00:00:20:12", Shared = "02:00:00:00:20:77";
+        var seat = await DisklessSeatAsync(Mac, SecondNic, Shared);
+        var (hybrid, _) = await TestMachine.RegisterAsync(_server.CreateClient(), null, "02:00:00:00:21:01", Shared);
+        await PublishAsync("v1");
+
+        // Второй NIC места — только в его списке: загрузка с него идёт на диск места.
+        Assert.Contains($"sanboot iscsi:192.168.77.10::3260::{Basename}:seat-01 || goto failed", await BootScriptAsync("02-00-00-00-20-12"));
+        // MAC в списках двух ПК (ничей не основной) не указывает ни на кого: диск места не отдаётся.
+        Assert.Contains("booting from local disk", await BootScriptAsync("02-00-00-00-20-77"));
+        var machines = _server.Services.GetRequiredService<Data.MachineRepository>();
+        Assert.Null(await machines.FindByMacAsync(Shared));
+        Assert.Equal(seat.MachineId, (await machines.FindByMacAsync(SecondNic))!.Id);
+        Assert.Equal(hybrid.MachineId, (await machines.FindByMacAsync("02:00:00:00:21:01"))!.Id);
+
+        // MAC второго NIC места новому ПК в панели не отдать; общий — можно (он ничей).
+        using (var second = await Panel().PostAsJsonAsync("/panel/api/v1/machines", new { macAddress = SecondNic }))
+        {
+            Assert.Equal(HttpStatusCode.Conflict, second.StatusCode);
+        }
+
+        using var add = await Panel().PostAsJsonAsync("/panel/api/v1/machines", new { macAddress = Shared });
+        Assert.Equal(HttpStatusCode.Created, add.StatusCode);
+        var id = (await add.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetGuid();
+        Assert.Equal(id, (await machines.FindByMacAsync(Shared))!.Id);
+
+        // Ещё один ПК из того же образа сообщает общий MAC вторым (его принёс образ) и основной MAC гибрида третьим: заготовку
+        // не усыновляет — новая машина, без MAC заготовки и гибрида.
+        var (carried, _) = await TestMachine.RegisterAsync(_server.CreateClient(), "real-hwid-04", "02:00:00:00:20:41", Shared, "02:00:00:00:21:01");
+        Assert.NotEqual(id, carried.MachineId);
+        Assert.Equal(["02:00:00:00:20:41"], (await machines.FindAsync(carried.MachineId))!.MacAddresses);
+
+        // Сам ПК заготовки (общий MAC — его основная карта) усыновляет её.
+        var (adopted, _) = await TestMachine.RegisterAsync(_server.CreateClient(), "real-hwid-03", Shared, "02:00:00:00:20:31");
+        Assert.Equal(id, adopted.MachineId);
+        Assert.Equal([Shared, "02:00:00:00:20:31"], (await machines.FindAsync(id))!.MacAddresses);
+    }
+
+    /// <summary>
+    /// Помощник усыновляет заготовку своей основной карты (первый MAC), а не заготовку с меньшим номером, MAC которой принёс
+    /// образ; через не первый MAC — если его нет у других машин. При усыновлении первым в записи встаёт MAC заготовки:
+    /// основной MAC другой машины с первого места отчёта оказался бы не первым — не сохраняется.
+    /// </summary>
+    [Fact]
+    public async Task Helper_adopts_the_placeholder_of_its_main_card_and_drops_main_macs_of_other_pcs()
+    {
+        const string Seat5 = "02:00:00:00:20:05", Seat7 = "02:00:00:00:20:07";
+        var (pc01, _) = await TestMachine.RegisterAsync(_server.CreateClient(), null, Mac);
+        async Task<Guid> AddAsync(string mac, int number)
+        {
+            using var add = await Panel().PostAsJsonAsync("/panel/api/v1/machines", new { macAddress = mac, number });
+            Assert.Equal(HttpStatusCode.Created, add.StatusCode);
+            return (await add.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetGuid();
+        }
+
+        var seat5 = await AddAsync(Seat5, 5);
+        var seat7 = await AddAsync(Seat7, 7);
+        var machines = _server.Services.GetRequiredService<Data.MachineRepository>();
+
+        // Место 7 сообщает вторым MAC заготовки места 5: усыновлена своя заготовка, MAC места 5 не сохранён.
+        var (seven, _) = await TestMachine.RegisterAsync(_server.CreateClient(), "real-hwid-07", Seat7, Seat5);
+        Assert.Equal(seat7, seven.MachineId);
+        Assert.Equal([Seat7], (await machines.FindAsync(seat7))!.MacAddresses);
+
+        // У места 5 первым оказался адаптер с MAC PC-01: заготовка усыновлена по второму MAC, MAC PC-01 не сохранён.
+        var (five, _) = await TestMachine.RegisterAsync(_server.CreateClient(), "real-hwid-05", Mac, Seat5);
+        Assert.Equal(seat5, five.MachineId);
+        Assert.Equal([Seat5], (await machines.FindAsync(seat5))!.MacAddresses);
+        Assert.Equal(pc01.MachineId, (await machines.FindByMacAsync(Mac))!.Id);
     }
 
     [Fact]
