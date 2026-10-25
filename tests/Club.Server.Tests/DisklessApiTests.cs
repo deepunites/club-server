@@ -114,6 +114,31 @@ public sealed class DisklessApiTests(ServerFixture server) : IClassFixture<Serve
         Assert.NotNull(row.LastSeenAt);
     }
 
+    /// <summary>
+    /// Имя Windows — из каждого отчёта (помощник 1.5.2+): гибрид регистрируется в specialize, до переименования ПК, и в
+    /// панели навсегда оставалось бы WIN-…. Отчёт без имени (старый помощник) или с неправдоподобным — прежнее имя.
+    /// </summary>
+    [Fact]
+    public async Task Status_with_hostname_updates_it_and_without_keeps_it()
+    {
+        var (machine, _) = await TestMachine.RegisterAsync(_http); // имя из регистрации — PC-TEST
+        var machines = server.Services.GetRequiredService<MachineRepository>();
+        async Task<string> HostnameAfterAsync(object status)
+        {
+            using var response = await machine.SendAsync(HttpMethod.Put, $"/diskless/v1/machines/{machine.MachineId}/status", status);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            return (await machines.FindAsync(machine.MachineId))!.Hostname;
+        }
+
+        Assert.Equal("PC-TEST", await HostnameAfterAsync(TestMachine.Status()));
+        Assert.Equal("PC-11", await HostnameAfterAsync(TestMachine.Status(hostname: "  PC-11 ")));
+        Assert.Equal("PC-11", await HostnameAfterAsync(TestMachine.Status()));
+        Assert.Equal("PC-11", await HostnameAfterAsync(TestMachine.Status(hostname: "   ")));
+        Assert.Equal("PC-11", await HostnameAfterAsync(TestMachine.Status(hostname: new string('x', 64))));
+        Assert.Equal("PC-11", await HostnameAfterAsync(TestMachine.Status(hostname: "PC\n12")));
+        Assert.Equal(new string('x', 63), await HostnameAfterAsync(TestMachine.Status(hostname: new string('x', 63))));
+    }
+
     [Fact]
     public async Task Unknown_volume_state_is_rejected()
     {

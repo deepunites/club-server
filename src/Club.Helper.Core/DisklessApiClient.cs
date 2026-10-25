@@ -18,10 +18,14 @@ public sealed record MountedVolume(
     string State, string? TargetIqn = null, string? LibraryVersion = null, string? DriveLetter = null, bool? ReadOnlyVerified = null, string? Error = null,
     IReadOnlyList<string>? Contents = null);
 
+/// <summary>
+/// Отчёт о ПК. <paramref name="Hostname"/> (1.5.2) — текущее имя Windows в каждом отчёте: гибрид регистрируется в
+/// specialize, до переименования ПК, а повторной регистрации нет. Старый сервер поле пропускает.
+/// </summary>
 public sealed record MachineStatus(
     string HelperVersion, DateTimeOffset? BootTime, MountedVolume Volume, IReadOnlyList<string>? DhcpServers = null,
     string? ImageVersion = null, SystemDiskFacts? SystemDisk = null, SecureBootFacts? SecureBoot = null,
-    string? InitiatorIqn = null, MasterReport? Master = null);
+    string? InitiatorIqn = null, MasterReport? Master = null, string? Hostname = null);
 
 public sealed record MasterAssignment(string TargetIqn, string Portal, string ChapUser, string ChapSecret, string DriveLetter);
 

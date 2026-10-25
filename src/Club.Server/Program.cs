@@ -88,7 +88,12 @@ if (builder.Configuration.GetValue("Database:MigrateOnStart", true))
 
 app.UseMiddleware<ApiErrorMiddleware>();
 app.UseDefaultFiles();
-app.UseStaticFiles();
+// Файлы панели — с no-cache: браузер сверяет их (ETag, 304) при каждой загрузке. Без Cache-Control он держал app.js по
+// эвристике, и после обновления сервера новая страница могла достаться со старым скриптом (пустая панель до Ctrl+F5).
+app.UseStaticFiles(new StaticFileOptions
+{
+    OnPrepareResponse = context => context.Context.Response.Headers.CacheControl = "no-cache",
+});
 app.UseMiddleware<MachineAuthMiddleware>();
 app.UseMiddleware<PanelAuthMiddleware>();
 

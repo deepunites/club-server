@@ -321,6 +321,9 @@ public sealed class FakeFactsSource(string hwid) : IMachineFactsSource
 
     public List<string> DhcpServers { get; } = [];
 
+    /// <summary>Имя Windows сейчас: как настоящий источник, перечитывается на каждый отчёт (ПК переименовали после старта).</summary>
+    public string Hostname { get; set; } = "PC-TEST";
+
     public int FullReads { get; private set; }
 
     public int IqnReads { get; private set; }
@@ -328,7 +331,7 @@ public sealed class FakeFactsSource(string hwid) : IMachineFactsSource
     public Task<MachineFacts> ReadAllAsync(CancellationToken ct)
     {
         FullReads++;
-        return Task.FromResult(new MachineFacts(hwid, "PC-TEST", ["aa:bb:cc:dd:ee:01"], "Windows 11 Pro 24H2", DateTimeOffset.UtcNow.AddMinutes(-3)));
+        return Task.FromResult(new MachineFacts(hwid, Hostname, ["aa:bb:cc:dd:ee:01"], "Windows 11 Pro 24H2", DateTimeOffset.UtcNow.AddMinutes(-3)));
     }
 
     public Task<string?> ReadInitiatorIqnAsync(CancellationToken ct)
@@ -337,7 +340,7 @@ public sealed class FakeFactsSource(string hwid) : IMachineFactsSource
         return IqnReadError is { } error ? Task.FromException<string?>(error) : Task.FromResult(InitiatorIqn);
     }
 
-    public MachineFacts Refresh(MachineFacts facts) => facts with { DhcpServers = [.. DhcpServers] };
+    public MachineFacts Refresh(MachineFacts facts) => facts with { DhcpServers = [.. DhcpServers], Hostname = Hostname };
 }
 
 /// <summary>Часы, которые идут только по команде теста: и системное время, и монотонные отметки.</summary>

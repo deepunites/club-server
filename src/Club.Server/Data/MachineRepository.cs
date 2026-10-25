@@ -351,9 +351,12 @@ public sealed class MachineRepository(NpgsqlDataSource db)
             new { id, initiatorIqn, masterState, masterError, keepMaster });
     }
 
-    /// <summary>Отчёт помощника: факты о томе на ПК и отметка «машина на связи» (считается для подписки).</summary>
+    /// <summary>
+    /// Отчёт помощника: факты о томе на ПК и отметка «машина на связи» (считается для подписки). <paramref name="hostname"/>
+    /// null — имя ПК не меняется (старый помощник его не шлёт).
+    /// </summary>
     public async Task RecordStatusAsync(Guid id, string helperVersion, string ipAddress, DateTimeOffset? bootTime, VolumeReport volume, IReadOnlyList<string>? dhcpServers, DateTimeOffset now,
-        string? imageVersion = null, string? systemDiskJson = null, string? secureBootJson = null)
+        string? imageVersion = null, string? systemDiskJson = null, string? secureBootJson = null, string? hostname = null)
     {
         await using var c = await db.OpenConnectionAsync();
         await c.ExecuteAsync(
@@ -364,13 +367,14 @@ public sealed class MachineRepository(NpgsqlDataSource db)
                    dhcp_servers = COALESCE(@dhcpServers, dhcp_servers),
                    image_version = COALESCE(@imageVersion, image_version),
                    system_disk = COALESCE(@systemDiskJson::jsonb, system_disk),
-                   secure_boot = COALESCE(@secureBootJson::jsonb, secure_boot)
+                   secure_boot = COALESCE(@secureBootJson::jsonb, secure_boot),
+                   hostname = COALESCE(@hostname, hostname)
             WHERE id = @id
             """,
             new
             {
                 id, now, helperVersion, ipAddress, bootTime, volume.State, volume.TargetIqn, volume.LibraryVersion, volume.ReadOnlyVerified, volume.Error,
-                dhcpServers = dhcpServers?.ToArray(), imageVersion, systemDiskJson, secureBootJson,
+                dhcpServers = dhcpServers?.ToArray(), imageVersion, systemDiskJson, secureBootJson, hostname,
             });
     }
 }

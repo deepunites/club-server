@@ -33,10 +33,15 @@ public sealed record MasterReport(string State, string? TargetIqn, string? Drive
 /// <summary>Мастер-том на запись — только ПК, которому администратор открыл правку. CHAP-секрет новый на каждое открытие.</summary>
 public sealed record MasterAssignment(string TargetIqn, string Portal, string ChapUser, string ChapSecret, string DriveLetter);
 
+/// <summary>
+/// Отчёт помощника. <paramref name="Hostname"/> (помощник 1.5.2+) — текущее имя Windows: гибрид регистрируется в проходе
+/// specialize, до переименования ПК, и имя из регистрации (WIN-…) иначе осталось бы навсегда. Старые помощники поля
+/// не шлют — имя из регистрации сохраняется.
+/// </summary>
 public sealed record MachineStatus(
     string HelperVersion, DateTimeOffset? BootTime, MountedVolume Volume, IReadOnlyList<string>? DhcpServers,
     string? ImageVersion = null, SystemDiskReport? SystemDisk = null, SecureBootReport? SecureBoot = null,
-    string? InitiatorIqn = null, MasterReport? Master = null);
+    string? InitiatorIqn = null, MasterReport? Master = null, string? Hostname = null);
 
 /// <summary>
 /// Ответ на отчёт. <paramref name="LibraryLetterReserved"/> — буква тома библиотеки отдана мастер-тому этого ПК
@@ -221,7 +226,8 @@ public static partial class DisklessEndpoints
             machineId, request.HelperVersion, ClientIp(context), request.BootTime,
             new VolumeReport(v.State, v.TargetIqn, v.LibraryVersion, v.ReadOnlyVerified, Truncate(v.Error, 2000)), dhcp, clock.GetUtcNow(),
             ImageVersionOrNull(request.ImageVersion), SystemDiskJson(request.SystemDisk),
-            request.SecureBoot is { } sb ? System.Text.Json.JsonSerializer.Serialize(sb, System.Text.Json.JsonSerializerOptions.Web) : null);
+            request.SecureBoot is { } sb ? System.Text.Json.JsonSerializer.Serialize(sb, System.Text.Json.JsonSerializerOptions.Web) : null,
+            HostnameOrNull(request.Hostname));
         // Состав версии — с тома, который точно версия: общий read-only (проверен) или свежий личный клон (сброшен при
         // загрузке; запись игрока до отчёта о составе почти невозможна, а состав — только список папок верхнего уровня).
         if (v is { State: "mounted", LibraryVersion: { } mountedVersion, Contents: { } contents } && (v.ReadOnlyVerified == true || options.PersonalGames))
@@ -325,6 +331,16 @@ public static partial class DisklessEndpoints
 
     private static string? ImageVersionOrNull(string? value) =>
         value is not null && Imaging.ImageLibrary.LabelPattern().IsMatch(value) ? value : null;
+
+    /// <summary>Самое длинное имя ПК из отчёта: метка DNS (имя Windows NetBIOS — до 15 символов).</summary>
+    public const int MaxHostnameLength = 63;
+
+    /// <summary>
+    /// Имя Windows из отчёта — только правдоподобное: без пробелов по краям, не пустое, до <see cref="MaxHostnameLength"/>
+    /// символов, без управляющих. Иначе (и без поля — старый помощник) прежнее имя не меняется.
+    /// </summary>
+    private static string? HostnameOrNull(string? value) =>
+        value?.Trim() is { Length: > 0 and <= MaxHostnameLength } name && !name.Any(char.IsControl) ? name : null;
 
     /// <summary>Системный диск — только с правдоподобными значениями (иначе WinPE выбрал бы диск по мусору).</summary>
     private static string? SystemDiskJson(SystemDiskReport? disk) =>

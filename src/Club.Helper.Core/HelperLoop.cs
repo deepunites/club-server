@@ -398,10 +398,11 @@ public sealed class HelperLoop(
                 report = report with { Contents = await volumes.ContentsAsync(report, ct) };
             }
 
+            // Имя Windows — в каждом отчёте (1.5.2): регистрация гибрида была ещё в specialize, до переименования ПК.
             var facts = await identity.ReadAsync(ct);
             var reply = await api.ReportStatusAsync(
                 new MachineStatus(options.HelperVersion, facts.BootTime, report, facts.DhcpServers, facts.ImageVersion, facts.SystemDisk, facts.SecureBoot,
-                    facts.InitiatorIqn, master),
+                    facts.InitiatorIqn, master, facts.Hostname),
                 ct);
             if (report.Contents is not null)
             {

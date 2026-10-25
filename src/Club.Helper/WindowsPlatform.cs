@@ -271,8 +271,12 @@ public sealed class WindowsMachineFacts : IMachineFactsSource
         return doc.RootElement.ValueKind == JsonValueKind.String ? doc.RootElement.GetString() : null;
     }
 
+    /// <summary>
+    /// «Живые» факты на каждый отчёт. Имя Windows перечитывается (<c>Environment.MachineName</c> — GetComputerName, не
+    /// кэшируется): полный опрос был на старте службы, а гибрид регистрируется ещё в specialize, до переименования ПК.
+    /// </summary>
     public MachineFacts Refresh(MachineFacts facts) =>
-        facts with { BootTime = BootTime(), DhcpServers = DhcpServers(), ImageVersion = ImageVersion() };
+        facts with { BootTime = BootTime(), DhcpServers = DhcpServers(), ImageVersion = ImageVersion(), Hostname = Environment.MachineName };
 
     private static bool? Flag(JsonElement element, string name) =>
         element.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False ? value.GetBoolean() : null;

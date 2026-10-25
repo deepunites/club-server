@@ -15,7 +15,10 @@ public interface IMachineFactsSource
     /// <summary>Только IQN инициатора iSCSI (служба инициатора запускается перед чтением); <c>null</c> — нет.</summary>
     Task<string?> ReadInitiatorIqnAsync(CancellationToken ct);
 
-    /// <summary>То, что пересчитывается на каждый отчёт: время загрузки, аренды DHCP, версия образа.</summary>
+    /// <summary>
+    /// То, что пересчитывается на каждый отчёт: время загрузки, аренды DHCP, версия образа, имя Windows (полный опрос —
+    /// на старте службы, а ПК могли переименовать и после: гибрид регистрируется ещё в specialize).
+    /// </summary>
     MachineFacts Refresh(MachineFacts facts);
 }
 

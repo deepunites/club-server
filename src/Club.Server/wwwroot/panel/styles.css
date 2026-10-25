@@ -124,12 +124,17 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 
 .muted { color: var(--muted); }
 .error { color: var(--bad); }
+main a { color: var(--accent); }
+.flush { margin: 0; }
 
 dialog { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); padding: 20px; width: min(380px, calc(100vw - 32px)); }
 dialog::backdrop { background: rgb(0 0 0 / .35); }
 dialog label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
 dialog label.check { flex-direction: row; align-items: center; gap: 8px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+/* Вопрос и сообщение панели (вместо confirm/alert): тексты длиннее полей формы, ошибки сервера — с переводами строк. */
+#ask { width: min(460px, calc(100vw - 32px)); }
+.ask-text { margin: 0 0 12px; white-space: pre-line; overflow-wrap: anywhere; }
 
 .alert {
   margin-bottom: 14px;

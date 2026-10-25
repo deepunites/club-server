@@ -139,5 +139,10 @@ public sealed class MachinesPanelTests : IAsyncLifetime
         using var page = await http.GetAsync("/panel/");
         Assert.Equal(HttpStatusCode.OK, page.StatusCode);
         Assert.Contains("app.js", await page.Content.ReadAsStringAsync());
+        // Страница и скрипт сверяются при каждой загрузке: после обновления сервера новая страница не получит старый app.js.
+        Assert.True(page.Headers.CacheControl?.NoCache);
+        using var script = await http.GetAsync("/panel/app.js?v=2");
+        Assert.Equal(HttpStatusCode.OK, script.StatusCode);
+        Assert.True(script.Headers.CacheControl?.NoCache);
     }
 }

@@ -569,6 +569,27 @@ public sealed class HelperEndToEndTests : IAsyncLifetime
         Assert.Equal((1, 1), (source.FullReads, source.IqnReads));
     }
 
+    /// <summary>
+    /// Стенд 2026-10-25: гибриды PC-11…13 зарегистрировались в specialize, до переименования ПК, и в панели навсегда
+    /// остались WIN-…: заново помощник не регистрируется. С 1.5.2 имя Windows — в каждом отчёте и перечитывается без
+    /// полного опроса фактов.
+    /// </summary>
+    [Fact]
+    public async Task Hostname_changed_after_registration_reaches_the_server_with_the_next_report()
+    {
+        var source = new FakeFactsSource(_hwid) { Hostname = "WIN-4QK1T0B7C2D" };
+        var helper = Helper(identity: new CachedMachineIdentity(source, new HelperOptions(), new ManualClock(), NullLogger<CachedMachineIdentity>.Instance));
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal("WIN-4QK1T0B7C2D", (await MachineAsync()).Hostname);
+        var token = _credentials.Current!.AccessToken;
+
+        source.Hostname = "PC-11"; // specialize применил имя места
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal("PC-11", (await MachineAsync()).Hostname);
+        Assert.Equal(token, _credentials.Current!.AccessToken); // без повторной регистрации
+        Assert.Equal(1, source.FullReads);
+    }
+
     [Fact]
     public async Task Server_down_at_boot_mounts_the_last_known_version()
     {

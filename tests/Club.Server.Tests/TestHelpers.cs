@@ -47,11 +47,13 @@ public sealed class TestMachine(HttpClient http, Guid machineId, string hwid, st
         return http.SendAsync(request);
     }
 
-    public static object Status(string state = "none", string? iqn = null, string? version = null, bool? readOnly = null) => new
+    /// <summary>Отчёт помощника; <paramref name="hostname"/> null — поля нет, как у помощника до 1.5.2.</summary>
+    public static object Status(string state = "none", string? iqn = null, string? version = null, bool? readOnly = null, string? hostname = null) => new
     {
         helperVersion = "1.0.0",
         bootTime = DateTimeOffset.UtcNow.AddMinutes(-5),
         volume = new { state, targetIqn = iqn, libraryVersion = version, driveLetter = iqn is null ? null : "G", readOnlyVerified = readOnly },
+        hostname,
     };
 }
 

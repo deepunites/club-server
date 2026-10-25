@@ -82,6 +82,61 @@
     return response.status === 204 ? null : response.json();
   }
 
+  // ---------- Диалоги ----------
+
+  // Вопрос и сообщение — свой <dialog> вместо confirm()/alert(): встроенный браузер приложения Claude их не показывает,
+  // и кнопки с подтверждением («Отменить» перезаливку) выглядели мёртвыми. Окна — по очереди: сообщение об ошибке
+  // одного действия ждёт, пока закроют вопрос другого. Esc и «Отмена» — false; ответ приходит один раз.
+  let dialogQueue = Promise.resolve();
+
+  function showDialog(text, okText, danger, withCancel) {
+    const shown = dialogQueue.then(() => new Promise((resolve) => {
+      const dialog = $("ask");
+      const ok = $("ask-ok");
+      const back = document.activeElement;
+      $("ask-text").textContent = text;
+      ok.textContent = okText;
+      ok.className = danger ? "danger-solid" : "";
+      $("ask-cancel").hidden = !withCancel;
+      dialog.returnValue = "";
+      dialog.addEventListener("close", () => {
+        // Фокус — обратно на кнопку, с которой спросили, если её не перерисовали.
+        if (back && back !== document.body && back.isConnected) back.focus();
+        resolve(dialog.returnValue === "ok");
+      }, { once: true });
+      dialog.showModal();
+      // Опасное действие не подтверждается случайным Enter: фокус на «Отмена».
+      (danger && withCancel ? $("ask-cancel") : ok).focus();
+    }));
+    dialogQueue = shown;
+    return shown;
+  }
+
+  // Вопрос «да/нет»: true — подтвердили. okText — подпись кнопки, danger — кнопка красная (стирает, отключает насильно).
+  function confirmDialog(text, { okText, danger = false } = {}) {
+    return showDialog(text, okText ?? t("ok"), danger, true);
+  }
+
+  // Сообщение с одной кнопкой; промис выполняется, когда его закрыли.
+  function alertDialog(text) {
+    return showDialog(text, t("ok"), false, false);
+  }
+
+  // Обработчик кнопки с вопросом: пока идут вопрос и запрос, повторные щелчки (и зажатый Enter на кнопке, куда вернулся
+  // фокус) не запускают действие второй раз. Кнопка не выключается, чтобы на неё вернулся фокус после окна.
+  function oneAtATime(handler) {
+    let running = false;
+    return async (event) => {
+      if (running) return;
+      running = true;
+      try {
+        await handler(event);
+      } finally {
+        running = false;
+      }
+    };
+  }
+
   function agoText(iso) {
     const seconds = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
     return seconds < 60 ? t("agoSeconds", { n: seconds })
@@ -177,20 +232,20 @@
     const active = r && ["requested", "deploying", "failed", "booting"].includes(r.state);
     const buttons = [el("button", { class: "ghost small", onclick: () => openEdit(m) }, t("edit"))];
     const toDiskless = m.bootMode !== "diskless";
-    buttons.push(el("button", { class: "ghost small", title: t(toDiskless ? "bootToDisklessHint" : "bootToLocalHint"), onclick: async () => {
-      if (!confirm(t(toDiskless ? "bootToDisklessConfirm" : "bootToLocalConfirm", { name: m.name }))) return;
+    buttons.push(el("button", { class: "ghost small", title: t(toDiskless ? "bootToDisklessHint" : "bootToLocalHint"), onclick: oneAtATime(async () => {
+      if (!(await confirmDialog(t(toDiskless ? "bootToDisklessConfirm" : "bootToLocalConfirm", { name: m.name }), { okText: t(toDiskless ? "bootToDiskless" : "bootToLocal") }))) return;
       try {
         await api(`/machines/${m.id}/boot-mode`, { method: "PUT", body: JSON.stringify({ mode: toDiskless ? "diskless" : "local" }) });
       } catch (error) {
-        alert(error.message);
+        await alertDialog(error.message);
       }
       dataJson = "";
       await load();
-    } }, t(toDiskless ? "bootToDiskless" : "bootToLocal")));
+    }) }, t(toDiskless ? "bootToDiskless" : "bootToLocal")));
     if (r && ["requested", "failed"].includes(r.state) && !r.diskTouched) {
-      buttons.push(el("button", { class: "danger small", onclick: () => {
-        if (confirm(t("reimageConfirmCancel", { name: m.name }))) act(`/machines/${m.id}/reimage/cancel`);
-      } }, t("reimageCancel")));
+      buttons.push(el("button", { class: "danger small", onclick: oneAtATime(async () => {
+        if (await confirmDialog(t("reimageConfirmCancel", { name: m.name }), { okText: t("reimageCancelYes") })) await act(`/machines/${m.id}/reimage/cancel`);
+      }) }, t("reimageCancel")));
     }
     if (m.bootMode !== "diskless" && (!active || r.state === "booting" || r.state === "failed")) {
       buttons.push(el("button", { class: "ghost small", onclick: () => openReimage(m) }, t("reimage")));
@@ -230,9 +285,9 @@
       el("div", { class: "muted" }, m.ipAddress ? `IP ${m.ipAddress} · ` : "", t("registered"), " ", ago(m.registeredAt)),
       el("div", { class: "actions" },
         el("button", { onclick: () => act(`/machines/${m.id}/approve`) }, t("approve")),
-        el("button", { class: "danger", onclick: () => {
-          if (confirm(t("rejectConfirm", { name: m.hostname }))) act(`/machines/${m.id}/reject`);
-        } }, t("reject"))))));
+        el("button", { class: "danger", onclick: oneAtATime(async () => {
+          if (await confirmDialog(t("rejectConfirm", { name: m.hostname }), { okText: t("reject"), danger: true })) await act(`/machines/${m.id}/reject`);
+        }) }, t("reject"))))));
   }
 
   function renderRows() {
@@ -540,9 +595,9 @@
     if (m.state === "open") actions.push(el("button", { onclick: () => libAct("/library/master/close", {}) }, t("masterFinish")));
     if (m.state === "failed") actions.push(el("button", { onclick: () => libAct("/library/master/close", {}) }, t("masterCleanup")));
     if ((m.state === "open" || m.state === "closing") && !m.forceClose) {
-      actions.push(el("button", { class: "danger", onclick: () => {
-        if (confirm(t("masterForceConfirm"))) libAct("/library/master/close", { force: true });
-      } }, t("masterForce")));
+      actions.push(el("button", { class: "danger", onclick: oneAtATime(async () => {
+        if (await confirmDialog(t("masterForceConfirm"), { okText: t("masterForce"), danger: true })) await libAct("/library/master/close", { force: true });
+      }) }, t("masterForce")));
     }
     if (actions.length) parts.push(el("div", { class: "master-row" }, actions));
     box.replaceChildren(...parts);
@@ -571,9 +626,9 @@
     chip("imgCurrent", lib.current?.label);
     chip("imgRollback", lib.rollback?.label);
     if (lib.rollback) {
-      chips.push(el("button", { class: "ghost small", onclick: () => {
-        if (confirm(t("libRollbackConfirm", { label: lib.rollback.label }))) libAct("/library/rollback");
-      } }, t("libRollback")));
+      chips.push(el("button", { class: "ghost small", onclick: oneAtATime(async () => {
+        if (await confirmDialog(t("libRollbackConfirm", { label: lib.rollback.label }), { okText: t("libRollback") })) await libAct("/library/rollback");
+      }) }, t("libRollback")));
     }
     $("lib-summary").replaceChildren(...chips);
 
@@ -637,7 +692,7 @@
     try {
       await api(path, { method: "POST", ...(body ? { body: JSON.stringify(body) } : {}) });
     } catch (error) {
-      alert(problemText(error));
+      await alertDialog(problemText(error));
     }
     libJson = "";
     await loadLibrary();
@@ -648,7 +703,8 @@
     const label = $("lib-label").value.trim();
     $("lib-publish-error").hidden = true;
     const dirty = lib?.master?.dirty === true;
-    if (!confirm(t(dirty ? "libPublishDirtyConfirm" : "libPublishConfirm", { label }))) return;
+    // Красная всегда: публикация разбирает самую старую версию (а с недописанным мастер-томом — ещё и рискованна).
+    if (!(await confirmDialog(t(dirty ? "libPublishDirtyConfirm" : "libPublishConfirm", { label }), { okText: t("imgPublish"), danger: true }))) return;
     $("lib-publish-button").disabled = true;
     try {
       await api("/library/versions", { method: "POST", body: JSON.stringify({ label, allowDirtyMaster: dirty }) });
@@ -683,9 +739,9 @@
     chip("imgCurrent", imgs.current);
     chip("imgRollback", imgs.rollback);
     if (imgs.rollback) {
-      chips.push(el("button", { class: "ghost small", onclick: () => {
-        if (confirm(t("imgRollbackConfirm", { label: imgs.rollback }))) imageAct("/images/rollback", "POST");
-      } }, t("imgRollbackBtn")));
+      chips.push(el("button", { class: "ghost small", onclick: oneAtATime(async () => {
+        if (await confirmDialog(t("imgRollbackConfirm", { label: imgs.rollback }), { okText: t("imgRollbackBtn") })) await imageAct("/images/rollback", "POST");
+      }) }, t("imgRollbackBtn")));
     }
     $("img-summary").replaceChildren(...chips);
 
@@ -729,14 +785,15 @@
         `${w.index}. ${w.name}`, w.build ? ` · ${w.build}` : "", w.architecture ? ` · ${w.architecture}` : ""));
       const actions = [];
       if (i.state === "ready" && i.role !== "current" && i.generalized !== false) {
-        actions.push(el("button", { class: "small", onclick: () => {
-          if (confirm(t("imgPublishConfirm", { label: i.label }))) imageAct(`/images/${encodeURIComponent(i.label)}/publish`, "POST");
-        } }, t("imgPublish")));
+        // Вопрос с красной кнопкой: публикация удаляет самую старую версию образа.
+        actions.push(el("button", { class: "small", onclick: oneAtATime(async () => {
+          if (await confirmDialog(t("imgPublishConfirm", { label: i.label }), { okText: t("imgPublish"), danger: true })) await imageAct(`/images/${encodeURIComponent(i.label)}/publish`, "POST");
+        }) }, t("imgPublish")));
       }
       if (!i.publishedAt && !i.role && i.state !== "importing") {
-        actions.push(el("button", { class: "danger small", onclick: () => {
-          if (confirm(t("imgDeleteConfirm", { label: i.label }))) imageAct(`/images/${encodeURIComponent(i.label)}`, "DELETE");
-        } }, t("imgDelete")));
+        actions.push(el("button", { class: "danger small", onclick: oneAtATime(async () => {
+          if (await confirmDialog(t("imgDeleteConfirm", { label: i.label }), { okText: t("imgDelete"), danger: true })) await imageAct(`/images/${encodeURIComponent(i.label)}`, "DELETE");
+        }) }, t("imgDelete")));
       }
       return el("tr", {},
         el("td", { class: "mono" }, el("b", {}, i.label)),
@@ -788,7 +845,7 @@
     try {
       await api(path, { method });
     } catch (error) {
-      alert(problemText(error));
+      await alertDialog(problemText(error));
     }
     imgsJson = "";
     await loadImages();
@@ -833,9 +890,9 @@
       box.push(el("p", { class: "muted small" }, t(dl.masterInstall ? "dlMasterInstallSteps" : "dlMasterEditSteps")));
       const actions = [];
       if (dl.masterInstall) actions.push(el("button", { onclick: () => dlAct("/diskless/master", "PUT", { machineId: dl.masterMachineId, install: false }) }, t("dlMasterInstalled")));
-      actions.push(el("button", { class: "ghost", onclick: () => {
-        if (confirm(t("dlMasterOffConfirm"))) dlAct("/diskless/master", "PUT", { machineId: null, install: false });
-      } }, t("dlMasterOff")));
+      actions.push(el("button", { class: "ghost", onclick: oneAtATime(async () => {
+        if (await confirmDialog(t("dlMasterOffConfirm"), { okText: t("dlMasterOff") })) await dlAct("/diskless/master", "PUT", { machineId: null, install: false });
+      }) }, t("dlMasterOff")));
       box.push(el("div", { class: "master-row" }, actions));
     } else if (dl.machines.length === 0) {
       box.push(el("p", { class: "muted small" }, t("dlNoMachines")));
@@ -891,7 +948,7 @@
     try {
       await api(path, { method, ...(body ? { body: JSON.stringify(body) } : {}) });
     } catch (error) {
-      alert(t(`dlErr_${error.reason}`) !== `dlErr_${error.reason}` ? t(`dlErr_${error.reason}`) : error.message);
+      await alertDialog(t(`dlErr_${error.reason}`) !== `dlErr_${error.reason}` ? t(`dlErr_${error.reason}`) : error.message);
     }
     dlJson = "";
     await loadDiskless();
@@ -909,32 +966,6 @@
       $("dl-publish-error").hidden = false;
     }
     dlJson = "";
-    await loadDiskless();
-  }
-
-  async function addDisklessMachine(event) {
-    event.preventDefault();
-    const result = $("dl-add-result");
-    const number = $("dl-add-number").value.trim();
-    try {
-      const added = await api("/machines", { method: "POST", body: JSON.stringify({
-        macAddress: $("dl-add-mac").value.trim(),
-        number: number ? Number(number) : null,
-        name: $("dl-add-name").value.trim() || null,
-        bootMode: "diskless",
-      }) });
-      result.className = "small ok-text";
-      result.textContent = t("dlAdded", { name: added.name, number: added.number });
-      $("dl-add-mac").value = "";
-      $("dl-add-number").value = "";
-      $("dl-add-name").value = "";
-    } catch (error) {
-      result.className = "error small";
-      result.textContent = t(`dlErr_${error.reason}`) !== `dlErr_${error.reason}` ? t(`dlErr_${error.reason}`) : error.message;
-    }
-    result.hidden = false;
-    dlJson = "";
-    dataJson = "";
     await loadDiskless();
   }
 
@@ -991,8 +1022,41 @@
     try {
       await api(path, { method: "POST" });
     } catch (error) {
-      alert(error.message);
+      await alertDialog(error.message);
     }
+    await load();
+  }
+
+  // Новый ПК по MAC: ПК, которому негде зарегистрироваться самому (новый гибрид без Windows, бездиск). Гибрид (local)
+  // потом ставится перезаливкой по сети, бездиск (diskless) сразу грузится с личного диска места; помощник при первой
+  // регистрации привязывается к этой записи.
+  async function addMachine(event) {
+    event.preventDefault();
+    const result = $("add-result");
+    const number = $("add-number").value.trim();
+    const mode = $("add-mode").value;
+    $("add-button").disabled = true;
+    try {
+      const added = await api("/machines", { method: "POST", body: JSON.stringify({
+        macAddress: $("add-mac").value.trim(),
+        number: number ? Number(number) : null,
+        name: $("add-name").value.trim() || null,
+        bootMode: mode,
+      }) });
+      result.className = "small ok-text";
+      result.textContent = t(mode === "diskless" ? "dlAdded" : "addedLocal", { name: added.name, number: added.number });
+      $("add-mac").value = "";
+      $("add-number").value = "";
+      $("add-name").value = "";
+    } catch (error) {
+      result.className = "error small";
+      result.textContent = t(`dlErr_${error.reason}`) !== `dlErr_${error.reason}` ? t(`dlErr_${error.reason}`) : error.message;
+    } finally {
+      $("add-button").disabled = false;
+    }
+    result.hidden = false;
+    dlJson = "";
+    dataJson = "";
     await load();
   }
 
@@ -1032,7 +1096,7 @@
     route();
     clearInterval(timer);
     timer = setInterval(() => {
-      if (document.hidden || $("edit").open || $("reimage").open) return;
+      if (document.hidden || $("edit").open || $("reimage").open || $("ask").open) return;
       refresh();
       refreshAgo();
     }, REFRESH_MS);
@@ -1095,12 +1159,23 @@
     $("lib-publish").addEventListener("submit", publishLibrary);
     $("lib-label").addEventListener("input", () => { $("lib-label").dataset.auto = "0"; });
     $("dl-publish").addEventListener("submit", publishDiskless);
-    $("dl-add").addEventListener("submit", addDisklessMachine);
-    $("dl-label").addEventListener("input", () => { $("dl-label").dataset.auto = "0"; });
-    $("dl-rollback").addEventListener("click", () => {
-      if (confirm(t("dlRollbackConfirm", { previous: dl?.rollbackVersion ?? "" }))) dlAct("/diskless/rollback", "POST");
+    $("add-machine").addEventListener("submit", addMachine);
+    // Подсказка на «Бездиске» ведёт к общей форме уже с режимом «Бездиск» (по умолчанию там «Гибрид») и сразу к полю MAC.
+    // pushState не шлёт hashchange — экран переключается один раз, здесь.
+    $("dl-add-go").addEventListener("click", (event) => {
+      event.preventDefault();
+      $("add-mode").value = "diskless";
+      history.pushState(null, "", "#machines");
+      route();
+      $("add-machine").scrollIntoView({ block: "start" });
+      $("add-mac").focus({ preventScroll: true });
     });
+    $("dl-label").addEventListener("input", () => { $("dl-label").dataset.auto = "0"; });
+    $("dl-rollback").addEventListener("click", oneAtATime(async () => {
+      if (await confirmDialog(t("dlRollbackConfirm", { previous: dl?.rollbackVersion ?? "" }), { okText: t("dlRollback") })) await dlAct("/diskless/rollback", "POST");
+    }));
     $("reimage-cancel").addEventListener("click", () => $("reimage").close());
+    $("ask-cancel").addEventListener("click", () => $("ask").close());
     window.addEventListener("hashchange", route);
     if (token) showApp(); else logout();
   });
