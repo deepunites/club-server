@@ -226,8 +226,11 @@ Start-Service ClubDisklessHelper
 
 - **Бездиск:** ПК-мастер в режиме мастера → `install-helper.ps1` → `prepare-golden.ps1` → перезагрузка →
   `seal-golden.ps1` → публикация эталона («Бездиск»), затем перезагрузка мест вне работы клуба.
-- **Гибриды — на месте:** флешка с exe, `club-ca.pem` и `install-helper.ps1` (helper.json не нужен — остаётся
-  установленный), вход под администратором клуба мимо киоска (Shift при входе), запуск скрипта, ~5 минут. G: при
+- **Гибриды — на месте:** по сети, без флешки — PowerShell от администратора, одна строка
+  `irm http://192.168.1.201:5080/pxe/v1/files/tools/update-helper-net.ps1 | iex` (`scripts/golden/update-helper-net.ps1`:
+  скачивает с сервера `ClubDisklessHelper-<версия>.exe`, `install-helper-<версия>.ps1` и `club-ca.pem` из
+  `/srv/club/pxe/tools`, сверяет SHA256 exe и отпечаток CA, запускает `install-helper.ps1`); или флешка с exe,
+  `club-ca.pem` и `install-helper.ps1` (helper.json не нужен — остаётся установленный), вход под администратором клуба мимо киоска (Shift при входе), запуск скрипта, ~5 минут. G: при
   перезапуске службы не сбрасывается и не отключается (запрос при старте идёт с `attached=true`); игры Riot на SSD не
   трогаются. Скрипт в конце показывает G:, H: и занята ли буква H: другим томом.
 - **Образ гибрида для перезаливок** (PC-11, PC-21 и новые): h1e = h1d + exe 1.6.0 — `scripts/server/patch-hybrid-wim.sh`;
