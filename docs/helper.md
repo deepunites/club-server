@@ -219,8 +219,10 @@ Start-Service ClubDisklessHelper
 
 ### Обновление до 1.6.0 в клубе
 
-Один exe 1.6.0 (сборка выше, `-o out/helper-1.6.0`) — для эталона, гибридов и образа гибрида; его SHA256 закрепляется в
-`scripts/golden/install-helper.ps1` (`$ExeSha256`; пока там заглушка `TODO-1.6.0-SHA`, и скрипт отказывается ставить).
+Один exe 1.6.0 (сборка выше, `-o out/helper-1.6.0`) — для эталона, гибридов и образа гибрида: `1.6.0+13609a5`
+(.NET 10.0.13), SHA256 `26635a5f7aab4d77441d0b0138064b9c7f64bb1daf4b0bcaf09052439ddd0148` закреплён в
+`scripts/golden/install-helper.ps1` (`$ExeSha256`). На флешке рядом — для отката exe 1.5.1 (`out/helper-1.5.1`) и
+`install-helper.ps1` из git `1b748fa`.
 
 - **Бездиск:** ПК-мастер в режиме мастера → `install-helper.ps1` → `prepare-golden.ps1` → перезагрузка →
   `seal-golden.ps1` → публикация эталона («Бездиск»), затем перезагрузка мест вне работы клуба.

@@ -30,9 +30,8 @@ $ErrorActionPreference = 'Continue'
 # $PSScriptRoot в значении параметра по умолчанию пуст при запуске powershell.exe -File (PS 5.1) — берём папку скрипта здесь.
 if (-not $Source) { $Source = Split-Path -Parent $MyInvocation.MyCommand.Path }
 
-# TODO-1.6.0-SHA: SHA256 сборки 1.6.0 вписывается, когда собран релиз (один exe — для эталона, гибридов и h1e;
-# patch-hybrid-wim.sh сверяет exe с этой строкой). До этого скрипт отказывается ставить.
-$ExeSha256 = 'TODO-1.6.0-SHA'   # 1.6.0+<коммит> (.NET 10.0.13)
+# Один exe 1.6.0 — для эталона, гибридов и h1e (patch-hybrid-wim.sh сверяет exe с этой строкой).
+$ExeSha256 = '26635a5f7aab4d77441d0b0138064b9c7f64bb1daf4b0bcaf09052439ddd0148'   # 1.6.0+13609a5 (.NET 10.0.13)
 $ExeVersion = '1.6.0'
 $ServiceName = 'ClubDisklessHelper'
 $InstallDir = "$env:ProgramFiles\ClubDiskless"
