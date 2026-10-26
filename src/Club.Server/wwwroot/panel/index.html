@@ -74,6 +74,40 @@
         <p id="add-result" class="small" hidden></p>
       </form>
 
+      <!-- Зоны мест: оператор создаёт их сам («Зона 4», «VIP»), новые ПК попадают в зону по умолчанию. -->
+      <div id="zones" class="card lib-card spaced-card">
+        <h2 data-i18n="zonesTitle">Зоны</h2>
+        <p class="muted small" data-i18n="zonesHint"></p>
+        <div class="zones-grid">
+          <div class="table-wrap inner">
+            <table>
+              <thead>
+                <tr>
+                  <th data-i18n="colZone">Зона</th>
+                  <th data-i18n="zoneMachines">ПК</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="zone-rows"></tbody>
+            </table>
+          </div>
+          <div class="zone-forms">
+            <form id="zone-add" class="publish-row">
+              <label><span data-i18n="zoneName">Название</span><input id="zone-add-name" maxlength="40" required></label>
+              <button type="submit" id="zone-add-button" data-i18n="zoneAddButton">Добавить зону</button>
+            </form>
+            <p id="zone-add-result" class="small" hidden></p>
+            <form id="zone-assign" class="publish-row spaced-top" novalidate>
+              <label><span data-i18n="colZone">Зона</span><select id="zone-assign-zone"></select></label>
+              <label><span data-i18n="zoneSeats">Места</span><input id="zone-assign-seats" class="mono" placeholder="11-20, 25"></label>
+              <button type="submit" id="zone-assign-button" data-i18n="zoneAssignButton">Назначить места</button>
+            </form>
+            <p class="muted small" data-i18n="zoneSeatsHint"></p>
+            <p id="zone-assign-result" class="small" hidden></p>
+          </div>
+        </div>
+      </div>
+
       <div class="table-wrap">
         <table>
           <thead>
@@ -371,6 +405,18 @@
       <div class="dialog-actions">
         <button type="button" class="ghost" id="edit-cancel" data-i18n="cancel">Отмена</button>
         <button type="submit" id="edit-save" data-i18n="save">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="zone-rename">
+    <form id="zone-rename-form" method="dialog">
+      <h2 data-i18n="zoneRenameTitle">Переименовать зону</h2>
+      <label><span data-i18n="zoneName">Название</span><input id="zone-rename-name" maxlength="40" required></label>
+      <p id="zone-rename-error" class="error" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="ghost" id="zone-rename-cancel" data-i18n="cancel">Отмена</button>
+        <button type="submit" id="zone-rename-save" data-i18n="save">Сохранить</button>
       </div>
     </form>
   </dialog>

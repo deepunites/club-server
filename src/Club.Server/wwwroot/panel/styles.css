@@ -232,3 +232,14 @@ td.wrap { white-space: normal; min-width: 300px; }
 #rows .row-actions { flex-direction: column; align-items: stretch; }
 .spaced-top { margin-top: 12px; }
 .ok-text { color: var(--ok); }
+
+/* Карточка «Зоны»: слева список зон, справа добавление и назначение мест. */
+.zones-grid { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+.zones-grid .table-wrap.inner th:first-child, .zones-grid .table-wrap.inner td:first-child { padding-left: 0; }
+.zone-forms .publish-row select { min-width: 160px; }
+#zone-assign-seats { width: 200px; }
+.warn-text { color: var(--warn); }
+
+@media (max-width: 900px) {
+  .zones-grid { grid-template-columns: 1fr; }
+}

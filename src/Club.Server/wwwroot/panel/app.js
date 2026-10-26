@@ -1,4 +1,4 @@
-// Экраны «Рабочие станции», «Библиотека игр», «Образы Windows», «Бездиск» и «Сеть». Без сборки и внешних зависимостей: панель работает в клубе без интернета.
+// Экраны «Рабочие станции» (с зонами мест), «Библиотека игр», «Образы Windows», «Бездиск» и «Сеть». Без сборки и внешних зависимостей: панель работает в клубе без интернета.
 (() => {
   "use strict";
 
@@ -24,6 +24,8 @@
   let libJson = "";
   let dl = null;
   let dlJson = "";
+  let zonesKey = "";
+  let renamingZone = null;
   const openContents = new Set();
   const NET_FIELDS = ["subnet", "interface", "dhcpServer", "gateway", "dnsServers", "poolStart", "poolEnd", "reservedStart", "leaseTimeSec", "keaSubnetId"];
 
@@ -75,6 +77,7 @@
     if (!response.ok) {
       const body = await response.json().catch(() => null);
       const error = new Error(body?.error?.message || `HTTP ${response.status}`);
+      error.status = response.status;
       error.reason = body?.error?.details?.reason;
       error.details = body?.error?.details;
       throw error;
@@ -310,10 +313,176 @@
     }));
   }
 
+  // ---------- Зоны ----------
+
+  // Список зон и выбор зоны для «Назначить места» перестраиваются, только когда изменились сами зоны (или язык):
+  // обновление раз в 5 с не сбрасывает выбранную зону и не пересоздаёт кнопки под курсором.
+  function renderZones() {
+    const key = lang + JSON.stringify(data.zones);
+    if (key === zonesKey) return;
+    zonesKey = key;
+    $("zone-rows").replaceChildren(...data.zones.map((z) => {
+      // Зону по умолчанию и непустую удалить нельзя: кнопка выключена, причина — во всплывающей подсказке (и в тексте карточки).
+      const blocked = z.isDefault ? t("zoneDeleteDefault") : z.machines > 0 ? t("zoneDeleteInUse", { n: z.machines }) : "";
+      const remove = el("button", { class: "danger small", onclick: oneAtATime(() => deleteZone(z)), ...(blocked ? { disabled: "" } : {}) }, t("zoneDelete"));
+      return el("tr", {},
+        el("td", {}, z.name, z.isDefault ? [" ", badge("idle", t("zoneDefault"), t("zoneDefaultHint"))] : null),
+        el("td", { class: "num" }, z.machines),
+        el("td", {}, el("div", { class: "row-actions" },
+          el("button", { class: "ghost small", onclick: () => openZoneRename(z) }, t("zoneRename")),
+          blocked ? el("span", { title: blocked }, remove) : remove)));
+    }));
+    fillZoneSelect($("zone-assign-zone"), $("zone-assign-zone").value);
+  }
+
+  // Выбор зоны (в «Назначить места» и в окне «Изменить»): выбранной остаётся picked, если такая зона ещё есть.
+  function fillZoneSelect(select, picked) {
+    select.replaceChildren(...data.zones.map((z) => el("option", { value: z.id }, z.name)));
+    if (data.zones.some((z) => z.id === picked)) select.value = picked;
+  }
+
+  // Текст ошибки API зон: причина из ответа сервера — переводом, 404 — «зоны уже нет».
+  function zoneError(error) {
+    if (error.status === 404) return t("zoneGone");
+    const key = `zoneErr_${error.reason}`;
+    return t(key) !== key ? t(key, { n: error.details?.machines ?? "" }) : error.message;
+  }
+
+  const MAX_SEATS = 1000;
+
+  // Места «11-20, 25» → [11…20, 25]: номера и диапазоны через запятую, точку с запятой или пробел; тире любое,
+  // пробелы вокруг тире можно. Ошибка — { error } с текстом для оператора.
+  function parseSeats(text) {
+    const parts = text.replace(/\s*[-–—]\s*/g, "-").split(/[\s,;]+/).filter(Boolean);
+    if (!parts.length) return { error: t("zoneSeatsEmpty") };
+    const numbers = new Set();
+    for (const part of parts) {
+      const match = /^(\d+)(?:-(\d+))?$/.exec(part);
+      if (!match) return { error: t("zoneSeatsBad", { part }) };
+      const from = Number(match[1]);
+      const to = match[2] === undefined ? from : Number(match[2]);
+      if (from < 1 || to > 9999) return { error: t("zoneSeatsRange", { part }) };
+      if (from > to) return { error: t("zoneSeatsReversed", { part }) };
+      for (let n = from; n <= to; n++) {
+        numbers.add(n);
+        if (numbers.size > MAX_SEATS) return { error: t("zoneSeatsTooMany", { max: MAX_SEATS }) };
+      }
+    }
+    return { numbers: [...numbers].sort((a, b) => a - b) };
+  }
+
+  // [7, 8, 9, 12] → «7-9, 12».
+  function formatSeats(numbers) {
+    const ranges = [];
+    for (const n of numbers) {
+      const last = ranges[ranges.length - 1];
+      if (last && n === last[1] + 1) last[1] = n;
+      else ranges.push([n, n]);
+    }
+    return ranges.map(([a, b]) => (a === b ? `${a}` : `${a}-${b}`)).join(", ");
+  }
+
+  async function addZone(event) {
+    event.preventDefault();
+    const result = $("zone-add-result");
+    let created = null;
+    $("zone-add-button").disabled = true;
+    try {
+      created = await api("/zones", { method: "POST", body: JSON.stringify({ name: $("zone-add-name").value.trim() }) });
+      result.className = "small ok-text";
+      result.textContent = t("zoneAdded", { name: created.name });
+      $("zone-add-name").value = "";
+    } catch (error) {
+      result.className = "error small";
+      result.textContent = zoneError(error);
+    } finally {
+      $("zone-add-button").disabled = false;
+    }
+    result.hidden = false;
+    dataJson = "";
+    await load();
+    // Новую зону — сразу в «Назначить места».
+    if (created && data?.zones.some((z) => z.id === created.id)) $("zone-assign-zone").value = created.id;
+  }
+
+  async function assignSeats(event) {
+    event.preventDefault();
+    const result = $("zone-assign-result");
+    const zoneId = $("zone-assign-zone").value;
+    const parsed = parseSeats($("zone-assign-seats").value);
+    result.hidden = false;
+    if (parsed.error) {
+      result.className = "error small";
+      result.textContent = parsed.error;
+      return;
+    }
+    $("zone-assign-button").disabled = true;
+    try {
+      const done = await api(`/zones/${encodeURIComponent(zoneId)}/machines`, { method: "POST", body: JSON.stringify({ numbers: parsed.numbers }) });
+      const text = [t("zoneAssigned", { zone: zoneName(zoneId), n: done.assigned })];
+      if (done.unknown.length) text.push(t("zoneUnknownSeats", { seats: formatSeats(done.unknown) }));
+      result.className = done.unknown.length ? "small warn-text" : "small ok-text";
+      result.textContent = text.join(" ");
+      if (!done.unknown.length) $("zone-assign-seats").value = "";
+    } catch (error) {
+      result.className = "error small";
+      result.textContent = zoneError(error);
+    } finally {
+      $("zone-assign-button").disabled = false;
+    }
+    dataJson = "";
+    await load();
+  }
+
+  function openZoneRename(zone) {
+    renamingZone = zone;
+    $("zone-rename-name").value = zone.name;
+    $("zone-rename-error").hidden = true;
+    $("zone-rename").showModal();
+    $("zone-rename-name").select();
+  }
+
+  async function saveZoneRename(event) {
+    event.preventDefault();
+    const name = $("zone-rename-name").value.trim();
+    if (name === renamingZone.name) {
+      $("zone-rename").close();
+      return;
+    }
+    $("zone-rename-save").disabled = true;
+    try {
+      await api(`/zones/${encodeURIComponent(renamingZone.id)}`, { method: "PATCH", body: JSON.stringify({ name }) });
+      $("zone-rename").close();
+      dataJson = "";
+      await load();
+    } catch (error) {
+      $("zone-rename-error").textContent = zoneError(error);
+      $("zone-rename-error").hidden = false;
+      // Зону удалили или название заняли в другой вкладке: список за окном — свежий («список обновлён» в тексте ошибки),
+      // обновление раз в 5 с на паузе, пока окно открыто.
+      dataJson = "";
+      await load();
+    } finally {
+      $("zone-rename-save").disabled = false;
+    }
+  }
+
+  async function deleteZone(zone) {
+    if (!(await confirmDialog(t("zoneDeleteConfirm", { name: zone.name }), { okText: t("zoneDelete"), danger: true }))) return;
+    try {
+      await api(`/zones/${encodeURIComponent(zone.id)}`, { method: "DELETE" });
+    } catch (error) {
+      await alertDialog(zoneError(error));
+    }
+    dataJson = "";
+    await load();
+  }
+
   function render() {
     if (!data) return;
     renderSummary();
     renderPending();
+    renderZones();
     renderRows();
   }
 
@@ -1064,8 +1233,7 @@
     editing = machine;
     $("edit-number").value = machine.number;
     $("edit-name").value = machine.name;
-    $("edit-zone").replaceChildren(...data.zones.map((z) => el("option", { value: z.id }, z.name)));
-    $("edit-zone").value = machine.zone;
+    fillZoneSelect($("edit-zone"), machine.zone);
     $("edit-maintenance").checked = machine.status === "maintenance";
     $("edit-error").hidden = true;
     $("edit").showModal();
@@ -1085,8 +1253,17 @@
       dataJson = "";
       await load();
     } catch (error) {
-      $("edit-error").textContent = error.reason === "numberTaken" ? t("numberTaken") : error.message;
+      const zoneGone = error.details?.field === "zone";
+      $("edit-error").textContent = error.reason === "numberTaken" ? t("numberTaken")
+        : zoneGone ? t("zoneGoneEdit")
+        : error.message;
       $("edit-error").hidden = false;
+      if (zoneGone) {
+        // Зону удалили, пока окно было открыто: список зон в окне — заново, без неё; выбрана текущая зона ПК.
+        dataJson = "";
+        await load();
+        fillZoneSelect($("edit-zone"), data.machines.find((m) => m.id === editing.id)?.zone ?? editing.zone);
+      }
     }
   }
 
@@ -1096,7 +1273,7 @@
     route();
     clearInterval(timer);
     timer = setInterval(() => {
-      if (document.hidden || $("edit").open || $("reimage").open || $("ask").open) return;
+      if (document.hidden || $("edit").open || $("reimage").open || $("ask").open || $("zone-rename").open) return;
       refresh();
       refreshAgo();
     }, REFRESH_MS);
@@ -1160,6 +1337,10 @@
     $("lib-label").addEventListener("input", () => { $("lib-label").dataset.auto = "0"; });
     $("dl-publish").addEventListener("submit", publishDiskless);
     $("add-machine").addEventListener("submit", addMachine);
+    $("zone-add").addEventListener("submit", addZone);
+    $("zone-assign").addEventListener("submit", assignSeats);
+    $("zone-rename-form").addEventListener("submit", saveZoneRename);
+    $("zone-rename-cancel").addEventListener("click", () => $("zone-rename").close());
     // Подсказка на «Бездиске» ведёт к общей форме уже с режимом «Бездиск» (по умолчанию там «Гибрид») и сразу к полю MAC.
     // pushState не шлёт hashchange — экран переключается один раз, здесь.
     $("dl-add-go").addEventListener("click", (event) => {

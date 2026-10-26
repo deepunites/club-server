@@ -29,7 +29,11 @@ public sealed record ReimageView(
     string State, string Image, string? Step, int? Percent, string? Message, string? Failure, bool DiskTouched, bool PxeArmed,
     int Attempts, DateTimeOffset UpdatedAt, bool AllowNotGeneralized);
 
-public sealed record ZoneView(string Id, string Name);
+/// <summary>Зона в списке панели: <c>machines</c> — сколько машин реестра в ней, <c>isDefault</c> — зона новых машин (не удаляется).</summary>
+public sealed record ZoneView(string Id, string Name, int Machines, bool IsDefault)
+{
+    public static ZoneView From(ZoneRow zone) => new(zone.Id, zone.Name, zone.Machines, zone.Id == ZoneRepository.DefaultId);
+}
 
 /// <summary>
 /// Отправка списка ПК внешней системе (<c>MachineFeed</c>; null — выключена). <c>state</c>: <c>pending</c> (ещё не
@@ -59,7 +63,7 @@ public static class MachinesPanelEndpoints
     {
         var panel = app.MapGroup(PanelAuthMiddleware.Prefix + "/v1");
 
-        panel.MapGet("/machines", async (MachineRepository machines, LibraryRepository library, LibraryOptions libraryOptions, Imaging.ImageRepository images, Integration.MachineFeedOptions feedOptions, Integration.MachineFeedState feed, TimeProvider clock, ILoggerFactory logs) =>
+        panel.MapGet("/machines", async (MachineRepository machines, ZoneRepository zones, LibraryRepository library, LibraryOptions libraryOptions, Imaging.ImageRepository images, Integration.MachineFeedOptions feedOptions, Integration.MachineFeedState feed, TimeProvider clock, ILoggerFactory logs) =>
         {
             var logger = logs.CreateLogger("Club.Server.Panel.Sanity");
             var now = clock.GetUtcNow();
@@ -72,7 +76,7 @@ public static class MachinesPanelEndpoints
             return Results.Json(
                 new MachinesOverview(
                     views,
-                    (await machines.ZonesAsync()).Select(z => new ZoneView(z.Id, z.Name)).ToList(),
+                    (await zones.AllAsync()).Select(ZoneView.From).ToList(),
                     current,
                     views.Count(v => v.Status == "online"),
                     views.Count(v => v.Status is "offline" or "neverSeen"),

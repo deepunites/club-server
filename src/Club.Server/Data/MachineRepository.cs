@@ -326,12 +326,11 @@ public sealed class MachineRepository(NpgsqlDataSource db)
         {
             return UpdateResult.NumberTaken;
         }
-    }
-
-    public async Task<IReadOnlyList<(string Id, string Name)>> ZonesAsync()
-    {
-        await using var c = await db.OpenConnectionAsync();
-        return (await c.QueryAsync<(string, string)>("SELECT id, name FROM zones ORDER BY name")).ToList();
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation)
+        {
+            // Зону удалили между проверкой и записью.
+            return UpdateResult.UnknownZone;
+        }
     }
 
     /// <summary>
