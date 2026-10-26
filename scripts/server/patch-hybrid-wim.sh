@@ -14,6 +14,11 @@
 # unattend-hybrid.xml, SetupComplete.cmd и nvcp/ — из scripts/golden (с git 532d026, образа h1c, не менялись).
 # Пример (h1c, 2026-10-25): sh patch-hybrid-wim.sh h1b-club-admin h1c-club-admin-2026-10-25 /tmp/h1c-stage
 # h1e = h1d + помощник 1.6.0 (диск H:): sh patch-hybrid-wim.sh <метка h1d> h1e-helper-1.6.0-<дата> /tmp/h1e-stage
+# Шаги для exe (путь с пробелом: extract образа-источника и строка add в кавычках) на машине разработки не запускались —
+# там нет wimlib. Первый запуск h1e — на сервере заранее, не в день перезаливки: результат сверяется по SHA256 каждого
+# файла и wimlib-imagex verify, при любой ошибке ничего не остаётся. Без записи проверить извлечение exe из h1d:
+#   wimlib-imagex extract /srv/club/images/images/<метка h1d>/install.wim 1 \
+#     '/Program Files/ClubDiskless/ClubDisklessHelper.exe' --to-stdout | sha256sum      # SHA помощника в h1d
 set -eu
 SRC=/srv/club/images/images/$1/install.wim
 NAME=$2
@@ -35,9 +40,11 @@ got_exe=$(sha256sum "$STAGE/ClubDisklessHelper.exe" | cut -d' ' -f1)
 [ ! -e "$IN/$NAME.wim" ] || { echo "уже есть $IN/$NAME.wim" >&2; exit 1; }
 # Пути в WIM без учёта регистра, как в Windows (иначе add создаст второй /windows/... рядом с /Windows/...).
 export WIMLIB_IMAGEX_IGNORE_CASE=1
-# Меняется только exe: служба и helper.json — из эталона, в образе-источнике помощник уже должен стоять.
-wimlib-imagex dir "$SRC" 1 --path="/Program Files/ClubDiskless" | grep -qi '/ClubDisklessHelper\.exe$' \
+# Меняется только exe: служба и helper.json — из эталона, в образе-источнике помощник уже должен стоять. Форма
+# extract --to-stdout — та же, что в проверке ниже (ею собран h1c); путь с пробелом — одним аргументом.
+wimlib-imagex extract "$SRC" 1 "$HELPER" --to-stdout > /dev/null \
   || { echo "в $SRC нет $HELPER — помощник в образе не установлен" >&2; exit 1; }
+echo "помощник в $SRC: $(wimlib-imagex extract "$SRC" 1 "$HELPER" --to-stdout | sha256sum | cut -d' ' -f1)"
 # Недоделанная копия (17 ГБ) не остаётся на томе образов при любой ошибке.
 trap 'rm -f "$IN/$NAME.wim.partial" "$IN/$NAME.verify.log"' EXIT
 

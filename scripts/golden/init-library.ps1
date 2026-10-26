@@ -54,8 +54,9 @@ $part = New-Partition -DiskNumber $disk.Number -UseMaximumSize -DriveLetter $Let
 $vol = Format-Volume -Partition $part -FileSystem NTFS -AllocationUnitSize 65536 -NewFileSystemLabel $Label -Confirm:$false
 Write-Host ("Готово: {0}: — {1}, {2:N0} ГБ свободно, кластер 64 КБ." -f $Letter, $vol.FileSystemLabel, ($vol.SizeRemaining / 1GB)) -ForegroundColor Green
 if ($Library -eq 'solo') {
-    # Steam хранит список своих библиотек на G: (G:\Steam\steamapps\libraryfolders.vdf) — для Steam открыть правку и G:.
-    Write-Host 'Ставьте игры в H:\Games, игры Steam — в библиотеку Steam H:\SteamLibrary (для неё откройте правку и G:).' -ForegroundColor Green
+    # На H: — только папки игр с exe, без лаунчеров: Steam и его список библиотек — на G:, Epic, Ubisoft и Rockstar
+    # записывают установки на C: (docs/master-editing.md).
+    Write-Host 'Ставьте игры в H:\Games — папки игр, запуск exe без лаунчера (Steam, Epic, Ubisoft, Rockstar — только на G:).' -ForegroundColor Green
     Write-Host 'Потом — в панели «Закончить правку» и «Опубликовать» у Offline Games (и у Online Games, если правили G:).' -ForegroundColor Green
 } else {
     Write-Host ('Ставьте Steam и игры на {0}:. Потом — в панели «Закончить правку» и «Опубликовать».' -f $Letter) -ForegroundColor Green

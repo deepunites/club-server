@@ -14,15 +14,16 @@
 #   <VM zvol>                daily 04:30,      7 days on ssd,    14 days + Sundays 8 weeks -> backup/vm/clubserver
 #   ssd/club/diskless/win11  img-* (versions the server publishes), daily 05:15, kept as on ssd -> backup/diskless/win11
 # Not backed up: games/club/seats, games/club/published, ssd/club/diskless/seats (rebuilt by the server), ssd/iso, hdd/club.
-# Quotas on hdd, GiB: hdd/backup 800 (games 640, images 160) next to hdd/club 900 (H:) = 1700 of ~1750 in the pool, so
-# copies and H: never take each other's room. hdd/backup/games holds the full G: replica plus 3 weeks of changes: G:
-# content above ~500 GB makes the weekly G: replication fail on quota (TrueNAS alert «Replication games-lib to hdd
-# failed»; check: zfs list -o space -r hdd/backup). Then move room from hdd/club to hdd/backup, never both above the
-# pool. The owner confirms the split before --quotas; the numbers are the three variables below.
+# Quotas on hdd, GiB (split confirmed by the owner 2026-10-26: H: gets 1 TiB, the copies the rest): hdd/backup 720
+# (games 560, images 160) next to hdd/club 1024 (H:) = 1744 of ~1790 (1.75 TiB) in the pool, so copies and H: never take
+# each other's room. hdd/backup/games holds the full G: replica plus 3 weeks of changes: G: content above ~400 GB makes
+# the weekly G: replication fail on quota (TrueNAS alert «Replication games-lib to hdd failed»; check:
+# zfs list -o space -r hdd/backup). Then move room from hdd/club to hdd/backup, never both above the pool. The numbers
+# are the three variables below.
 set -eu
 GIB=1073741824
-BACKUP_QUOTA=800 # hdd/backup: everything below
-GAMES_QUOTA=640  # hdd/backup/games: the G: replica
+BACKUP_QUOTA=720 # hdd/backup: everything below
+GAMES_QUOTA=560  # hdd/backup/games: the G: replica
 IMAGES_QUOTA=160 # hdd/backup/images: the hybrid images replica
 
 json_field() { python3 -c "import json,sys; v=json.load(sys.stdin); print($1)"; }
