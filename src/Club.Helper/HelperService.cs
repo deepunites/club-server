@@ -4,7 +4,8 @@ namespace Club.Helper;
 
 /// <summary>
 /// Такт помощника сразу после старта службы и дальше каждые <see cref="HelperOptions.PollIntervalSec"/> секунд: G:, потом
-/// остальные библиотеки (<see cref="HelperLoops"/>; сбой такта — там же, в журнал).
+/// остальные библиотеки (<see cref="HelperLoops"/>; сбой такта — там же, в журнал). Время тактов библиотек входит в паузу
+/// (<see cref="HelperLoops.DelayAfterTick"/>): отчёт G: идёт с тем же шагом, что у помощника 1.5.
 /// </summary>
 public sealed class HelperService(HelperLoops loops, HelperOptions options, ILogger<HelperService> logger) : BackgroundService
 {
@@ -15,7 +16,7 @@ public sealed class HelperService(HelperLoops loops, HelperOptions options, ILog
         while (!stoppingToken.IsCancellationRequested)
         {
             await loops.TickAsync(stoppingToken);
-            await Task.Delay(interval, stoppingToken);
+            await Task.Delay(loops.DelayAfterTick(interval), stoppingToken);
         }
     }
 

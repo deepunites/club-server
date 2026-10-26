@@ -240,4 +240,42 @@ public sealed class SoloPanelTests : IAsyncLifetime
         Assert.Equal("none", machine.GetProperty("volume").GetProperty("state").GetString());
         Assert.False(machine.TryGetProperty("masterState", out _));
     }
+
+    /// <summary>
+    /// ПК с помощником 1.6.0, который о H: не отчитывается (helper.json "Libraries": [], цикл H: стоит): его последний отчёт
+    /// о H: старше 90 с — на «Рабочих станциях» тома H: нет, как на экране H: (а не вечное «H: ошибка»); в списке ПК правки
+    /// H: — reporting false, и открыть на нём правку нельзя (409 libraryNotReported): мастер-том никто бы не подключил.
+    /// Отчитался — правка открывается. У G: ни поля, ни проверки.
+    /// </summary>
+    [Fact]
+    public async Task Pc_without_fresh_h_reports_shows_no_h_volume_and_is_not_offered_for_h_editing()
+    {
+        await _stand.PublishAsync(_stand.Solo, "v1");
+        var pc = await _stand.RegisterAsync(1);
+        await _stand.Solo.Machines!.RecordAsync(
+            pc.MachineId, new Data.VolumeReport("failed", null, "v1", null, "drive letter H is in use"), null, null, DateTimeOffset.UtcNow.AddMinutes(-5));
+
+        var machine = (await GetAsync("/machines")).GetProperty("machines").EnumerateArray().Single(m => m.GetProperty("id").GetGuid() == pc.MachineId);
+        var solo = Assert.Single(machine.GetProperty("libraries").EnumerateArray()).GetProperty("volume");
+        Assert.Equal("none", solo.GetProperty("state").GetString());
+        Assert.False(solo.TryGetProperty("error", out _));
+        Assert.Equal((1, 0, 0, 0, 0, 1), Adoption(await GetAsync("/libraries/solo")));
+
+        JsonElement Candidate(JsonElement overview) => Assert.Single(overview.GetProperty("masterCandidates").EnumerateArray());
+        var candidate = Candidate(await GetAsync("/libraries/solo"));
+        Assert.Equal((true, false), (candidate.GetProperty("supported").GetBoolean(), candidate.GetProperty("reporting").GetBoolean()));
+        var (refused, body) = await PostAsync("/libraries/solo/master/open", new { machineId = pc.MachineId });
+        Assert.Equal(HttpStatusCode.Conflict, refused);
+        Contract.AssertError(body, "conflict", "libraryNotReported");
+        Assert.Equal("closed", (await _stand.Solo.Master.GetAsync()).State);
+        Assert.False(Candidate(await GetAsync("/library")).TryGetProperty("reporting", out _));
+
+        using (var report = await SoloStand.SoloStatusAsync(pc, SoloWireTests.SoloReport()))
+        {
+            Assert.Equal(HttpStatusCode.OK, report.StatusCode);
+        }
+
+        Assert.True(Candidate(await GetAsync("/libraries/solo")).GetProperty("reporting").GetBoolean());
+        Assert.Equal(HttpStatusCode.Accepted, (await PostAsync("/libraries/solo/master/open", new { machineId = pc.MachineId })).Status);
+    }
 }

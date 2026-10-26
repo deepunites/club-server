@@ -101,6 +101,12 @@ public interface IWindowsStorage
     /// <summary>Назначает букву основному разделу диска. Буква занята другим томом — исключение.</summary>
     Task AssignDriveLetterAsync(int diskNumber, char letter, CancellationToken ct);
 
+    /// <summary>
+    /// Буква занята каким-то томом (та же проверка, что в <see cref="AssignDriveLetterAsync"/>): у библиотек не-G: —
+    /// перед входом в таргет, чтобы не подключать диск, которому букву всё равно не дать (картридер, DVD на H:).
+    /// </summary>
+    Task<bool> DriveLetterInUseAsync(char letter, CancellationToken ct);
+
     /// <summary>Папки верхнего уровня тома (без скрытых и системных) — «состав» версии библиотеки для панели.</summary>
     Task<IReadOnlyList<string>> ListFoldersAsync(char driveLetter, CancellationToken ct);
 

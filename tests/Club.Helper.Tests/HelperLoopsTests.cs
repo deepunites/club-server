@@ -7,7 +7,8 @@ namespace Club.Helper.Tests;
 
 /// <summary>
 /// Такт помощника 1.6.0 (служба: <see cref="HelperLoops"/>): сначала G:, потом H:, по очереди и каждый в своём try/catch;
-/// Windows не ответила в такте G: — H: этот такт пропускает; клиент API и его refresh-токен — один на оба цикла.
+/// Windows не ответила в такте G: — H: этот такт пропускает; клиент API и его refresh-токен — один на оба цикла; медленный
+/// такт H: не сдвигает отчёты G: (пауза короче на его время, после такта дольше 40 с H: пропускает такты).
 /// </summary>
 public sealed class HelperLoopsTests : IAsyncLifetime
 {
@@ -28,13 +29,15 @@ public sealed class HelperLoopsTests : IAsyncLifetime
 
     public async Task DisposeAsync() => await _stand.DisposeAsync();
 
-    private HelperLoops Helper(Func<string?, IAssignmentCache>? cache = null)
+    private HelperLoops Helper(Func<string?, IAssignmentCache>? cache = null, TimeProvider? clock = null)
     {
         var options = new HelperOptions { ClubKey = ServerFixture.ClubKey, DiskWaitSec = 1, HelperVersion = "1.6.0" };
         _tokens = new Tokens();
         var api = new DisklessApiClient(_stand.Server.CreateDefaultClient(_recorder.Handler(), _tokens), options, _stand.Credentials, _stand.Identity);
-        return HelperLoops.Create(api, _windows, new FakeProcesses(), _stand.Identity, options, TimeProvider.System, _loggers, cache ?? _stand.Cache);
+        return HelperLoops.Create(api, _windows, new FakeProcesses(), _stand.Identity, options, clock ?? TimeProvider.System, _loggers, cache ?? _stand.Cache);
     }
+
+    private int GamesReports => _recorder.Paths.Count(p => p.EndsWith("/status", StringComparison.Ordinal) && !IsLibraryPath(p));
 
     private static bool IsLibraryPath(string path) => path.Contains("/libraries/", StringComparison.Ordinal);
 
@@ -162,5 +165,90 @@ public sealed class HelperLoopsTests : IAsyncLifetime
         Assert.Equal(("mounted", "mounted"), (helper.Games.LastReport!.State, helper.Libraries[0].LastReport!.State));
         Assert.DoesNotContain(_recorder.Lines(p => true), l => l.EndsWith("-> 403", StringComparison.Ordinal) || l.EndsWith("-> 500", StringComparison.Ordinal));
         Assert.Equal(1, _tokens.MaxInFlight);
+    }
+
+    /// <summary>
+    /// Диск H: подключился, а Windows на нём зависла: PowerShell сдался через 120 с. Следующий такт G: начинается сразу
+    /// (пауза съедена тактом H:), дальше H: две минуты не тактует: отчёты G: идут каждые 30 с, как у помощника 1.5, — а не
+    /// раз в 150 с, после которых панель считала бы ПК выключенным (окно «на связи» — 90 с). Потом H: пробует снова.
+    /// </summary>
+    [Fact]
+    public async Task H_tick_that_hangs_on_windows_is_backed_off_and_g_keeps_its_pace()
+    {
+        var clock = new ManualClock();
+        var helper = Helper(clock: clock);
+        var interval = TimeSpan.FromSeconds(30);
+        _windows.OnFindDisk = iqn =>
+        {
+            if (iqn == LibrariesStand.SoloSeat)
+            {
+                clock.Advance(TimeSpan.FromSeconds(120));
+            }
+        };
+        _windows.FindDiskErrors[LibrariesStand.SoloSeat] = new TimeoutException("PowerShell did not finish in 120 s");
+
+        await helper.TickAsync(CancellationToken.None);
+        var solo = helper.Libraries[0];
+        Assert.Equal(("mounted", "failed"), (helper.Games.LastReport!.State, solo.LastReport!.State));
+        Assert.True(solo.WindowsTimedOut);
+        Assert.True(helper.LibrariesElapsed >= TimeSpan.FromSeconds(120));
+        Assert.Equal(TimeSpan.Zero, helper.DelayAfterTick(interval)); // отчёт G: — сразу, без ещё 30 с паузы
+        var warning = Assert.Single(_loggers.Of(LoopsCategory), e => e.Level == LogLevel.Warning);
+        Assert.StartsWith("Library solo tick took", warning.Message);
+
+        _windows.OnFindDisk = null;
+        _windows.FindDiskErrors.Clear();
+        var soloRequests = _recorder.Paths.Count(IsLibraryPath);
+        var lookups = _windows.DiskLookups.Count;
+        var reports = GamesReports;
+        for (var i = 1; i <= 3; i++)
+        {
+            clock.Advance(interval); // 30, 60, 90 с паузы H: из 120
+            await helper.TickAsync(CancellationToken.None);
+            Assert.Equal(reports + i, GamesReports);
+            Assert.Equal(interval, helper.DelayAfterTick(interval));
+        }
+
+        Assert.Equal(soloRequests, _recorder.Paths.Count(IsLibraryPath));
+        Assert.All(_windows.DiskLookups.Skip(lookups), iqn => Assert.Equal(LibrariesStand.GamesSeat, iqn));
+        Assert.Single(_loggers.Of(LoopsCategory), e => e.Level == LogLevel.Warning);
+
+        clock.Advance(interval); // пауза H: прошла
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal("mounted", solo.LastReport!.State);
+        Assert.True(_windows.Sessions[LibrariesStand.SoloSeat] is { ReadOnly: false, Offline: false, Letter: 'H' });
+        Assert.Contains(_loggers.Of(LoopsCategory), e => e.Level == LogLevel.Information && e.Message.StartsWith("Library solo ticks on time again", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Такт H: шёл 25 с (сервер собирал диск, Windows долго подключала его): пауза до следующего такта — 5 с, отчёт G:
+    /// идёт с прежним шагом 30 с; такт H: не медленный — в следующем такте H: как обычно.
+    /// </summary>
+    [Fact]
+    public async Task H_tick_time_is_taken_from_the_pause_so_g_reports_at_the_same_pace()
+    {
+        var clock = new ManualClock();
+        var helper = Helper(clock: clock);
+        var slow = true;
+        _windows.OnFindDisk = iqn =>
+        {
+            if (iqn == LibrariesStand.SoloSeat && slow)
+            {
+                slow = false;
+                clock.Advance(TimeSpan.FromSeconds(25));
+            }
+        };
+
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(("mounted", "mounted"), (helper.Games.LastReport!.State, helper.Libraries[0].LastReport!.State));
+        Assert.Equal(TimeSpan.FromSeconds(25), helper.LibrariesElapsed);
+        Assert.Equal(TimeSpan.FromSeconds(5), helper.DelayAfterTick(TimeSpan.FromSeconds(30)));
+
+        var soloRequests = _recorder.Paths.Count(IsLibraryPath);
+        clock.Advance(TimeSpan.FromSeconds(5));
+        await helper.TickAsync(CancellationToken.None);
+        Assert.True(_recorder.Paths.Count(IsLibraryPath) > soloRequests);
+        Assert.Equal(TimeSpan.FromSeconds(30), helper.DelayAfterTick(TimeSpan.FromSeconds(30)));
+        Assert.DoesNotContain(_loggers.Of(LoopsCategory), e => e.Level >= LogLevel.Warning);
     }
 }

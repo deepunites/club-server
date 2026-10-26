@@ -26,7 +26,7 @@
   // экране «Библиотека игр», запоминается в браузере.
   let libs = [];
   let libKey = safeGet(localStorage, "panel.library") || "games";
-  let libPath = "/library"; // путь API библиотеки, чьи данные сейчас на экране (lib): по нему — её кнопки
+  let libPath = "/library"; // путь API библиотеки, чьи данные сейчас на экране (lib): по нему — её кнопки; null — данных нет
   let libSwitchKey = "";
   let dl = null;
   let dlJson = "";
@@ -741,11 +741,32 @@
       if (error.message === "unauthorized") throw error;
       if (!libs.length) return;
     }
-    // Выбранную выключили на сервере (или её нет) — экран G:.
+    // Выбранную выключили на сервере (или её нет) — экран G:, с чистого листа (метка, набранная для той, G: не достаётся).
     if (!currentLib() && libKey !== "games") {
       libKey = "games";
-      libJson = "";
+      resetLibrary();
     }
+  }
+
+  // Экран библиотеки, чьих данных ещё нет (переключили, выбранную выключили на сервере): ни версий, ни кнопок прежней — иначе
+  // «Закончить правку», «Открыть для правки» или «Повторить» ушли бы по её пути (libPath), пока новая грузится или если
+  // загрузка не удалась. Данные, раскрытый состав и метка — тоже чужие: всё заново.
+  function resetLibrary() {
+    lib = null;
+    libJson = "";
+    libPath = null;
+    openContents.clear();
+    $("lib-label").value = "";
+    $("lib-label").dataset.auto = "1";
+    $("lib-publish-error").hidden = true;
+    $("lib-publish-button").disabled = true;
+    $("lib-error").hidden = true;
+    $("lib-disabled").hidden = true;
+    $("lib-warnings").hidden = true;
+    $("lib-ops").hidden = true;
+    $("lib-empty").hidden = true;
+    $("lib-master").parentElement.classList.remove("open");
+    for (const id of ["lib-summary", "lib-warning-list", "lib-adoption", "lib-master", "lib-op-list", "lib-rows", "lib-history"]) $(id).replaceChildren();
   }
 
   // Переключатель «Online Games (G:) / Offline Games (H:)» — только когда работающих библиотек больше одной.
@@ -770,13 +791,7 @@
     if (key === libKey) return;
     libKey = key;
     safeSet(localStorage, "panel.library", key === "games" ? null : key);
-    // Данные, раскрытый состав и предложенная метка — чужой библиотеки: всё заново.
-    lib = null;
-    libJson = "";
-    openContents.clear();
-    $("lib-label").value = "";
-    $("lib-label").dataset.auto = "1";
-    $("lib-publish-error").hidden = true;
+    resetLibrary();
     renderLibSwitch();
     loadLibrary();
   }
@@ -834,7 +849,11 @@
     const m = lib.master;
     const box = $("lib-master");
     box.parentElement.classList.toggle("open", !!m && m.state !== "closed");
-    if (!m) { box.replaceChildren(); return; }
+    if (!m) {
+      box.replaceChildren();
+      $("lib-publish-button").disabled = false; // после resetLibrary кнопка выключена до данных библиотеки
+      return;
+    }
     const parts = [];
     const head = [badge(MASTER_STATE[m.state] || "idle", t(`ms_${m.state}`))];
     if (m.machineName && m.state !== "closed") head.push(el("span", {}, " ", t("masterOnPc", { name: m.machineName, letter: m.driveLetter })));
@@ -856,11 +875,13 @@
       if (candidates.length === 0) {
         parts.push(el("p", { class: "muted small" }, t("masterNoCandidates")));
       } else {
-        // supported: false (только у H:) — помощник ПК эту библиотеку не знает: сервер откажет в правке (409
-        // helperTooOld), поэтому отметка — прямо в списке.
+        // supported: false (только у H:) — помощник ПК эту библиотеку не знает (409 helperTooOld); reporting: false — знает,
+        // но её цикл на ПК не идёт (helper.json "Libraries": [], стоит; 409 libraryNotReported). Отметка — прямо в списке.
         const v = shownLib()?.minHelper ?? "1.6.0";
+        const letter = shownLib()?.driveLetter ?? "H";
+        const mark = (c) => c.supported === false ? ` · ${t("needsHelper", { v })}` : c.reporting === false ? ` · ${t("noLibraryReports", { letter })}` : "";
         const select = el("select", { "aria-label": t("masterPc") }, candidates.map((c) =>
-          el("option", { value: c.id }, `${c.name}${c.online ? ` · ${t("online")}` : ""}${c.supported === false ? ` · ${t("needsHelper", { v })}` : ""}`)));
+          el("option", { value: c.id }, `${c.name}${c.online ? ` · ${t("online")}` : ""}${mark(c)}`)));
         actions.push(select, el("button", { onclick: () => libAct(`${libPath}/master/open`, { machineId: select.value }) }, t("masterOpen")));
       }
     }
@@ -979,6 +1000,7 @@
 
   async function publishLibrary(event) {
     event.preventDefault();
+    if (!lib || !libPath) return; // данные выбранной библиотеки ещё не пришли — публиковать нечего и некуда
     const label = $("lib-label").value.trim();
     $("lib-publish-error").hidden = true;
     const dirty = lib?.master?.dirty === true;

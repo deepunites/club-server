@@ -167,6 +167,12 @@ public sealed class WindowsStorage : IWindowsStorage
             new Dictionary<string, string> { ["CLUB_DISK"] = diskNumber.ToString(CultureInfo.InvariantCulture), ["CLUB_LETTER"] = letter.ToString() },
             ct);
 
+    public async Task<bool> DriveLetterInUseAsync(char letter, CancellationToken ct) =>
+        (await PowerShell.RunAsync(
+            "if (Get-Volume -DriveLetter $env:CLUB_LETTER -ErrorAction SilentlyContinue) { 'yes' } else { 'no' }",
+            new Dictionary<string, string> { ["CLUB_LETTER"] = letter.ToString() },
+            ct)).Trim() == "yes";
+
     private static Dictionary<string, string> Disk(int number) => new() { ["CLUB_DISK"] = number.ToString(CultureInfo.InvariantCulture) };
 
     private static IReadOnlyList<string> ParseStrings(string json)

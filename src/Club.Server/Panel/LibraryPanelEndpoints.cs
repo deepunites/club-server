@@ -21,9 +21,12 @@ public sealed record MasterView(
 
 /// <summary>
 /// ПК, на котором можно открыть мастер-том: одобрен и сообщил IQN инициатора. <c>supported</c> — только у библиотек не-G::
-/// помощник ПК её умеет (PersonalMinHelper, 1.6.0); иначе открытие — 409 <c>helperTooOld</c>.
+/// помощник ПК её умеет (PersonalMinHelper, 1.6.0); иначе открытие — 409 <c>helperTooOld</c>. <c>reporting</c> — тоже только
+/// у них: последний отчёт ПК об этой библиотеке не старше окна «на связи» (90 с), то есть её цикл на ПК работает; иначе
+/// (helper.json <c>"Libraries": []</c>, цикл спит или стоит) мастер-том никто не подключит — открытие 409
+/// <c>libraryNotReported</c>.
 /// </summary>
-public sealed record MasterCandidate(Guid Id, int Number, string Name, bool Online, bool? Supported = null);
+public sealed record MasterCandidate(Guid Id, int Number, string Name, bool Online, bool? Supported = null, bool? Reporting = null);
 
 public sealed record MasterOpenRequest(Guid MachineId);
 
@@ -94,9 +97,11 @@ public static class LibraryPanelEndpoints
             return Results.Json(new OperationAccepted(operationId), ApiJson.Options, statusCode: StatusCodes.Status202Accepted);
         });
 
-        group.MapPost("/master/open", async (MasterOpenRequest request, HttpContext context, LibrarySet libraries) =>
+        group.MapPost("/master/open", async (MasterOpenRequest request, HttpContext context, LibrarySet libraries, Data.MachineRepository machines, TimeProvider clock) =>
         {
-            var editor = library(context, libraries).Editor;
+            var slot = library(context, libraries);
+            await RequireReportsAsync(slot, request.MachineId, machines, clock);
+            var editor = slot.Editor;
             var operationId = await Guard(() => editor.RequestOpenAsync(request.MachineId, "panel"));
             return Results.Json(new OperationAccepted(operationId), ApiJson.Options, statusCode: StatusCodes.Status202Accepted);
         });
@@ -144,6 +149,30 @@ public static class LibraryPanelEndpoints
         });
     }
 
+    /// <summary>
+    /// Правка библиотеки не-G: — только на ПК, чей цикл этой библиотеки работает (свежий отчёт о ней): иначе сервер открыл
+    /// бы таргет, к которому никто не подключится, и панель показывала бы открытую правку без ПК. Остальные отказы (нет
+    /// ПК, не одобрен, помощник старше, нет IQN) — у MasterEditor, с прежними кодами; у G: проверки нет.
+    /// </summary>
+    private static async Task RequireReportsAsync(LibrarySlot library, Guid machineId, Data.MachineRepository machines, TimeProvider clock)
+    {
+        if (library.Machines is null
+            || await machines.FindAsync(machineId) is not { Approved: true } machine
+            || !library.Options.SupportsHelper(machine.HelperVersion)
+            || string.IsNullOrWhiteSpace(machine.InitiatorIqn))
+        {
+            return;
+        }
+
+        if (!MachinesPanelEndpoints.IsRecent((await library.Machines.FindAsync(machineId))?.ReportedAt, clock.GetUtcNow()))
+        {
+            throw new ApiException(StatusCodes.Status409Conflict, ErrorCodes.Conflict,
+                $"This PC has not reported the {library.Title} ({library.Options.DriveLetter}:) library recently: its helper does not run it " +
+                "(helper.json \"Libraries\") or the loop is stuck; choose a PC whose helper reports it",
+                new { reason = "libraryNotReported" });
+        }
+    }
+
     /// <summary>Библиотека по ключу из пути: <c>games</c> — G:, иначе работающая из Libraries; выключенная или неизвестная — 404.</summary>
     private static LibrarySlot ByKey(LibrarySet libraries, string? key) =>
         key == LibraryNames.Games.Key ? libraries.Main : libraries.Find(key ?? "") ?? throw ApiException.NotFound("library");
@@ -167,7 +196,7 @@ public static class LibraryPanelEndpoints
         var labels = versions.ToDictionary(v => v.Id, v => v.Label);
         var now = clock.GetUtcNow();
         var registry = await machines.AllAsync();
-        bool Recent(DateTimeOffset? seen) => seen is { } at && at <= now.AddMinutes(5) && now - at <= MachinesPanelEndpoints.OnlineWindow;
+        bool Recent(DateTimeOffset? seen) => MachinesPanelEndpoints.IsRecent(seen, now);
         bool IsOnline(Data.MachineRow m) => Recent(m.LastSeenAt);
         var reports = library.Machines is null ? null : (await library.Machines.AllAsync()).ToDictionary(r => r.MachineId);
         PcLibrary Reported(Data.MachineRow m) =>
@@ -182,9 +211,14 @@ public static class LibraryPanelEndpoints
             masterState.State, masterState.MachineId, masterMachine?.Name, masterPc?.MasterState, masterState.Dirty, masterState.ForceClose,
             masterState.OpenedAt, masterState.CloseRequestedAt, masterState.ClosedAt, masterState.LastError, options.MasterDriveLetter,
             masterPc is { MasterState: "mounting" or "failed" } pc ? pc.MasterError : null);
-        // supported — только у библиотек не-G:: правку открывают лишь помощнику, который её умеет (иначе 409 helperTooOld).
+        // supported и reporting — только у библиотек не-G:: правку открывают лишь помощнику, который её умеет (иначе 409
+        // helperTooOld) и чей цикл её сейчас ведёт (иначе 409 libraryNotReported).
         var candidates = registry.Where(m => m.Approved && !string.IsNullOrEmpty(m.InitiatorIqn))
-            .Select(m => new MasterCandidate(m.Id, m.Number, m.Name, IsOnline(m), library.Names.IsMain ? null : options.SupportsHelper(m.HelperVersion))).ToList();
+            .Select(m => reports is null
+                ? new MasterCandidate(m.Id, m.Number, m.Name, IsOnline(m))
+                : new MasterCandidate(m.Id, m.Number, m.Name, IsOnline(m), options.SupportsHelper(m.HelperVersion),
+                    reports.TryGetValue(m.Id, out var r) && Recent(r.ReportedAt)))
+            .ToList();
         var online = registry.Where(m => m.Approved && IsOnline(m)).Select(Reported).ToList();
         var mounted = online.Where(m => m.VolumeState is "mounted" or "switchPending" && m.VolumeVersion is not null)
             .GroupBy(m => m.VolumeVersion!)

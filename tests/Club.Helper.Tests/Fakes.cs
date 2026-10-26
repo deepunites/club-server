@@ -131,9 +131,13 @@ public sealed class FakeWindowsStorage : IWindowsStorage
     /// <summary>Для каких таргетов искали диск — по порядку.</summary>
     public List<string> DiskLookups { get; } = [];
 
+    /// <summary>Что делать при поиске диска таргета до ответа (тест двигает часы: «PowerShell шёл 120 с»).</summary>
+    public Action<string>? OnFindDisk { get; set; }
+
     public Task<DiskInfo?> FindDiskAsync(string targetIqn, CancellationToken ct)
     {
         DiskLookups.Add(targetIqn);
+        OnFindDisk?.Invoke(targetIqn);
         if (FindDiskErrors.TryGetValue(targetIqn, out var error))
         {
             return Task.FromException<DiskInfo?>(error);
@@ -183,6 +187,15 @@ public sealed class FakeWindowsStorage : IWindowsStorage
 
         Disk(diskNumber).Letter = letter;
         return Task.CompletedTask;
+    }
+
+    /// <summary>Для каких букв спрашивали, заняты ли они.</summary>
+    public List<char> LetterChecks { get; } = [];
+
+    public Task<bool> DriveLetterInUseAsync(char letter, CancellationToken ct)
+    {
+        LetterChecks.Add(letter);
+        return Task.FromResult(LocalLetters.Contains(letter) || _sessions.Values.Any(d => d.Letter == letter));
     }
 
     /// <summary>Вход с CHAP: какие учётные данные передал помощник (секрет проверяет «таргет» — поле ExpectedChap).</summary>

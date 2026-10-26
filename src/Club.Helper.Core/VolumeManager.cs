@@ -258,8 +258,36 @@ public sealed class VolumeManager(
     private static bool IsTimeout(Exception ex, CancellationToken ct) =>
         ex is TimeoutException || (ex is OperationCanceledException && !ct.IsCancellationRequested);
 
+    /// <summary>Буква тома библиотеки не-G: была занята чужим томом при последней попытке: пока занята — в журнал один раз, а не каждый такт.</summary>
+    private bool _letterTaken;
+
     private async Task<MountedVolume> MountAsync(VolumeAssignment desired, char letter, CancellationToken ct)
     {
+        if (_markers.Key is not null && await storage.DriveLetterInUseAsync(letter, ct))
+        {
+            // Буква библиотеки не-G: (H:) занята картридером, DVD или локальным диском: таргет не подключаем вовсе. Иначе
+            // каждый такт — вход в iSCSI, диск online на запись, отказ буквы, отключение и ошибка в журнале (а не
+            // отключился — диск на запись под чужой буквой). Проверка — каждый такт: букву освободили — том встаёт сразу.
+            // У G: занятая буква — неверная настройка ПК, путь прежний (как у помощника 1.5).
+            if (!_letterTaken)
+            {
+                logger.LogWarning("Drive letter {Letter} is taken by another volume (card reader, DVD, local disk); {Iqn} is not connected until it is free", letter, desired.TargetIqn);
+            }
+            else
+            {
+                logger.LogDebug("Drive letter {Letter} is still taken; {Iqn} not connected", letter, desired.TargetIqn);
+            }
+
+            _letterTaken = true;
+            return new MountedVolume("failed", desired.TargetIqn, desired.LibraryVersion, letter.ToString(), ReadOnlyVerified: false, Error: $"drive letter {letter} is in use");
+        }
+
+        if (_letterTaken)
+        {
+            _letterTaken = false;
+            logger.LogInformation("Drive letter {Letter} is free again; connecting {Iqn}", letter, desired.TargetIqn);
+        }
+
         var (host, port) = ParsePortal(desired.Portal);
         try
         {

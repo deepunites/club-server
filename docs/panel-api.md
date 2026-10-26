@@ -30,8 +30,8 @@ camelCase, enum строками, время `2026-09-27T10:15:30.123Z`, оши�
 `masterDirty` (отключён принудительно, нужна явная публикация с `allowDirtyMaster: true`).
 
 В обзоре `master { state (closed|opening|open|closing|failed), machineId, machineName, machineState, machineError, dirty,
-forceClose, openedAt, closeRequestedAt, closedAt, lastError, driveLetter }` и `masterCandidates [{ id, number, name, online, supported }]` —
-одобренные ПК, чей помощник сообщил IQN инициатора (`supported` — только у библиотеки по ключу, см. ниже). `lastError` у открытого тома — оговорка открытия шага verify, а
+forceClose, openedAt, closeRequestedAt, closedAt, lastError, driveLetter }` и `masterCandidates [{ id, number, name, online, supported, reporting }]` —
+одобренные ПК, чей помощник сообщил IQN инициатора (`supported` и `reporting` — только у библиотеки по ключу, см. ниже). `lastError` у открытого тома — оговорка открытия шага verify, а
 не ошибка: либо таргет мастер-тома так и не стал виден ПК суперклиента и после повторных применений конфигурации iSCSI
 (`The master target is not visible to the superclient PC …`, подсказка — перезапуск службы iSCSI, если буква
 мастер-тома не появится), либо группа инициаторов мастер-тома не включает IQN этого ПК (`The initiator group of the master target
@@ -100,7 +100,9 @@ extent|lun|verify|promote|done), attempts, lastError, requestedBy, createdAt, up
   docs/diskless-api.yaml); ПК на связи (по отчёту G:) без свежего отчёта о ней (помощник старше 1.6.0, цикл H: не
   отвечает) — `notMounted`. `master.machineState`/`machineError` — из того же отчёта, мастер-том G: на это не влияет.
   `masterCandidates[].supported` — помощник ПК умеет эту библиотеку (`minHelper`); открытие правки остальным — 409
-  `helperTooOld`. У G: поля `supported` нет.
+  `helperTooOld`. `masterCandidates[].reporting` — последний отчёт ПК о ней не старше 90 с (её цикл на ПК работает);
+  открытие правки ПК, который её умеет, но не отчитывается (`helper.json` `"Libraries": []`, цикл стоит), — 409
+  `libraryNotReported`: мастер-том никто бы не подключил. У G: полей `supported` и `reporting` нет.
 - Предупреждения библиотеки по ключу хранятся с источником `<ключ>` и приставкой `<ключ>:` у `subject` (`solo:v1`),
   чтобы не совпасть с G:; на её экране `subject` — без приставки (`v1`).
 - **Экран:** над версиями — переключатель «Online Games (G:) / Offline Games (H:)» (`title` и буква из `GET /libraries`,
@@ -108,7 +110,8 @@ extent|lun|verify|promote|done), attempts, lastError, requestedBy, createdAt, up
   (`localStorage` `panel.library`; выключенная на сервере — снова G:). При переключении данные экрана, предложенная
   метка версии и раскрытый состав — заново. Вопросы перед публикацией, откатом и принудительным отключением мастер-тома
   — с названием библиотеки первой строкой. ПК правки с `supported: false` — в списке с отметкой «нужен помощник 1.6.0»
-  (`minHelper`). «Рабочие станции»: у ПК в столбце «Библиотека» строки `G:` и `H:` (помощник старше — «нужен помощник
+  (`minHelper`), с `reporting: false` — «нет отчётов H:». Пока данные выбранной библиотеки не пришли (переключение,
+  сбой загрузки), экран пуст и без кнопок: действие не уйдёт по пути прежней. «Рабочие станции»: у ПК в столбце «Библиотека» строки `G:` и `H:` (помощник старше — «нужен помощник
   1.6.0» вместо тома H:), отметка мастер-тома на запись — у каждой библиотеки своя, со своей буквой; в сводке — текущая
   версия каждой под её названием.
 
@@ -146,7 +149,8 @@ ru/uz/en; узбекский перевод — черновой, провери
 Машина: `id, number, name, zone, status, hostname, ipAddress, macAddresses, helperVersion, osVersion, lastSeenAt,
 bootTime, volume { state, libraryVersion, readOnlyVerified, outdated, error, personal }, registeredAt, libraries`.
 `libraries` — только если работает библиотека по ключу (H:): `[{ key, driveLetter, supported, volume, masterState,
-masterError }]` по последнему отчёту помощника о ней (нет отчёта — `volume.state: none`); `volume` — того же вида, что у
+masterError }]` по последнему отчёту помощника о ней (нет отчёта или он старше 90 с — `volume.state: none`, как на
+экране библиотеки); `volume` — того же вида, что у
 G: (`personal` — подключён личный диск этой библиотеки, `outdated` — не текущая её версия), `supported` — помощник ПК её
 умеет (иначе личного диска H: ПК не получит), `masterState`/`masterError` — мастер-том этой библиотеки, как у G:. В обзоре
 тогда же `libraries [{ key, title, currentVersion, masterDriveLetter }]`. Без библиотек по ключу полей нет вовсе.

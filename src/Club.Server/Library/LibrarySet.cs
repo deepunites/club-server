@@ -42,6 +42,14 @@ public sealed class LibrarySet(LibrarySlot main, IReadOnlyList<LibrarySlot> extr
     /// <summary>Общие таблицы: у библиотеки search_path должен находить те же, что у G:.</summary>
     public static readonly IReadOnlyList<string> SharedTables = ["machines", "storage_warnings"];
 
+    /// <summary>
+    /// Сколько дисков мест библиотек не-G: собирается разом (на все такие библиотеки): сборка — с десяток вызовов TrueNAS с
+    /// перезагрузкой конфигурации iSCSI, а мест для вызовов у соединения 10 (TrueNas:MaxConcurrentCalls) — общие с G:.
+    /// После публикации H: 24 ПК при загрузке пересобирают свои диски H:, а сброс G: (сессии и откат клона) не должен
+    /// ждать в очереди дольше 12 с (SeatGames.AnswerWithin). Сброс без пересборки (откат к @clean) не ограничен.
+    /// </summary>
+    public const int ExtraSeatBuilds = 2;
+
     public LibrarySlot Main { get; } = main;
 
     /// <summary>Все настроенные библиотеки, кроме G:, в том числе выключенные.</summary>
@@ -69,6 +77,7 @@ public sealed class LibrarySet(LibrarySlot main, IReadOnlyList<LibrarySlot> extr
         var clock = services.GetRequiredService<TimeProvider>();
         var logs = services.GetRequiredService<ILoggerFactory>();
         var slots = new List<LibrarySlot>();
+        var builds = new SemaphoreSlim(ExtraSeatBuilds);
         foreach (var options in extras)
         {
             var key = options.Key;
@@ -79,7 +88,7 @@ public sealed class LibrarySet(LibrarySlot main, IReadOnlyList<LibrarySlot> extr
             var editor = new MasterEditor(master, repository, machines, storage, verifier, options, clock, new LibraryLogger<MasterEditor>(logs, key));
             var publisher = new LibraryPublisher(repository, master, editor, storage, verifier, options, clock, new LibraryLogger<LibraryPublisher>(logs, key));
             var seatsRepository = new SeatGamesRepository(db);
-            var seats = new SeatGames(seatsRepository, repository, storage, verifier, options, diskless, clock, new LibraryLogger<SeatGames>(logs, key));
+            var seats = new SeatGames(seatsRepository, repository, storage, verifier, options, diskless, clock, new LibraryLogger<SeatGames>(logs, key), builds);
             slots.Add(new LibrarySlot(options, repository, master, editor, publisher, seatsRepository, seats, new LibraryMachineRepository(db), db));
         }
 

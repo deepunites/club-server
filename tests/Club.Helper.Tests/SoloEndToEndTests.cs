@@ -1,5 +1,6 @@
 using Club.Helper.Core;
 using Club.TestSupport;
+using Microsoft.Extensions.Logging;
 
 namespace Club.Helper.Tests;
 
@@ -27,12 +28,12 @@ public sealed class SoloEndToEndTests : IAsyncLifetime
     }
 
     /// <summary>Помощник, только что запущенный на ПК с Windows <paramref name="windows"/>.</summary>
-    private HelperLoops Helper(FakeWindowsStorage windows, LibrariesStand? stand = null)
+    private HelperLoops Helper(FakeWindowsStorage windows, LibrariesStand? stand = null, ListLoggerFactory? loggers = null)
     {
         stand ??= _stand;
         var options = new HelperOptions { ClubKey = ServerFixture.ClubKey, DiskWaitSec = 1, HelperVersion = "1.6.0" };
         var api = new DisklessApiClient(stand.Http(_recorder.Handler()), options, stand.Credentials, stand.Identity);
-        return HelperLoops.Create(api, windows, new FakeProcesses(), stand.Identity, options, _clock, new ListLoggerFactory(), stand.Cache);
+        return HelperLoops.Create(api, windows, new FakeProcesses(), stand.Identity, options, _clock, loggers ?? new ListLoggerFactory(), stand.Cache);
     }
 
     private async Task<(HelperLoops Helper, FakeWindowsStorage Windows)> BootAsync()
@@ -200,8 +201,10 @@ public sealed class SoloEndToEndTests : IAsyncLifetime
         await _stand.PublishAsync(_stand.Solo, "v1");
         var windows = Windows();
         windows.LocalLetters.Add('H'); // картридер на H:
-        var helper = Helper(windows);
+        var loggers = new ListLoggerFactory();
+        var helper = Helper(windows, loggers: loggers);
 
+        await helper.TickAsync(CancellationToken.None);
         await helper.TickAsync(CancellationToken.None);
         await helper.TickAsync(CancellationToken.None);
 
@@ -210,11 +213,26 @@ public sealed class SoloEndToEndTests : IAsyncLifetime
         var solo = helper.Libraries[0].LastReport!;
         Assert.Equal("failed", solo.State);
         Assert.Contains("drive letter H is in use", solo.Error);
-        Assert.False(windows.Sessions.ContainsKey(LibrariesStand.SoloSeat)); // fail-closed: таргет отключён
+        Assert.False(windows.Sessions.ContainsKey(LibrariesStand.SoloSeat));
         Assert.Equal("mounted", (await _stand.MachineAsync()).VolumeState);
         var row = await SoloRowAsync();
         Assert.Equal("failed", row!.VolumeState);
         Assert.Contains("drive letter H is in use", row.VolumeError);
+
+        // Буква проверяется до входа в таргет: диск H: ни разу не подключался и не выходил online на запись, в журнале —
+        // одно предупреждение на все такты, ошибок нет (иначе — вход, отказ буквы, отключение и Error каждые 30 с).
+        Assert.DoesNotContain(windows.ChapLogins, l => l.Iqn == LibrariesStand.SoloSeat);
+        Assert.Equal(3, windows.LetterChecks.Count(l => l == 'H'));
+        Assert.DoesNotContain(windows.LetterChecks, l => l == 'G'); // у G: путь прежний
+        const string soloVolumes = "Club.Helper.Core.VolumeManager.solo";
+        Assert.Single(loggers.Of(soloVolumes), e => e.Level == LogLevel.Warning && e.Message.StartsWith("Drive letter H is taken", StringComparison.Ordinal));
+        Assert.DoesNotContain(loggers.Entries, e => e.Level >= LogLevel.Error);
+
+        // Букву освободили — H: встаёт в следующем такте.
+        windows.LocalLetters.Remove('H');
+        await helper.TickAsync(CancellationToken.None);
+        AssertBothMounted(windows);
+        Assert.Contains(loggers.Of(soloVolumes), e => e.Level == LogLevel.Information && e.Message.StartsWith("Drive letter H is free again", StringComparison.Ordinal));
     }
 
     [Fact]

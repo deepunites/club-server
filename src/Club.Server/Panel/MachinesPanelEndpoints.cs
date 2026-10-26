@@ -75,6 +75,9 @@ public static class MachinesPanelEndpoints
     /// <summary>Помощник отчитывается раз в 30 с; три пропуска подряд — машина не на связи.</summary>
     public static readonly TimeSpan OnlineWindow = TimeSpan.FromSeconds(90);
 
+    /// <summary>Отчёт свежий: не старше <see cref="OnlineWindow"/> и не из будущего (часы ПК или сервера сбиты).</summary>
+    public static bool IsRecent(DateTimeOffset? seen, DateTimeOffset now) => seen is { } at && at <= now.AddMinutes(5) && now - at <= OnlineWindow;
+
     public static void MapMachinesPanelEndpoints(this IEndpointRouteBuilder app)
     {
         var panel = app.MapGroup(PanelAuthMiddleware.Prefix + "/v1");
@@ -95,7 +98,7 @@ public static class MachinesPanelEndpoints
             var views = (await machines.AllAsync())
                 .Select(m => View(m, current, now, logger, jobs.TryGetValue(m.Id, out var job) ? job : null, labels) with
                 {
-                    Libraries = extras.Count == 0 ? null : extras.Select(e => LibraryView(m, e)).ToList(),
+                    Libraries = extras.Count == 0 ? null : extras.Select(e => LibraryView(m, e, now)).ToList(),
                 })
                 .ToList();
             return Results.Json(
@@ -176,8 +179,13 @@ public static class MachinesPanelEndpoints
     /// <summary>Работающая библиотека не-G: для экрана: текущая версия и отчёты ПК о ней.</summary>
     private sealed record ExtraLibrary(LibrarySlot Slot, string? Current, IReadOnlyDictionary<Guid, LibraryMachineRow> Reports);
 
-    /// <summary>Библиотека не-G: на ПК — как <see cref="MachineView.Volume"/> и мастер-том у G:, только из её отчёта.</summary>
-    private static MachineLibraryView LibraryView(MachineRow m, ExtraLibrary library)
+    /// <summary>
+    /// Библиотека не-G: на ПК — как <see cref="MachineView.Volume"/> и мастер-том у G:, только из её отчёта. Отчёт о томе
+    /// старше окна «на связи» — тома нет, как на экране библиотеки (LibraryPanelEndpoints): цикл библиотеки на ПК мог
+    /// встать (helper.json "Libraries": [], пауза после медленного такта), а ПК — на связи по отчётам G:. Мастер-том — по
+    /// последнему отчёту и тогда: закрытие правки сбрасывает его само.
+    /// </summary>
+    private static MachineLibraryView LibraryView(MachineRow m, ExtraLibrary library, DateTimeOffset now)
     {
         var options = library.Slot.Options;
         if (!library.Reports.TryGetValue(m.Id, out var r))
@@ -185,13 +193,21 @@ public static class MachinesPanelEndpoints
             return new MachineLibraryView(library.Slot.Key, options.DriveLetter, options.SupportsHelper(m.HelperVersion), new MachineVolumeView("none", null, null, false, null));
         }
 
+        var masterState = r.MasterState is "mounted" or "mounting" or "failed" ? r.MasterState : null;
+        var masterError = r.MasterState is "mounting" or "failed" ? r.MasterError : null;
+        if (!IsRecent(r.ReportedAt, now))
+        {
+            return new MachineLibraryView(
+                library.Slot.Key, options.DriveLetter, options.SupportsHelper(m.HelperVersion), new MachineVolumeView("none", null, null, false, null), masterState, masterError);
+        }
+
         var outdated = r.VolumeState == "mounted" && library.Current is not null && r.VolumeVersion != library.Current;
         return new MachineLibraryView(
             library.Slot.Key, options.DriveLetter, options.SupportsHelper(m.HelperVersion),
             new MachineVolumeView(r.VolumeState, r.VolumeVersion, null, outdated, r.VolumeError,
                 r.VolumeIqn?.Contains($":{library.Slot.Names.SeatTargetPrefix}", StringComparison.Ordinal) == true),
-            r.MasterState is "mounted" or "mounting" or "failed" ? r.MasterState : null,
-            r.MasterState is "mounting" or "failed" ? r.MasterError : null);
+            masterState,
+            masterError);
     }
 
     private static MachineFeedView? FeedView(Integration.MachineFeedOptions options, Integration.MachineFeedState feed) =>

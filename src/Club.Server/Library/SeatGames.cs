@@ -69,10 +69,11 @@ public sealed class SeatGamesRepository(NpgsqlDataSource db)
             new { machineId, authTag, targetIqn, now });
     }
 
-    public async Task MarkFailedAsync(Guid machineId, string error, DateTimeOffset now)
+    /// <summary>Сбой сборки; <c>false</c> — записи места ещё нет (сборка упала до неё).</summary>
+    public async Task<bool> MarkFailedAsync(Guid machineId, string error, DateTimeOffset now)
     {
         await using var c = await db.OpenConnectionAsync();
-        await c.ExecuteAsync("UPDATE seat_games SET state = 'failed', last_error = @error, updated_at = @now WHERE machine_id = @machineId", new { machineId, error, now });
+        return await c.ExecuteAsync("UPDATE seat_games SET state = 'failed', last_error = @error, updated_at = @now WHERE machine_id = @machineId", new { machineId, error, now }) > 0;
     }
 
     /// <summary>Чей личный диск носит это имя таргета (номер места).</summary>
@@ -113,7 +114,10 @@ public sealed class SeatGamesRepository(NpgsqlDataSource db)
 /// запросе помощника: ответ — в пределах <see cref="AnswerWithin"/>, иначе «пока нет» (null), назначение придёт в
 /// ответе на отчёт. Обрыв запроса подготовку не прерывает.
 /// Экземпляр на библиотеку (имена — <see cref="LibraryOptions.Names"/>): диски G: и H: одного места собираются и
-/// сбрасываются независимо.
+/// сбрасываются независимо. У библиотек не-G: сборки дисков мест идут не больше <see cref="LibrarySet.ExtraSeatBuilds"/>
+/// разом на все такие библиотеки (<paramref name="builds"/>): у G: и H: один TrueNAS и одни 10 мест для вызовов, и
+/// пересборка 24 дисков H: после публикации H: не должна задерживать сброс G: при загрузке ПК. У G: ограничения нет, как
+/// до второй библиотеки.
 /// </summary>
 public sealed class SeatGames(
     SeatGamesRepository repository,
@@ -123,9 +127,17 @@ public sealed class SeatGames(
     LibraryOptions options,
     DisklessOptions diskless,
     TimeProvider clock,
-    ILogger<SeatGames> logger)
+    ILogger<SeatGames> logger,
+    SemaphoreSlim? builds = null)
 {
     private readonly ConcurrentDictionary<Guid, Lazy<Task<VolumeAssignment?>>> _inFlight = new();
+
+    /// <summary>
+    /// Сборка упала раньше, чем появилась запись места (нет датасета PersonalParent, имя занято чужим ПК): <see cref="RetryAfter"/>
+    /// по записи не сработал бы, и каждый отчёт (раз в 30 с с каждого ПК) повторял бы её с вызовами TrueNAS. Только у
+    /// библиотек не-G: (у G: — как до второй библиотеки). В памяти: перезапуск сервера — сразу новая попытка.
+    /// </summary>
+    private readonly ConcurrentDictionary<Guid, DateTimeOffset> _failedBeforeRow = new();
 
     /// <summary>Таргет личного диска G: (помощники 1.5 узнают его по <c>:games-seat-</c>); у каждой библиотеки — <see cref="SeatTarget"/>.</summary>
     public const string TargetPrefix = "games-seat-";
@@ -182,12 +194,23 @@ public sealed class SeatGames(
     {
         try
         {
-            return await PrepareAsync(machine, atBoot, attached, initiators, current, CancellationToken.None);
+            var assignment = await PrepareAsync(machine, atBoot, attached, initiators, current, CancellationToken.None);
+            if (assignment is not null)
+            {
+                _failedBeforeRow.TryRemove(machine.Id, out _); // диск есть: прошлый сбой больше не держит отчёты
+            }
+
+            return assignment;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Personal games disk of seat {Seat} failed", machine.Number);
-            await repository.MarkFailedAsync(machine.Id, ex.Message, clock.GetUtcNow());
+            var now = clock.GetUtcNow();
+            if (!await repository.MarkFailedAsync(machine.Id, ex.Message, now) && !options.Names.IsMain)
+            {
+                _failedBeforeRow[machine.Id] = now;
+            }
+
             return null;
         }
         finally
@@ -205,6 +228,11 @@ public sealed class SeatGames(
         if (usable && !atBoot)
         {
             return Assignment(seat!);
+        }
+
+        if (!atBoot && seat is null && _failedBeforeRow.TryGetValue(machine.Id, out var failedAt) && clock.GetUtcNow() - failedAt < RetryAfter)
+        {
+            return null; // недавний сбой до записи места: как у записи failed ниже, но без опроса TrueNAS
         }
 
         var sessions = (await storage.GetSessionsAsync(ct)).Where(s => s.Target.EndsWith($":{seat?.TargetName ?? name}", StringComparison.Ordinal)).ToList();
@@ -234,7 +262,20 @@ public sealed class SeatGames(
             return Assignment(seat);
         }
 
-        return Assignment(await RebuildAsync(machine, seat, current, initiators, ct));
+        if (builds is null)
+        {
+            return Assignment(await RebuildAsync(machine, seat, current, initiators, ct));
+        }
+
+        await builds.WaitAsync(ct);
+        try
+        {
+            return Assignment(await RebuildAsync(machine, seat, current, initiators, ct));
+        }
+        finally
+        {
+            builds.Release();
+        }
     }
 
     private bool Usable(SeatGameRow seat, MachineRow machine, List<string> initiators) =>

@@ -336,4 +336,91 @@ public sealed class SoloWireTests : IAsyncLifetime
         using var report = await SoloStand.SoloStatusAsync(pc, SoloReport());
         Assert.Equal($"{SoloStand.Basename}:solo-seat-01", (await Contract.ReadAsync(report, "StatusAccepted")).GetProperty("volume").GetProperty("targetIqn").GetString());
     }
+
+    /// <summary>
+    /// После публикации H: ПК загружаются разом, и каждому пересобирается диск H: (с десяток вызовов TrueNAS с перезагрузкой
+    /// конфигурации iSCSI). Разом идут не больше двух таких сборок (<see cref="Library.LibrarySet.ExtraSeatBuilds"/>):
+    /// остальные ждут своей очереди, а места для вызовов у соединения TrueNAS (общие с G:) остаются сбросу G:.
+    /// </summary>
+    [Fact]
+    public async Task H_seat_builds_run_two_at_a_time()
+    {
+        await _stand.PublishAsync(_stand.Solo, "v1");
+        var pcs = new List<TestMachine>();
+        for (var n = 1; n <= 4; n++)
+        {
+            pcs.Add(await _stand.RegisterAsync(n));
+        }
+
+        _stand.Nas.Delay("pool.snapshot.clone", "hdd/club/lib@lib-v1", TimeSpan.FromSeconds(2));
+        int Clones() => _stand.Nas.CallRecords.Count(c => c.StartsWith("pool.snapshot.clone", StringComparison.Ordinal) && c.Contains("hdd/club/lib@lib-v1", StringComparison.Ordinal));
+
+        var boots = pcs.Select(pc => SoloStand.SoloBootAsync(pc)).ToList();
+        var waited = Stopwatch.StartNew();
+        while (Clones() < 2)
+        {
+            Assert.True(waited.Elapsed < TimeSpan.FromSeconds(10), "H: seat builds did not reach the clone");
+            await Task.Delay(50);
+        }
+
+        await Task.Delay(1000); // третья сборка без очереди дошла бы до клона за миллисекунды
+        Assert.Equal(2, Clones());
+
+        foreach (var boot in boots)
+        {
+            (await boot).Dispose();
+        }
+
+        waited.Restart();
+        foreach (var pc in pcs)
+        {
+            while ((await _stand.Solo.SeatsRepository.FindAsync(pc.MachineId))?.State != "ready")
+            {
+                Assert.True(waited.Elapsed < TimeSpan.FromSeconds(60), "H: seat builds did not finish");
+                await Task.Delay(200);
+            }
+        }
+
+        Assert.Equal(4, Clones());
+    }
+
+    /// <summary>
+    /// Датасета личных дисков H: нет (не создали или опечатка в PersonalParent): сборка падает раньше, чем появилась запись
+    /// места, и <see cref="Library.SeatGames.RetryAfter"/> по записи не сработал бы. Отчёты ПК её не повторяют (иначе —
+    /// опрос TrueNAS с каждого ПК раз в 30 с), запрос при старте — сразу; сверка H: называет причину в панели.
+    /// </summary>
+    [Fact]
+    public async Task H_build_failing_before_the_seat_row_is_not_retried_by_reports_and_is_warned()
+    {
+        await using var stand = await SoloStand.StartAsync(settings: new Dictionary<string, string> { ["Libraries:solo:PersonalParent"] = "hdd/club/nope" });
+        await stand.PublishAsync(stand.Solo, "v1");
+        var pc = await stand.RegisterAsync(1);
+        using (var boot = await SoloStand.SoloBootAsync(pc))
+        {
+            Assert.Equal(HttpStatusCode.NoContent, boot.StatusCode);
+        }
+
+        Assert.Null(await stand.Solo.SeatsRepository.FindAsync(pc.MachineId));
+        var calls = stand.Nas.CallRecords.Count;
+        for (var i = 0; i < 3; i++)
+        {
+            using var report = await SoloStand.SoloStatusAsync(pc, SoloReport());
+            Assert.False((await Contract.ReadAsync(report, "StatusAccepted")).TryGetProperty("volume", out _));
+        }
+
+        Assert.Equal(calls, stand.Nas.CallRecords.Count);
+
+        using (var boot = await SoloStand.SoloBootAsync(pc))
+        {
+            Assert.Equal(HttpStatusCode.NoContent, boot.StatusCode);
+        }
+
+        Assert.True(stand.Nas.CallRecords.Count > calls); // загрузка ПК — новая попытка сразу
+
+        await stand.PassAsync(stand.Solo);
+        var warning = Assert.Single(await stand.Solo.Repository.ActiveWarningsAsync("solo"), w => w.Kind == "missingPersonalParent");
+        Assert.Equal("solo:hdd/club/nope", warning.Subject);
+        await stand.PassAsync(stand.Games);
+        Assert.DoesNotContain(await stand.Games.Repository.ActiveWarningsAsync(), w => w.Kind == "missingPersonalParent");
+    }
 }

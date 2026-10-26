@@ -338,6 +338,15 @@ public sealed partial class LibraryPublisher(
 
         if (options.PersonalGames)
         {
+            // Датасет личных дисков библиотеки не-G: (hdd/club/seats) администратор создаёт руками при её включении: нет его
+            // (или опечатка в PersonalParent) — ни одно место не получит диск, а в отчётах ПК причины не видно. Пока версий
+            // нет, дисков не собирают — и TrueNAS не спрашиваем (пустая библиотека его не опрашивает). У G: сверка прежняя.
+            if (!options.Names.IsMain && versions.Count > 0 && await storage.GetDatasetAsync(options.PersonalParent, ct) is null)
+            {
+                warnings.Add(("missingPersonalParent", options.PersonalParent,
+                    $"Датасета {options.PersonalParent} для личных дисков мест нет в TrueNAS: создайте его ({options.Section}:PersonalParent)"));
+            }
+
             // Личный слой игр: у версии только снапшот (клоны и таргеты — у мест).
             foreach (var version in versions)
             {

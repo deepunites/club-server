@@ -9,15 +9,46 @@ namespace Club.Helper.Core;
 /// ответила в такте G: (таймаут PowerShell, 120 с) — остальные в этом такте пропускаются: их опросы Windows ждали бы ещё
 /// столько же, а с ними и отчёт G: следующего такта. Клиент API у всех циклов один (<see cref="DisklessApiClient"/>:
 /// одноразовый refresh-токен, обновляет его тот, чей запрос первым получил 401).
+/// Отчёт G: не должен ждать библиотек: сервер считает ПК «не на связи», когда отчёта G: нет 90 с (панель, приём версии,
+/// кандидаты бездиска). Поэтому пауза до следующего такта короче на время тактов библиотек (<see cref="DelayAfterTick"/>):
+/// такт H: до <see cref="SlowTick"/> (ожидание диска, запрос при старте, пока сервер собирает диск) сдвигает отчёт G: не
+/// дальше обычного. Такт библиотеки дольше или с таймаутом Windows — она пропускает следующие такты
+/// (<see cref="FirstBackoff"/>, подряд — вдвое дольше, до <see cref="MaxBackoff"/>): зависший диск H: задерживает отчёт
+/// G: один раз за паузу, а не в каждом такте.
 /// </summary>
-public sealed class HelperLoops(HelperLoop games, IReadOnlyList<HelperLoop> libraries, ILogger logger)
+public sealed class HelperLoops(HelperLoop games, IReadOnlyList<HelperLoop> libraries, ILogger logger, TimeProvider? clock = null)
 {
+    /// <summary>Такт библиотеки не дольше этого не сдвигает отчёт G: (пауза до такта короче на столько же).</summary>
+    public static readonly TimeSpan SlowTick = TimeSpan.FromSeconds(40);
+
+    /// <summary>Сколько библиотека пропускает такты после медленного такта; подряд — вдвое дольше.</summary>
+    public static readonly TimeSpan FirstBackoff = TimeSpan.FromMinutes(2);
+
+    /// <summary>Дольше этого библиотека такты не пропускает (как сон цикла без библиотеки на сервере).</summary>
+    public static readonly TimeSpan MaxBackoff = HelperLoop.DormantFor;
+
+    private readonly TimeProvider _clock = clock ?? TimeProvider.System;
+
+    /// <summary>Пауза библиотеки после медленного такта: с какой отметки и на сколько (<see cref="TimeSpan.Zero"/> — паузы нет).</summary>
+    private readonly (long Since, TimeSpan Wait)[] _backoff = new (long, TimeSpan)[libraries.Count];
+
     public HelperLoop Games => games;
 
     public IReadOnlyList<HelperLoop> Libraries => libraries;
 
+    /// <summary>Сколько в последнем такте шли такты библиотек (после такта G:).</summary>
+    public TimeSpan LibrariesElapsed { get; private set; }
+
+    /// <summary>
+    /// Пауза до следующего такта: <paramref name="interval"/> минус время тактов библиотек — отчёт G: идёт с прежним шагом
+    /// (такт G: + интервал), сколько бы ни шли такты библиотек до <see cref="SlowTick"/>. Чаще, чем раз в интервал, такт
+    /// G: не начинается.
+    /// </summary>
+    public TimeSpan DelayAfterTick(TimeSpan interval) => interval > LibrariesElapsed ? interval - LibrariesElapsed : TimeSpan.Zero;
+
     public async Task TickAsync(CancellationToken ct)
     {
+        LibrariesElapsed = TimeSpan.Zero;
         try
         {
             await games.TickAsync(ct);
@@ -28,14 +59,29 @@ public sealed class HelperLoops(HelperLoop games, IReadOnlyList<HelperLoop> libr
             logger.LogError(ex, "Helper tick failed");
         }
 
-        foreach (var library in libraries)
+        if (libraries.Count == 0)
         {
-            if (games.WindowsTimedOut)
+            return;
+        }
+
+        if (games.WindowsTimedOut)
+        {
+            logger.LogDebug("Libraries not ticked this time: Windows did not answer while applying the G: volume");
+            return;
+        }
+
+        var started = _clock.GetTimestamp();
+        for (var i = 0; i < libraries.Count; i++)
+        {
+            var library = libraries[i];
+            var (since, wait) = _backoff[i];
+            if (wait > TimeSpan.Zero && _clock.GetElapsedTime(since) < wait)
             {
-                logger.LogDebug("Libraries not ticked this time: Windows did not answer while applying the G: volume");
-                return;
+                logger.LogDebug("Library {Library} not ticked: its last tick was slow; next try in {Left}", library.Library, wait - _clock.GetElapsedTime(since));
+                continue;
             }
 
+            var tick = _clock.GetTimestamp();
             try
             {
                 await library.TickAsync(ct);
@@ -44,6 +90,36 @@ public sealed class HelperLoops(HelperLoop games, IReadOnlyList<HelperLoop> libr
             {
                 logger.LogError(ex, "Helper tick of library {Library} failed", library.Library);
             }
+
+            Measure(i, library, _clock.GetElapsedTime(tick));
+        }
+
+        LibrariesElapsed = _clock.GetElapsedTime(started);
+    }
+
+    /// <summary>Такт библиотеки шёл <paramref name="took"/>: медленный (или Windows не ответила) — пауза, быстрый — паузы больше нет.</summary>
+    private void Measure(int i, HelperLoop library, TimeSpan took)
+    {
+        var previous = _backoff[i].Wait;
+        if (took >= SlowTick || library.WindowsTimedOut)
+        {
+            var wait = previous == TimeSpan.Zero ? FirstBackoff : previous * 2 < MaxBackoff ? previous * 2 : MaxBackoff;
+            _backoff[i] = (_clock.GetTimestamp(), wait);
+            if (previous == TimeSpan.Zero)
+            {
+                logger.LogWarning(
+                    "Library {Library} tick took {Took:g} (Windows timed out: {TimedOut}); not ticking it for {Wait} so that G: keeps reporting on time",
+                    library.Library, took, library.WindowsTimedOut, wait);
+            }
+            else
+            {
+                logger.LogDebug("Library {Library} tick was slow again ({Took:g}); not ticking it for {Wait}", library.Library, took, wait);
+            }
+        }
+        else if (previous > TimeSpan.Zero)
+        {
+            _backoff[i] = (0, TimeSpan.Zero);
+            logger.LogInformation("Library {Library} ticks on time again ({Took:g})", library.Library, took);
         }
     }
 
@@ -71,7 +147,7 @@ public sealed class HelperLoops(HelperLoop games, IReadOnlyList<HelperLoop> libr
             libraries.Add(Loop(LibraryMarkers.For(key)));
         }
 
-        return new HelperLoops(Loop(LibraryMarkers.Games), libraries, logger);
+        return new HelperLoops(Loop(LibraryMarkers.Games), libraries, logger, clock);
 
         HelperLoop Loop(LibraryMarkers markers)
         {
