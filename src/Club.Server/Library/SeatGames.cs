@@ -112,6 +112,8 @@ public sealed class SeatGamesRepository(NpgsqlDataSource db)
 /// Подготовка (сброс, пересборка — десятки секунд при перезагрузках SCST) идёт отдельной задачей на машину, не в
 /// запросе помощника: ответ — в пределах <see cref="AnswerWithin"/>, иначе «пока нет» (null), назначение придёт в
 /// ответе на отчёт. Обрыв запроса подготовку не прерывает.
+/// Экземпляр на библиотеку (имена — <see cref="LibraryOptions.Names"/>): диски G: и H: одного места собираются и
+/// сбрасываются независимо.
 /// </summary>
 public sealed class SeatGames(
     SeatGamesRepository repository,
@@ -125,9 +127,13 @@ public sealed class SeatGames(
 {
     private readonly ConcurrentDictionary<Guid, Lazy<Task<VolumeAssignment?>>> _inFlight = new();
 
+    /// <summary>Таргет личного диска G: (помощники 1.5 узнают его по <c>:games-seat-</c>); у каждой библиотеки — <see cref="SeatTarget"/>.</summary>
     public const string TargetPrefix = "games-seat-";
 
     public static string TargetName(int number) => $"{TargetPrefix}{number:D2}";
+
+    /// <summary>Таргет, экстент и CHAP-пользователь личного диска места в этой библиотеке (<see cref="LibraryNames.SeatTarget"/>).</summary>
+    public string SeatTarget(int number) => options.Names.SeatTarget(number);
 
     /// <summary>После сбоя сборки отчёты (каждые 15–30 с) не повторяют её раньше этого срока; запуск помощника — сразу.</summary>
     public static readonly TimeSpan RetryAfter = TimeSpan.FromMinutes(2);
@@ -136,8 +142,7 @@ public sealed class SeatGames(
     public static readonly TimeSpan AnswerWithin = TimeSpan.FromSeconds(12);
 
     /// <summary>Помощник умеет личный слой (подключение на запись с CHAP).</summary>
-    public bool Supports(string helperVersion) =>
-        Version.TryParse(helperVersion.Split('-', '+')[0], out var have) && Version.TryParse(options.PersonalMinHelper, out var need) && have >= need;
+    public bool Supports(string helperVersion) => options.SupportsHelper(helperVersion);
 
     /// <summary>
     /// Назначение личного тома игр. <paramref name="atBoot"/> — запрос при старте помощника: можно сбросить диск и
@@ -195,7 +200,7 @@ public sealed class SeatGames(
         MachineRow machine, bool atBoot, bool? attached, List<string> initiators, LibraryVersion current, CancellationToken ct)
     {
         var seat = await repository.FindAsync(machine.Id);
-        var name = TargetName(machine.Number);
+        var name = SeatTarget(machine.Number);
         var usable = seat is not null && Usable(seat, machine, initiators);
         if (usable && !atBoot)
         {
@@ -232,8 +237,8 @@ public sealed class SeatGames(
         return Assignment(await RebuildAsync(machine, seat, current, initiators, ct));
     }
 
-    private static bool Usable(SeatGameRow seat, MachineRow machine, List<string> initiators) =>
-        seat.State == "ready" && seat.TargetName == TargetName(machine.Number) && seat.InitiatorIqn == string.Join(' ', initiators);
+    private bool Usable(SeatGameRow seat, MachineRow machine, List<string> initiators) =>
+        seat.State == "ready" && seat.TargetName == SeatTarget(machine.Number) && seat.InitiatorIqn == string.Join(' ', initiators);
 
     /// <summary>IQN, которым ПК подключается: сообщённый помощником; у бездискового — ещё и имя места из iBFT.</summary>
     private List<string> Initiators(MachineRow machine)
@@ -257,7 +262,7 @@ public sealed class SeatGames(
 
     private async Task<SeatGameRow> RebuildAsync(MachineRow machine, SeatGameRow? old, LibraryVersion version, IReadOnlyList<string> initiators, CancellationToken ct)
     {
-        var name = TargetName(machine.Number);
+        var name = SeatTarget(machine.Number);
         if (old is not null)
         {
             await repository.MarkRebuildingAsync(machine.Id, clock.GetUtcNow());
@@ -267,7 +272,7 @@ public sealed class SeatGames(
         await ClaimNameAsync(machine, name, initiators, ct);
         if (await storage.GetDatasetAsync(options.PersonalParent, ct) is null)
         {
-            throw new InvalidOperationException($"{options.PersonalParent} does not exist: create the dataset in TrueNAS (Library:PersonalParent)");
+            throw new InvalidOperationException($"{options.PersonalParent} does not exist: create the dataset in TrueNAS ({options.Section}:PersonalParent)");
         }
 
         var seat = new SeatGameRow
@@ -284,7 +289,12 @@ public sealed class SeatGames(
         };
         await repository.UpsertAsync(seat, clock.GetUtcNow());
 
-        var labels = new Dictionary<string, string> { ["clubsrv:role"] = "seat-games", ["clubsrv:libver"] = version.Label };
+        var labels = new Dictionary<string, string> { ["clubsrv:role"] = options.Names.SeatRole, ["clubsrv:libver"] = version.Label };
+        if (options.Names.LibraryLabel is { } library)
+        {
+            labels["clubsrv:library"] = library; // у G: метки нет — её клоны те же, что до второй библиотеки
+        }
+
         await storage.EnsureWritableCloneAsync(version.SnapshotId, seat.Zvol, labels, ct);
         await storage.EnsureSnapshotAsync(seat.Zvol, DisklessOptions.CleanSnapshot, labels, ct);
 
@@ -296,8 +306,8 @@ public sealed class SeatGames(
         }
 
         var group = await storage.EnsureInitiatorGroupAsync(GroupComment(name), initiators, ct);
-        var extent = await storage.EnsureWritableExtentAsync(name, seat.Zvol, $"clubsrv personal games seat {machine.Number:D2}", ct);
-        var target = await storage.EnsureChapTargetAsync(name, $"games seat {machine.Number}", options.PortalId, group.Id, tag, ct);
+        var extent = await storage.EnsureWritableExtentAsync(name, seat.Zvol, $"{options.Names.SeatExtentComment} {machine.Number:D2}", ct);
+        var target = await storage.EnsureChapTargetAsync(name, $"{options.Names.SeatAlias} {machine.Number}", options.PortalId, group.Id, tag, ct);
         await storage.EnsureLunAsync(target.Id, extent.Id, ct);
 
         switch (await verifier.EnsureVisibleAsync(name, initiators[0], ct))

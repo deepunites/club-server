@@ -19,6 +19,22 @@ public static class Database
         return services;
     }
 
+    /// <summary>
+    /// Источник соединений библиотеки <paramref name="key"/> (keyed singleton): search_path начинается с её схемы, поэтому
+    /// тот же SQL репозиториев библиотеки идёт в её таблицы (<c>solo.library_versions</c>, …), а общие —
+    /// <c>machines</c>, <c>storage_warnings</c> — находятся там же, где у G:. Проверка при старте —
+    /// <see cref="Library.LibrarySet.CheckSchemasAsync"/>.
+    /// </summary>
+    public static IServiceCollection AddLibraryDataSource(this IServiceCollection services, string connectionString, string key)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        // Путь G: — заданный в строке подключения или умолчание PostgreSQL; перед ним — схема библиотеки.
+        builder.SearchPath = $"{key}, {(string.IsNullOrWhiteSpace(builder.SearchPath) ? "\"$user\", public" : builder.SearchPath)}";
+        var libraryConnectionString = builder.ConnectionString;
+        services.AddKeyedSingleton(key, (_, _) => new NpgsqlDataSourceBuilder(libraryConnectionString).Build());
+        return services;
+    }
+
     /// <summary>Накатывает миграции до последней под межпроцессной блокировкой.</summary>
     public static async Task MigrateAsync(IServiceProvider services, CancellationToken cancellationToken = default)
     {

@@ -22,8 +22,16 @@ public sealed class MasterState
     public string? LastError { get; init; }
 }
 
-public sealed class MasterRepository(NpgsqlDataSource db)
+/// <summary>
+/// Мастер-том библиотеки (<c>library_master</c> её схемы). <paramref name="machineStateTable"/> — где отметки «мастер-том
+/// на ПК»: у G: в <c>machines</c>, у остальных — в <c>machine_library</c> своей схемы (<see cref="LibraryNames.MachineStateTable"/>).
+/// </summary>
+public sealed class MasterRepository(NpgsqlDataSource db, string machineStateTable = "machines")
 {
+    private readonly string _machineStateTable = machineStateTable is "machines" or "machine_library"
+        ? machineStateTable
+        : throw new ArgumentException($"unknown machine state table {machineStateTable}", nameof(machineStateTable));
+
     private const string Columns = """
         state, machine_id AS MachineId, initiator_iqn AS InitiatorIqn, chap_user AS ChapUser, chap_secret AS ChapSecret,
         auth_tag AS AuthTag, target_iqn AS TargetIqn, force_close AS ForceClose, dirty, opened_at AS OpenedAt,
@@ -128,13 +136,13 @@ public sealed class MasterRepository(NpgsqlDataSource db)
     {
         await using var c = await db.OpenConnectionAsync();
         await c.ExecuteAsync(
-            """
+            $"""
             WITH closed AS (
                 UPDATE library_master SET state = 'closed', dirty = force_close, machine_id = NULL, chap_secret = NULL, target_iqn = NULL, auth_tag = NULL,
                        closed_at = @now, last_error = NULL, updated_at = @now
                 WHERE state = 'closing'
                 RETURNING 1)
-            UPDATE machines SET master_state = NULL, master_error = NULL
+            UPDATE {_machineStateTable} SET master_state = NULL, master_error = NULL
             WHERE master_state IS NOT NULL AND EXISTS (SELECT 1 FROM closed)
             """,
             new { now });

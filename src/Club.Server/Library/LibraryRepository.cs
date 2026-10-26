@@ -158,6 +158,25 @@ public sealed class LibraryRepository(NpgsqlDataSource db)
         return (await c.QueryAsync<LibraryVersion>($"SELECT {VersionColumns} FROM library_versions ORDER BY created_at DESC")).ToList();
     }
 
+    /// <summary>
+    /// Разобранные версии, из снапшота которых ещё сделаны личные диски мест (<c>seat_games.base_snapshot</c>): снапшот
+    /// удалён с defer и держит место, пока эти ПК не загрузятся. <c>Seats</c> — имена ПК через запятую.
+    /// </summary>
+    public async Task<IReadOnlyList<(string Label, string SnapshotId, string Seats)>> RetiredHeldAsync()
+    {
+        await using var c = await db.OpenConnectionAsync();
+        return (await c.QueryAsync<(string, string, string)>(
+            """
+            SELECT v.label, v.snapshot_id, string_agg(m.name, ', ' ORDER BY m.number, m.name)
+            FROM library_versions v
+            JOIN seat_games s ON s.base_snapshot = v.snapshot_id
+            JOIN machines m ON m.id = s.machine_id
+            WHERE v.state = 'retired'
+            GROUP BY v.id, v.label, v.snapshot_id, v.created_at
+            ORDER BY v.created_at
+            """)).ToList();
+    }
+
     /// <summary>Повтор упавшей операции: снова в очередь с нулём попыток; версия публикации — обратно в publishing.</summary>
     public async Task<bool> RetryOperationAsync(Guid id, DateTimeOffset now)
     {

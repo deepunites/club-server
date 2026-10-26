@@ -83,8 +83,8 @@ public sealed partial class LibraryPublisher(
             Label = label,
             SnapshotId = $"{options.MasterZvol}@lib-{label}",
             CloneId = $"{options.PublishedParent}/lib-{label}",
-            ExtentName = $"lib-{label}",
-            TargetName = $"games-{label}",
+            ExtentName = $"{options.Names.VersionExtentPrefix}{label}",
+            TargetName = $"{options.Names.VersionTargetPrefix}{label}",
         };
         var (_, operationId) = await repository.CreatePublishAsync(version, requestedBy, clock.GetUtcNow());
         logger.LogInformation("Publish of library {Label} requested by {User}", label, requestedBy);
@@ -206,7 +206,7 @@ public sealed partial class LibraryPublisher(
         // SCST сам добавлял устройство в copy_manager_tgt, и следующий scstadmin -force срывался на нём (25.10.7) —
         // таргет оставался enabled 0 без LUN (стенд 2026-10-02). Пустой таргет до LUN никому не виден.
         await Step(operation, "target");
-        var target = await storage.EnsureTargetAsync(version.TargetName, $"games {version.Label}", options.PortalId, options.InitiatorGroupId, ct);
+        var target = await storage.EnsureTargetAsync(version.TargetName, $"{options.Names.VersionTargetAlias} {version.Label}", options.PortalId, options.InitiatorGroupId, ct);
 
         await Step(operation, "extent");
         var extent = await EnsureExtentWithRetryAsync(version, clone.Id, ct);
@@ -348,6 +348,14 @@ public sealed partial class LibraryPublisher(
                 }
             }
 
+            // Снапшот разобранной версии удалён с defer: ZFS освободит его, когда уйдёт последний клон места, сделанный из
+            // него, — при загрузке этого ПК. Выключенные ПК держат место; сверка показывает, какие.
+            foreach (var held in await repository.RetiredHeldAsync())
+            {
+                warnings.Add(("retiredHeld", held.SnapshotId,
+                    $"Снапшот разобранной версии {held.Label} держат личные диски мест {held.Seats}: место освободится после перезагрузки этих ПК"));
+            }
+
             return warnings;
         }
 
@@ -443,12 +451,21 @@ public sealed partial class LibraryPublisher(
     private async Task Step(StorageOperation operation, string step) =>
         await repository.MarkOperationAsync(operation.Id, "running", step, null, countAttempt: false, clock.GetUtcNow());
 
-    /// <summary>Метки clubsrv:* на каждом объекте версии.</summary>
-    private static Dictionary<string, string> Labels(LibraryVersion version, Guid operationId, string role) => new()
+    /// <summary>Метки clubsrv:* на каждом объекте версии; <c>clubsrv:library</c> — у всех библиотек, кроме G:.</summary>
+    private Dictionary<string, string> Labels(LibraryVersion version, Guid operationId, string role)
     {
-        [ManagedLabel] = "1",
-        [VersionLabel] = version.Label,
-        [RoleLabel] = role,
-        ["clubsrv:opid"] = operationId.ToString("N"),
-    };
+        var labels = new Dictionary<string, string>
+        {
+            [ManagedLabel] = "1",
+            [VersionLabel] = version.Label,
+            [RoleLabel] = role,
+            ["clubsrv:opid"] = operationId.ToString("N"),
+        };
+        if (options.Names.LibraryLabel is { } library)
+        {
+            labels["clubsrv:library"] = library;
+        }
+
+        return labels;
+    }
 }

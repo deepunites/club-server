@@ -76,12 +76,19 @@ public static class Contract
 
     public static void AssertMatches(string schemaName, JsonElement instance)
     {
-        var schema = Schemas.GetOrAdd(schemaName, name =>
+        JsonSchema schema;
+        // Сборка регистрирует схему в общем реестре, а GetOrAdd при параллельных тестах зовёт фабрику дважды: повторная
+        // регистрация того же адреса — исключение («Overwriting registered schemas is not permitted»).
+        lock (Schemas)
         {
-            var options = new BuildOptions { SchemaRegistry = Registry.Value, Dialect = Dialect };
-            var reference = JsonDocument.Parse($$"""{ "$ref": "{{BaseUri}}#/components/schemas/{{name}}" }""").RootElement;
-            return JsonSchema.Build(reference, options, new Uri($"https://club.local/check/{name}"));
-        });
+            schema = Schemas.GetOrAdd(schemaName, name =>
+            {
+                var options = new BuildOptions { SchemaRegistry = Registry.Value, Dialect = Dialect };
+                var reference = JsonDocument.Parse($$"""{ "$ref": "{{BaseUri}}#/components/schemas/{{name}}" }""").RootElement;
+                return JsonSchema.Build(reference, options, new Uri($"https://club.local/check/{name}"));
+            });
+        }
+
         var result = schema.Evaluate(instance, new EvaluationOptions { OutputFormat = OutputFormat.List, RequireFormatValidation = true });
         if (!result.IsValid)
         {

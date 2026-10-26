@@ -202,6 +202,26 @@ public sealed class PersonalGamesTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Retired_snapshot_held_by_a_seat_is_reported_until_that_pc_boots()
+    {
+        await PublishAsync("v1");
+        var (machine, _) = await TestMachine.RegisterAsync(_server.CreateClient());
+        await ReportAsync(machine); // личный диск на v1
+        await PublishAsync("v2");
+        await PublishAsync("v3"); // v1 разобрана; снапшот удалён с defer — его держит клон места
+
+        Assert.NotNull(await _storage.GetSnapshotAsync($"{Master}@lib-v1"));
+        var held = Assert.Single(await _repository.ActiveWarningsAsync(), w => w.Kind == "retiredHeld");
+        Assert.Equal($"{Master}@lib-v1", held.Subject);
+        Assert.Contains("PC-01", held.Message);
+
+        Assert.Equal("v3", (await VolumeAtBootAsync(machine))!.Value.GetProperty("libraryVersion").GetString());
+        await StorageWorker.RunOnceAsync(_publisher, _repository, reconcile: true, TimeProvider.System, CancellationToken.None);
+        Assert.Null(await _storage.GetSnapshotAsync($"{Master}@lib-v1"));
+        Assert.DoesNotContain(await _repository.ActiveWarningsAsync(), w => w.Kind == "retiredHeld");
+    }
+
+    [Fact]
     public async Task Old_helpers_and_unknown_initiators_get_no_personal_disk()
     {
         await PublishAsync("v1");

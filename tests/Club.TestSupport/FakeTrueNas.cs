@@ -50,6 +50,7 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
     public ConcurrentBag<string> Calls { get; } = [];
 
     private readonly List<string> _callLog = [];
+    private readonly List<string> _callRecords = [];
 
     /// <summary>Вызовы по порядку — для проверок последовательности (например, таргет удалён раньше группы инициаторов).</summary>
     public IReadOnlyList<string> CallLog
@@ -62,6 +63,24 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
             }
         }
     }
+
+    /// <summary>Вызовы по порядку вместе с параметрами (<c>метод [params]</c>) — для сравнения целых последовательностей.</summary>
+    public IReadOnlyList<string> CallRecords
+    {
+        get
+        {
+            lock (_callLog)
+            {
+                return _callRecords.ToList();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Отказывать в CHAP-пользователе, который уже есть в другой группе (tag). TrueNAS так не делает — это сторож для
+    /// тестов, где имена двух библиотек не должны совпасть.
+    /// </summary>
+    public bool UniqueChapUsers { get; set; }
 
     /// <summary>TrueNAS «лежит»: открытые соединения рвутся, новые и /api/versions отклоняются.</summary>
     public bool Down { get; set; }
@@ -218,6 +237,7 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
             lock (_callLog)
             {
                 _callLog.Add(method);
+                _callRecords.Add($"{method} {args.ToJsonString()}");
             }
 
             JsonObject response;
@@ -608,6 +628,11 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
             throw Validation("iscsi_auth_create.secret", "Secret must be between 12 and 16 characters.", 22);
         }
 
+        if (UniqueChapUsers && _auths.Values.Any(a => a["user"]!.GetValue<string>() == data["user"]!.GetValue<string>() && a["tag"]!.GetValue<int>() != data["tag"]!.GetValue<int>()))
+        {
+            throw Validation("iscsi_auth_create.user", "CHAP user already exists in another group (test guard)", 22);
+        }
+
         var id = _nextId++;
         _auths[id] = new JsonObject { ["id"] = id, ["tag"] = data["tag"]!.GetValue<int>(), ["user"] = data["user"]!.GetValue<string>(), ["secret"] = secret, ["peeruser"] = "", ["peersecret"] = "" };
         Reload("iscsi.auth.create");
@@ -708,6 +733,12 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
             throw Validation("iscsi_target_create.name", "Target name already exists", 22);
         }
 
+        // Как targets.py __validate: alias тоже уникален.
+        if (data["alias"]?.GetValue<string>() is { } alias && _targets.Values.Any(t => t["alias"]?.GetValue<string>() == alias))
+        {
+            throw Validation("iscsi_target_create.alias", "Alias already exists", 22);
+        }
+
         foreach (var group in data["groups"] is JsonArray g ? g.OfType<JsonObject>() : [])
         {
             if (group["authmethod"]?.GetValue<string>() is "CHAP" && !_auths.Values.Any(a => a["tag"]!.GetValue<int>() == group["auth"]?.GetValue<int>()))
@@ -730,6 +761,11 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
         if (data["name"]?.GetValue<string>() is { } name && _targets.Values.Any(t => t != target && t["name"]!.GetValue<string>() == name))
         {
             throw Validation("iscsi_target_update.name", "Target name already exists", 22);
+        }
+
+        if (data["alias"]?.GetValue<string>() is { } alias && _targets.Values.Any(t => t != target && t["alias"]?.GetValue<string>() == alias))
+        {
+            throw Validation("iscsi_target_update.alias", "Alias already exists", 22);
         }
 
         foreach (var key in new[] { "name", "alias", "groups" }.Where(data.ContainsKey))

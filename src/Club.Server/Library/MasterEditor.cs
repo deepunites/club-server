@@ -12,6 +12,8 @@ public sealed class StorageWaitException(string message) : Exception(message);
 /// Доступ — CHAP с новым секретом на каждое открытие и группа из одного IQN этого ПК. Порядок в TrueNAS важен:
 /// группа инициаторов никогда не бывает пустой (пустая = доступ всем) и удаляется только после таргета (иначе
 /// TrueNAS обнулит ссылку и откроет таргет всем). Закрытие ждёт, пока ПК отключится (таргет без force).
+/// Экземпляр на библиотеку: имена таргета, экстента, CHAP и группы — свои (<see cref="LibraryOptions.Names"/>), поэтому
+/// мастер-тома G: и H: открываются и закрываются независимо, в том числе на одном ПК.
 /// </summary>
 public sealed class MasterEditor(
     MasterRepository master,
@@ -23,8 +25,8 @@ public sealed class MasterEditor(
     TimeProvider clock,
     ILogger<MasterEditor> logger)
 {
+    /// <summary>CHAP-пользователь мастер-тома G: (<see cref="LibraryNames.MasterChapUser"/>).</summary>
     public const string ChapUser = "clubsrv-master";
-    private const string InitiatorComment = "clubsrv master";
 
     public async Task<Guid> RequestOpenAsync(Guid machineId, string? requestedBy)
     {
@@ -32,6 +34,12 @@ public sealed class MasterEditor(
         if (!machine.Approved)
         {
             throw new LibraryRequestException("notApproved", "Machine is not approved");
+        }
+
+        if (!options.Names.IsMain && !options.SupportsHelper(machine.HelperVersion))
+        {
+            // Помощник до 1.6 не знает этой библиотеки: мастер-том не подключил бы, и закрытие ждало бы вечно.
+            throw new LibraryRequestException("helperTooOld", $"The helper on this PC ({machine.HelperVersion}) is older than {options.PersonalMinHelper}; update it to edit this library");
         }
 
         if (string.IsNullOrWhiteSpace(machine.InitiatorIqn))
@@ -46,7 +54,7 @@ public sealed class MasterEditor(
             throw new LibraryRequestException("publishPending", "A publish is in progress; open the master volume after it finishes");
         }
 
-        var operation = await master.RequestOpenAsync(machineId, machine.InitiatorIqn!, ChapUser, NewSecret(), requestedBy, clock.GetUtcNow())
+        var operation = await master.RequestOpenAsync(machineId, machine.InitiatorIqn!, options.Names.MasterChapUser, NewSecret(), requestedBy, clock.GetUtcNow())
             ?? throw new LibraryRequestException("masterBusy", "The master volume is already open or being closed");
         logger.LogInformation("Master volume open for {Machine} requested by {User}", machine.Name, requestedBy);
         return operation;
@@ -75,13 +83,13 @@ public sealed class MasterEditor(
         await master.SetAuthTagAsync(tag);
 
         await step("initiator");
-        var group = await storage.EnsureInitiatorGroupAsync(InitiatorComment, state.InitiatorIqn!, ct);
+        var group = await storage.EnsureInitiatorGroupAsync(options.Names.MasterGroupComment, state.InitiatorIqn!, ct);
 
         await step("extent");
-        var extent = await storage.EnsureWritableExtentAsync(options.MasterExtentName, options.MasterZvol, "clubsrv master (superclient)", ct);
+        var extent = await storage.EnsureWritableExtentAsync(options.MasterExtentName, options.MasterZvol, options.Names.MasterExtentComment, ct);
 
         await step("target");
-        var target = await storage.EnsureChapTargetAsync(options.MasterTargetName, "club master", options.PortalId, group.Id, tag, ct);
+        var target = await storage.EnsureChapTargetAsync(options.MasterTargetName, options.Names.MasterAlias, options.PortalId, group.Id, tag, ct);
         await storage.EnsureLunAsync(target.Id, extent.Id, ct);
 
         // Та же проверка, что у публикации, но от имени IQN этого ПК: таргет мастер-тома открыт только ему (discovery
@@ -138,10 +146,10 @@ public sealed class MasterEditor(
         }
 
         await step("initiator");
-        await storage.DeleteInitiatorGroupAsync(InitiatorComment, ct);
+        await storage.DeleteInitiatorGroupAsync(options.Names.MasterGroupComment, ct);
 
         await step("auth");
-        if (state.AuthTag is { } tag && (await storage.DeleteAuthAsync(tag, state.ChapUser ?? ChapUser, ct)).Outcome == DeleteOutcome.Blocked)
+        if (state.AuthTag is { } tag && (await storage.DeleteAuthAsync(tag, state.ChapUser ?? options.Names.MasterChapUser, ct)).Outcome == DeleteOutcome.Blocked)
         {
             throw new InvalidOperationException("CHAP credential of the master target is still in use");
         }

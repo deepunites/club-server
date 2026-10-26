@@ -2,11 +2,27 @@ using Club.TrueNas;
 
 namespace Club.Server.Library;
 
-/// <summary>Раскладка библиотеки на TrueNAS и параметры раздачи агентам (секция <c>Library</c>).</summary>
+/// <summary>
+/// Раскладка библиотеки на TrueNAS и параметры раздачи агентам (секция <c>Library</c> — библиотека G:). Следующие
+/// библиотеки — секции <c>Libraries:&lt;ключ&gt;</c> (<see cref="BindExtras"/>): общие настройки берутся из <c>Library</c>,
+/// имена объектов — из ключа (<see cref="LibraryNames"/>).
+/// </summary>
 public sealed class LibraryOptions
 {
     /// <summary>Модуль хранилища выключен, пока TrueNAS не настроен: операции копятся в журнале, конфиг без тома.</summary>
     public bool Enabled { get; set; }
+
+    /// <summary>Ключ библиотеки: <c>games</c> — G:, иначе ключ секции <c>Libraries</c>.</summary>
+    public string Key { get; private set; } = LibraryNames.Games.Key;
+
+    /// <summary>Секция конфигурации — для сообщений об ошибках настройки.</summary>
+    public string Section { get; private set; } = "Library";
+
+    /// <summary>Имена объектов в TrueNAS и БД. В конфигурации не задаются.</summary>
+    public LibraryNames Names { get; private set; } = LibraryNames.Games;
+
+    /// <summary>Название библиотеки в панели.</summary>
+    public string Title { get; set; } = LibraryNames.Games.DefaultTitle;
 
     /// <summary>Мастер-zvol, в который пишет суперклиент; с него снимаются снапшоты версий.</summary>
     public string MasterZvol { get; set; } = "tank/club/lib";
@@ -94,6 +110,13 @@ public sealed class LibraryOptions
 
     public string PersonalMinHelper { get; set; } = "1.5.0";
 
+    /// <summary>Самый старый помощник, который умеет вторую и следующие библиотеки (свои пути API, свои метки).</summary>
+    public const string ExtraMinHelper = "1.6.0";
+
+    /// <summary>Помощник этой версии умеет личный слой (<see cref="PersonalMinHelper"/>); суффиксы -beta, +build не считаются.</summary>
+    public bool SupportsHelper(string helperVersion) =>
+        Version.TryParse(helperVersion.Split('-', '+')[0], out var have) && Version.TryParse(PersonalMinHelper, out var need) && have >= need;
+
     /// <summary>
     /// Ошибки настройки — при старте сервера: иначе неверный адрес портала всплыл бы только на шаге verify первой
     /// публикации. Выключенный модуль не проверяется.
@@ -107,43 +130,43 @@ public sealed class LibraryOptions
 
         // Буква — одна, D…Z (контракт: ^[D-Z]$; помощник берёт первый символ). Пробелы и регистр из конфигурации
         // убираются здесь, а «G:» или « » — ошибка при старте, а не том на непонятной букве.
-        DriveLetter = CheckLetter("DriveLetter", DriveLetter);
-        MasterDriveLetter = CheckLetter("MasterDriveLetter", MasterDriveLetter);
-        CheckPortal("PortalAddress", PortalAddress);
+        DriveLetter = CheckLetter(Section, "DriveLetter", DriveLetter);
+        MasterDriveLetter = CheckLetter(Section, "MasterDriveLetter", MasterDriveLetter);
+        CheckPortal(Section, "PortalAddress", PortalAddress);
         if (!string.IsNullOrWhiteSpace(DiscoveryAddress))
         {
-            CheckPortal("DiscoveryAddress", DiscoveryAddress); // пусто — проверка идёт к PortalAddress
+            CheckPortal(Section, "DiscoveryAddress", DiscoveryAddress); // пусто — проверка идёт к PortalAddress
         }
 
         if (DiscoveryTimeoutMs < 1 || VerifyDelayMs < 0)
         {
-            throw new InvalidOperationException("Library:DiscoveryTimeoutMs must be positive and Library:VerifyDelayMs must not be negative");
+            throw new InvalidOperationException($"{Section}:DiscoveryTimeoutMs must be positive and {Section}:VerifyDelayMs must not be negative");
         }
 
         if (PersonalGames && (string.IsNullOrWhiteSpace(PersonalParent) || !PersonalParent.Contains('/') || PersonalParent.Contains('@')
             || PersonalParent.StartsWith('/') || PersonalParent.EndsWith('/') || !Version.TryParse(PersonalMinHelper, out _)))
         {
-            throw new InvalidOperationException("Library:PersonalParent must be a dataset path like 'ssd/club/seats' and Library:PersonalMinHelper a version like 1.5.0");
+            throw new InvalidOperationException($"{Section}:PersonalParent must be a dataset path like 'ssd/club/seats' and {Section}:PersonalMinHelper a version like 1.5.0");
         }
 
         if (PersonalGames && PersonalParent.Split('/')[0] != MasterZvol.Split('/')[0])
         {
             // Клон ZFS живёт только в пуле своего снапшота.
-            throw new InvalidOperationException($"Library:PersonalParent ({PersonalParent}) must be in the pool of Library:MasterZvol ({MasterZvol})");
+            throw new InvalidOperationException($"{Section}:PersonalParent ({PersonalParent}) must be in the pool of {Section}:MasterZvol ({MasterZvol})");
         }
 
         if (!Diskless.DisklessEndpoints.IsInitiatorIqn(ProbeInitiatorIqn))
         {
-            throw new InvalidOperationException($"Library:ProbeInitiatorIqn must be a lowercase iqn.yyyy-mm.domain[:name] name, got '{ProbeInitiatorIqn}'");
+            throw new InvalidOperationException($"{Section}:ProbeInitiatorIqn must be a lowercase iqn.yyyy-mm.domain[:name] name, got '{ProbeInitiatorIqn}'");
         }
 
-        static string CheckLetter(string key, string? value)
+        static string CheckLetter(string section, string key, string? value)
         {
             var letter = value?.Trim().ToUpperInvariant() ?? "";
-            return letter is [>= 'D' and <= 'Z'] ? letter : throw new InvalidOperationException($"Library:{key} must be a single drive letter D..Z, got '{value}'");
+            return letter is [>= 'D' and <= 'Z'] ? letter : throw new InvalidOperationException($"{section}:{key} must be a single drive letter D..Z, got '{value}'");
         }
 
-        static void CheckPortal(string key, string value)
+        static void CheckPortal(string section, string key, string value)
         {
             try
             {
@@ -151,8 +174,165 @@ public sealed class LibraryOptions
             }
             catch (IscsiDiscoveryException ex)
             {
-                throw new InvalidOperationException($"Library:{key} must be host[:port] with port 1..65535 ({ex.Message})");
+                throw new InvalidOperationException($"{section}:{key} must be host[:port] with port 1..65535 ({ex.Message})");
             }
         }
     }
+
+    // ---- вторая и следующие библиотеки ---------------------------------------------------------------------------
+
+    /// <summary>
+    /// Библиотеки из секции <c>Libraries</c> (env <c>Libraries__solo__…</c>) поверх общих настроек <paramref name="main"/>
+    /// (после его <see cref="Validate"/>). Работает библиотека, только если включены и она, и <c>Library</c>; ошибки
+    /// настройки работающей — при старте сервера, неизвестный ключ — всегда.
+    /// </summary>
+    public static IReadOnlyList<LibraryOptions> BindExtras(IConfigurationSection libraries, LibraryOptions main)
+    {
+        var extras = new List<LibraryOptions>();
+        foreach (var section in libraries.GetChildren())
+        {
+            var options = main.CloneShared();
+            section.Bind(options);
+            options.ApplyKey(section.Key);
+            options.Enabled = options.Enabled && main.Enabled;
+            extras.Add(options);
+        }
+
+        foreach (var extra in extras.Where(e => e.Enabled))
+        {
+            extra.Validate();
+            extra.ValidateExtra(main, extras.Where(e => e != extra && e.Enabled).ToList());
+        }
+
+        return extras;
+    }
+
+    /// <summary>
+    /// Общие настройки (портал, группа инициаторов, проверка, повторы) — копия этих; свои у библиотеки пусты, их задаёт
+    /// её секция. Имена мастер-тома пусты нарочно: <see cref="ApplyKey"/> отличит заданные в конфигурации.
+    /// </summary>
+    public LibraryOptions CloneShared() => new()
+    {
+        PortalId = PortalId,
+        InitiatorGroupId = InitiatorGroupId,
+        PortalAddress = PortalAddress,
+        DiscoveryAddress = DiscoveryAddress,
+        DiscoveryTimeoutMs = DiscoveryTimeoutMs,
+        VerifyDelayMs = VerifyDelayMs,
+        ProbeInitiatorIqn = ProbeInitiatorIqn,
+        MaxAttempts = MaxAttempts,
+        RunWorker = RunWorker,
+        WorkerIntervalSec = WorkerIntervalSec,
+        ReconcileIntervalSec = ReconcileIntervalSec,
+        ExtentAttempts = ExtentAttempts,
+        ExtentRetryDelayMs = ExtentRetryDelayMs,
+        Title = "",
+        MasterZvol = "",
+        PublishedParent = "",
+        PersonalParent = "",
+        DriveLetter = "",
+        MasterDriveLetter = "",
+        MasterTargetName = "",
+        MasterExtentName = "",
+        PersonalGames = true,
+        PersonalMinHelper = ExtraMinHelper,
+    };
+
+    /// <summary>
+    /// Ключ библиотеки из <see cref="CloneShared"/>: имена — из ключа, название по умолчанию, буква мастер-тома по
+    /// умолчанию — буква библиотеки (правка на месте тома, как у G: в клубе).
+    /// </summary>
+    public void ApplyKey(string key)
+    {
+        var names = LibraryNames.For(key);
+        if (!LibrarySchemas.Known.Contains(key))
+        {
+            throw new InvalidOperationException(
+                $"Libraries:{key}: unknown library (known: {string.Join(", ", LibrarySchemas.Known)}); every library needs its own database schema");
+        }
+
+        Key = key;
+        Section = $"Libraries:{key}";
+        Names = names;
+        if (MasterTargetName.Length > 0 || MasterExtentName.Length > 0)
+        {
+            throw new InvalidOperationException($"{Section}:MasterTargetName and {Section}:MasterExtentName come from the library key and must not be set");
+        }
+
+        MasterTargetName = names.MasterTargetName;
+        MasterExtentName = names.MasterExtentName;
+        if (string.IsNullOrWhiteSpace(Title))
+        {
+            Title = names.DefaultTitle;
+        }
+
+        if (string.IsNullOrWhiteSpace(MasterDriveLetter))
+        {
+            MasterDriveLetter = DriveLetter;
+        }
+    }
+
+    /// <summary>
+    /// Проверки второй и следующих библиотек (после <see cref="Validate"/>): только личный слой и только помощники
+    /// <see cref="ExtraMinHelper"/>+; буквы не заняты G: и другими библиотеками; датасеты не совпадают и не вложены в
+    /// чужие; имена не попадают под метки G:, бездиска и других библиотек.
+    /// </summary>
+    public void ValidateExtra(LibraryOptions main, IReadOnlyCollection<LibraryOptions> others)
+    {
+        if (!PersonalGames)
+        {
+            // Общий read-only том — таргет на версию для всех ПК; вторая библиотека его не умеет и не должна.
+            throw new InvalidOperationException($"{Section}:PersonalGames must be true: a second library is personal games only");
+        }
+
+        if (!Version.TryParse(PersonalMinHelper, out var min) || min < Version.Parse(ExtraMinHelper))
+        {
+            throw new InvalidOperationException($"{Section}:PersonalMinHelper must be {ExtraMinHelper} or newer: older helpers know only the G: library, got '{PersonalMinHelper}'");
+        }
+
+        foreach (var (name, value) in new[] { ("MasterZvol", MasterZvol), ("PersonalParent", PersonalParent), ("PublishedParent", PublishedParent) })
+        {
+            if (string.IsNullOrWhiteSpace(value) || !value.Contains('/') || value.Contains('@') || value.StartsWith('/') || value.EndsWith('/'))
+            {
+                throw new InvalidOperationException($"{Section}:{name} must be a dataset path like 'hdd/club/lib', got '{value}'");
+            }
+        }
+
+        var taken = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var library in others.Prepend(main))
+        {
+            taken.TryAdd(library.DriveLetter, library.Section);
+            taken.TryAdd(library.MasterDriveLetter, library.Section);
+        }
+
+        foreach (var letter in new[] { DriveLetter, MasterDriveLetter }.Distinct())
+        {
+            if (taken.TryGetValue(letter, out var owner))
+            {
+                // Мастер-том вытесняет на ПК правки том своей библиотеки — на чужой букве он отнял бы чужой том.
+                throw new InvalidOperationException($"{Section}: drive letter {letter} is already used by {owner} (DriveLetter or MasterDriveLetter)");
+            }
+        }
+
+        var mine = new[] { MasterZvol, PersonalParent, PublishedParent };
+        foreach (var library in others.Prepend(main))
+        {
+            foreach (var theirs in library.UsedDatasets())
+            {
+                if (mine.FirstOrDefault(m => m == theirs || m.StartsWith(theirs + "/", StringComparison.Ordinal) || theirs.StartsWith(m + "/", StringComparison.Ordinal)) is { } clash)
+                {
+                    throw new InvalidOperationException($"{Section}: dataset {clash} overlaps {theirs} of {library.Section}");
+                }
+            }
+        }
+
+        if (Names.Problems() is { Count: > 0 } problems)
+        {
+            throw new InvalidOperationException($"{Section}: unsafe names: {string.Join("; ", problems)}");
+        }
+    }
+
+    /// <summary>Датасеты, с которыми библиотека работает: мастер-том и родитель клонов своего режима.</summary>
+    private IEnumerable<string> UsedDatasets() =>
+        PersonalGames ? [MasterZvol, PersonalParent] : [MasterZvol, PublishedParent];
 }

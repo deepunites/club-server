@@ -16,6 +16,8 @@ var connectionString = builder.Configuration.GetConnectionString("Club")
 var authOptions = builder.Configuration.GetSection("Auth").Get<AuthOptions>() ?? new AuthOptions();
 var libraryOptions = builder.Configuration.GetSection("Library").Get<LibraryOptions>() ?? new LibraryOptions();
 libraryOptions.Validate();
+// Вторая и следующие библиотеки игр (Libraries:<ключ>, H: — solo): свои схема БД и имена в TrueNAS; общие настройки — из Library.
+var extraLibraries = LibraryOptions.BindExtras(builder.Configuration.GetSection("Libraries"), libraryOptions);
 var trueNasOptions = builder.Configuration.GetSection("TrueNas").Get<TrueNasOptions>() ?? new TrueNasOptions();
 var panelOptions = builder.Configuration.GetSection("Panel").Get<PanelOptions>() ?? new PanelOptions();
 var keaOptions = builder.Configuration.GetSection("Kea").Get<KeaOptions>() ?? new KeaOptions();
@@ -29,6 +31,11 @@ builder.Services.ConfigureHttpJsonOptions(o => ApiJson.Configure(o.SerializerOpt
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(authOptions);
 builder.Services.AddClubDatabase(connectionString);
+foreach (var extra in extraLibraries)
+{
+    builder.Services.AddLibraryDataSource(connectionString, extra.Key);
+}
+
 builder.Services.AddSingleton<MachineRepository>();
 builder.Services.AddSingleton<ZoneRepository>();
 builder.Services.AddSingleton<TokenService>();
@@ -71,6 +78,8 @@ builder.Services.AddSingleton<MasterEditor>();
 builder.Services.AddSingleton<LibraryPublisher>();
 builder.Services.AddSingleton<SeatGamesRepository>();
 builder.Services.AddSingleton<SeatGames>();
+// Без ключа зарегистрирована библиотека G: (её же берут воркеры образов и сети); остальные — в LibrarySet.
+builder.Services.AddSingleton(services => LibrarySet.Create(services, extraLibraries));
 builder.Services.AddSingleton(disklessOptions);
 builder.Services.AddSingleton<DisklessRepository>();
 builder.Services.AddSingleton<DisklessImages>();
@@ -86,6 +95,9 @@ if (builder.Configuration.GetValue("Database:MigrateOnStart", true))
 {
     await Database.MigrateAsync(app.Services);
 }
+
+// Схема каждой следующей библиотеки на месте — иначе она выключается, G: работает.
+await app.Services.GetRequiredService<LibrarySet>().CheckSchemasAsync();
 
 app.UseMiddleware<ApiErrorMiddleware>();
 app.UseDefaultFiles();
