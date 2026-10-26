@@ -243,3 +243,16 @@ td.wrap { white-space: normal; min-width: 300px; }
 @media (max-width: 900px) {
   .zones-grid { grid-template-columns: 1fr; }
 }
+
+/* Переключатель библиотек (G: / H:) на экране «Библиотека игр». */
+.screen-title { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.lib-switch { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.lib-switch[hidden] { display: none; }
+.lib-seg { background: transparent; color: var(--text); border: 0; border-radius: 0; padding: 6px 12px; }
+.lib-seg + .lib-seg { border-left: 1px solid var(--border); }
+.lib-seg.active { background: var(--accent); color: #fff; }
+
+/* Тома библиотек у ПК со второй библиотекой: строка на букву (G:, H:). */
+.lib-line { display: flex; gap: 6px; align-items: center; }
+.lib-line + .lib-line { margin-top: 4px; }
+.lib-letter { color: var(--muted); min-width: 2.5ch; }

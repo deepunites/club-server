@@ -131,8 +131,8 @@ tests/Club.Helper.Tests  тесты логики и сквозной тест п
 Состояние — `%ProgramData%\ClubDiskless` (доступ только SYSTEM и администраторам): `helper.json` (настройки),
 `credentials.bin` (токены под DPAPI машины), `assignment.json` (последнее назначение G:), `assignment.json.solo`
 (последнее назначение H:, 1.6.0). Перед захватом эталона их стирают скрипты эталона: список `$StateFiles` в
-`seal-golden.ps1` и `seal-hybrid.ps1` должен содержать и `assignment.json.solo` с `.tmp` (`capture-hybrid.ps1` и
-`make-hybrid-ref.py` стирают `assignment.json*`).
+`seal-golden.ps1` и `seal-hybrid.ps1` (с `assignment.json.solo` и `.tmp`), `capture-hybrid.ps1` и `make-hybrid-ref.py`
+стирают `assignment.json*`.
 
 ## Вторая библиотека — H: (1.6.0)
 
@@ -207,6 +207,21 @@ Start-Service ClubDisklessHelper
 Установка до `sysprep /generalize`: токены не создаются, пока служба не зарегистрирует машину, а HWID читается
 на каждом ПК свой — образ одинаков для всех. **До sysprep службу не запускать** (или удалить
 `credentials.bin` перед захватом образа), иначе все ПК получат одну и ту же регистрацию.
+
+### Обновление до 1.6.0 в клубе
+
+Один exe 1.6.0 (сборка выше, `-o out/helper-1.6.0`) — для эталона, гибридов и образа гибрида; его SHA256 закрепляется в
+`scripts/golden/install-helper.ps1` (`$ExeSha256`; пока там заглушка `TODO-1.6.0-SHA`, и скрипт отказывается ставить).
+
+- **Бездиск:** ПК-мастер в режиме мастера → `install-helper.ps1` → `prepare-golden.ps1` → перезагрузка →
+  `seal-golden.ps1` → публикация эталона («Бездиск»), затем перезагрузка мест вне работы клуба.
+- **Гибриды — на месте:** флешка с exe, `club-ca.pem` и `install-helper.ps1` (helper.json не нужен — остаётся
+  установленный), вход под администратором клуба мимо киоска (Shift при входе), запуск скрипта, ~5 минут. G: при
+  перезапуске службы не сбрасывается и не отключается (запрос при старте идёт с `attached=true`); игры Riot на SSD не
+  трогаются. Скрипт в конце показывает G:, H: и занята ли буква H: другим томом.
+- **Образ гибрида для перезаливок** (PC-11, PC-21 и новые): h1e = h1d + exe 1.6.0 — `scripts/server/patch-hybrid-wim.sh`;
+  в папку подготовки — ещё и `install-helper.ps1` с закреплённым SHA256: скрипт сверяет с ним exe.
+- **Откат:** `install-helper.ps1` из git `1b748fa` и exe 1.5.1 (`out/helper-1.5.1`) — H: пропадает с перезагрузкой.
 
 ## Проверка на стенде (обязательна: Windows-часть не запускалась)
 

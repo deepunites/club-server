@@ -193,12 +193,13 @@ function Get-SystemDisk {
     Get-Partition -DriveLetter $env:SystemDrive.Substring(0, 1) -ErrorAction Stop | Get-Disk -ErrorAction Stop
 }
 
-# Сессии iSCSI системного диска; если связь с диском не прочиталась — все сессии, кроме томов игр (games-…).
+# Сессии iSCSI системного диска; если связь с диском не прочиталась — все сессии, кроме томов игр (G: — games-…,
+# H: — solo-…) и мастер-томов библиотек (club-master, club-master-solo).
 function Get-BootSessions {
     $sessions = @()
     try { $sessions = @(Get-SystemDisk | Get-IscsiSession -ErrorAction Stop) } catch { }
     if (-not $sessions) {
-        try { $sessions = @(Get-IscsiSession -ErrorAction Stop | Where-Object { "$($_.TargetNodeAddress)" -notmatch ':games-' }) } catch { }
+        try { $sessions = @(Get-IscsiSession -ErrorAction Stop | Where-Object { "$($_.TargetNodeAddress)" -notmatch ':(games-|solo-|club-master)' }) } catch { }
     }
     return $sessions
 }
@@ -690,6 +691,22 @@ if (-not $script:BootNic) {
         }
     } catch {
         Write-Warn 'дополнительные свойства карты не прочитались' $_.Exception.Message
+    }
+}
+
+# Буква H: — диск офлайн-игр (помощник 1.6.0, библиотека H: на сервере). Его может не быть (библиотека H: не включена
+# или не опубликована) — это сведения. Буква H: у другого тома (DVD, картридер, флешка) — WARN: помощник не подключит
+# H: (в панели у ПК H: «ошибка», drive letter H is in use).
+$hVolume = Get-Volume -DriveLetter H -ErrorAction SilentlyContinue
+if (-not $hVolume) {
+    Write-Info 'буква H: свободна (диск офлайн-игр H: подключится, когда библиотека H: опубликована)'
+} else {
+    $hDisk = $null
+    try { $hDisk = Get-Partition -DriveLetter H -ErrorAction Stop | Get-Disk -ErrorAction Stop } catch { }
+    if ($hDisk -and ("$($hDisk.BusType)" -eq 'iSCSI' -or "$($hDisk.BusType)" -eq '9')) {
+        Write-Pass ('диск офлайн-игр H: подключён: метка {0}' -f $hVolume.FileSystemLabel)
+    } else {
+        Write-Warn ('буква H: занята другим томом: {0}, метка «{1}»' -f $hVolume.DriveType, $hVolume.FileSystemLabel) '«Управление дисками» -> «Изменить букву диска» на другую (не G: и не H:): иначе помощник не подключит диск офлайн-игр H:'
     }
 }
 

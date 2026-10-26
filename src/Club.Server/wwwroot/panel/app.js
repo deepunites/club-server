@@ -22,6 +22,12 @@
   let reimaging = null;
   let lib = null;
   let libJson = "";
+  // Библиотеки сервера (GET /libraries): G: («Online Games») и по ключу — H: («Offline Games»). libKey — открытая на
+  // экране «Библиотека игр», запоминается в браузере.
+  let libs = [];
+  let libKey = safeGet(localStorage, "panel.library") || "games";
+  let libPath = "/library"; // путь API библиотеки, чьи данные сейчас на экране (lib): по нему — её кнопки
+  let libSwitchKey = "";
   let dl = null;
   let dlJson = "";
   let zonesKey = "";
@@ -197,14 +203,36 @@
     return el("div", { class: "badges" }, badges);
   }
 
+  // Том библиотеки у ПК. Есть вторая библиотека (m.libraries — только тогда) — по строке на букву: «G:» и «H:»; помощник,
+  // который её не знает (старше minHelper), диска H: не получает — вместо тома «нужен помощник 1.6.0».
+  function libraryCell(m) {
+    if (!m.libraries) return el("td", {}, volumeCell(m.volume));
+    const games = libs.find((l) => l.key === "games");
+    const line = (letter, content) => el("div", { class: "lib-line" }, el("span", { class: "lib-letter mono" }, `${letter}:`), content);
+    return el("td", {},
+      line(games?.driveLetter ?? "G", volumeCell(m.volume)),
+      m.libraries.map((l) => {
+        const info = libs.find((x) => x.key === l.key);
+        const v = info?.minHelper ?? "1.6.0";
+        return line(l.driveLetter, l.supported ? volumeCell(l.volume)
+          : el("div", { class: "badges" }, badge("idle", t("needsHelper", { v }), t("needsHelperHint", { name: info?.title ?? l.key, letter: l.driveLetter, v }))));
+      }));
+  }
+
+  // Отметка мастер-тома на запись у ПК: буква — из настройки сервера (MasterDriveLetter библиотеки: у G: M или G, у H: — H);
+  // причина — во всплывающей подсказке.
+  function masterBadge(state, error, letter) {
+    const hint = error ? `${t(`mm_${state}`)}: ${error}` : t(`mm_${state}`);
+    return el("div", {}, badge(state === "failed" ? "bad" : "warn", t("masterBadge", { letter }), hint));
+  }
+
   // Версия образа на ПК и ход перезаливки: этап, проценты, причина сбоя.
   function windowsCell(m) {
     const r = m.reimage;
     const parts = [m.bootMode === "diskless" ? badge("info", t("bootDiskless"), t("bootDisklessHint")) : m.imageVersion ? el("span", { class: "mono" }, m.imageVersion) : dash()];
-    if (m.masterState) {
-      // Буква — из настройки сервера (Library:MasterDriveLetter: M или G — та же, что у библиотеки); причина — во всплывающей подсказке.
-      const hint = m.masterError ? `${t(`mm_${m.masterState}`)}: ${m.masterError}` : t(`mm_${m.masterState}`);
-      parts.push(el("div", {}, badge(m.masterState === "failed" ? "bad" : "warn", t("masterBadge", { letter: data?.masterDriveLetter ?? "M" }), hint)));
+    if (m.masterState) parts.push(masterBadge(m.masterState, m.masterError, data?.masterDriveLetter ?? "M"));
+    for (const l of m.libraries ?? []) {
+      if (l.masterState) parts.push(masterBadge(l.masterState, l.masterError, data?.libraries?.find((x) => x.key === l.key)?.masterDriveLetter ?? l.driveLetter));
     }
     const sb = m.secureBoot;
     if (sb && sb.enabled !== null && sb.enabled !== undefined) {
@@ -266,7 +294,14 @@
     if (data.pending) chips.push(chip(data.pending, "sumPending"));
     if (data.maintenance) chips.push(chip(data.maintenance, "sumMaintenance"));
     if (data.reimaging) chips.push(chip(data.reimaging, "sumReimaging"));
-    chips.push(el("span", { class: "chip" }, `${t("sumLibrary")}: `, data.currentLibraryVersion ? el("b", {}, data.currentLibraryVersion) : dash()));
+    // Со второй библиотекой — версия каждой под её названием («Online Games», «Offline Games»), без неё — как раньше.
+    const libChip = (title, version) => el("span", { class: "chip" }, `${title}: `, version ? el("b", {}, version) : dash());
+    if (data.libraries) {
+      chips.push(libChip(libs.find((l) => l.key === "games")?.title ?? t("sumLibrary"), data.currentLibraryVersion));
+      for (const l of data.libraries) chips.push(libChip(l.title, l.currentVersion));
+    } else {
+      chips.push(libChip(t("sumLibrary"), data.currentLibraryVersion));
+    }
     chips.push(el("span", { class: "chip" }, `${t("sumImage")}: `, data.currentImageVersion ? el("b", {}, data.currentImageVersion) : dash()));
     const feed = data.machineFeed;
     if (feed) {
@@ -305,7 +340,7 @@
         el("td", { class: "mono" }, orDash(m.ipAddress, true)),
         el("td", { class: "mono" }, m.macAddresses.length ? m.macAddresses.join(", ") : dash()),
         el("td", {}, zoneName(m.zone)),
-        el("td", {}, volumeCell(m.volume)),
+        libraryCell(m),
         windowsCell(m),
         el("td", {}, orDash(m.helperVersion, true)),
         el("td", {}, ago(m.lastSeenAt)),
@@ -690,6 +725,71 @@
   const MASTER_OPEN_STEPS = ["auth", "initiator", "extent", "target", "verify"];
   const MASTER_CLOSE_STEPS = ["target", "extent", "initiator", "auth"];
 
+  // Работающие библиотеки и открытая на экране. Нет списка (не загрузился) — только G: по прежнему пути /library.
+  const activeLibs = () => libs.filter((l) => l.enabled);
+  const currentLib = () => activeLibs().find((l) => l.key === libKey) ?? null;
+  const libBase = () => currentLib()?.path ?? "/library";
+  // Название на переключателе и в вопросах: «Offline Games (H:)» — из настройки сервера (Library:Title,
+  // Libraries:<ключ>:Title), на всех языках панели одинаковое.
+  const libName = (l) => `${l.title} (${l.driveLetter}:)`;
+
+  async function loadLibraries() {
+    try {
+      libs = await api("/libraries");
+    } catch (error) {
+      // Сбой связи — прежний список: открытый экран не перескакивает на G: (ошибку покажет запрос самой библиотеки).
+      if (error.message === "unauthorized") throw error;
+      if (!libs.length) return;
+    }
+    // Выбранную выключили на сервере (или её нет) — экран G:.
+    if (!currentLib() && libKey !== "games") {
+      libKey = "games";
+      libJson = "";
+    }
+  }
+
+  // Переключатель «Online Games (G:) / Offline Games (H:)» — только когда работающих библиотек больше одной.
+  // Перерисовывается, только когда изменились библиотеки, выбор или язык: кнопка под курсором не пересоздаётся.
+  function renderLibSwitch() {
+    const active = activeLibs();
+    const key = lang + libKey + JSON.stringify(active);
+    if (key === libSwitchKey) return;
+    libSwitchKey = key;
+    const box = $("lib-switch");
+    box.hidden = active.length < 2;
+    box.setAttribute("aria-label", t("libSwitch"));
+    box.replaceChildren(...(active.length < 2 ? [] : active.map((l) => el("button", {
+      type: "button",
+      class: l.key === libKey ? "lib-seg active" : "lib-seg",
+      "aria-pressed": String(l.key === libKey),
+      onclick: () => switchLibrary(l.key),
+    }, libName(l)))));
+  }
+
+  function switchLibrary(key) {
+    if (key === libKey) return;
+    libKey = key;
+    safeSet(localStorage, "panel.library", key === "games" ? null : key);
+    // Данные, раскрытый состав и предложенная метка — чужой библиотеки: всё заново.
+    lib = null;
+    libJson = "";
+    openContents.clear();
+    $("lib-label").value = "";
+    $("lib-label").dataset.auto = "1";
+    $("lib-publish-error").hidden = true;
+    renderLibSwitch();
+    loadLibrary();
+  }
+
+  // Библиотека, чьи данные на экране (lib), и вопрос перед действием с ней — с её названием первой строкой, когда
+  // работающих библиотек больше одной.
+  const shownLib = () => libs.find((l) => l.path === libPath) ?? null;
+
+  function libQuestion(text) {
+    const shown = shownLib();
+    return activeLibs().length > 1 && shown ? `${libName(shown)}\n${text}` : text;
+  }
+
   function suggestLabel() {
     const d = new Date();
     const base = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -720,7 +820,7 @@
       el("div", { class: "op-head" },
         el("div", {}, el("b", {}, t(`op_${op.kind}`)), op.versionLabel ? el("span", { class: "mono" }, ` ${op.versionLabel}`) : null, " ",
           badge(OP_STATUS[op.status] || "idle", t(`os_${op.status}`)), op.attempts > 1 ? el("span", { class: "muted small" }, ` #${op.attempts}`) : null),
-        op.status === "failed" ? el("button", { class: "small", onclick: () => libAct(`/library/operations/${op.id}/retry`) }, t("libRetry")) : null),
+        op.status === "failed" ? el("button", { class: "small", onclick: () => libAct(`${libPath}/operations/${op.id}/retry`) }, t("libRetry")) : null),
       el("div", { class: "steps" }, steps.map((step, i) => el("span", {
         class: `step ${i < at ? "done" : i === at ? (op.status === "failed" ? "failed" : "active") : ""}`,
       }, t(`step_${step}`)))),
@@ -756,16 +856,19 @@
       if (candidates.length === 0) {
         parts.push(el("p", { class: "muted small" }, t("masterNoCandidates")));
       } else {
+        // supported: false (только у H:) — помощник ПК эту библиотеку не знает: сервер откажет в правке (409
+        // helperTooOld), поэтому отметка — прямо в списке.
+        const v = shownLib()?.minHelper ?? "1.6.0";
         const select = el("select", { "aria-label": t("masterPc") }, candidates.map((c) =>
-          el("option", { value: c.id }, `${c.name}${c.online ? ` · ${t("online")}` : ""}`)));
-        actions.push(select, el("button", { onclick: () => libAct("/library/master/open", { machineId: select.value }) }, t("masterOpen")));
+          el("option", { value: c.id }, `${c.name}${c.online ? ` · ${t("online")}` : ""}${c.supported === false ? ` · ${t("needsHelper", { v })}` : ""}`)));
+        actions.push(select, el("button", { onclick: () => libAct(`${libPath}/master/open`, { machineId: select.value }) }, t("masterOpen")));
       }
     }
-    if (m.state === "open") actions.push(el("button", { onclick: () => libAct("/library/master/close", {}) }, t("masterFinish")));
-    if (m.state === "failed") actions.push(el("button", { onclick: () => libAct("/library/master/close", {}) }, t("masterCleanup")));
+    if (m.state === "open") actions.push(el("button", { onclick: () => libAct(`${libPath}/master/close`, {}) }, t("masterFinish")));
+    if (m.state === "failed") actions.push(el("button", { onclick: () => libAct(`${libPath}/master/close`, {}) }, t("masterCleanup")));
     if ((m.state === "open" || m.state === "closing") && !m.forceClose) {
       actions.push(el("button", { class: "danger", onclick: oneAtATime(async () => {
-        if (await confirmDialog(t("masterForceConfirm"), { okText: t("masterForce"), danger: true })) await libAct("/library/master/close", { force: true });
+        if (await confirmDialog(libQuestion(t("masterForceConfirm")), { okText: t("masterForce"), danger: true })) await libAct(`${libPath}/master/close`, { force: true });
       }) }, t("masterForce")));
     }
     if (actions.length) parts.push(el("div", { class: "master-row" }, actions));
@@ -796,7 +899,7 @@
     chip("imgRollback", lib.rollback?.label);
     if (lib.rollback) {
       chips.push(el("button", { class: "ghost small", onclick: oneAtATime(async () => {
-        if (await confirmDialog(t("libRollbackConfirm", { label: lib.rollback.label }), { okText: t("libRollback") })) await libAct("/library/rollback");
+        if (await confirmDialog(libQuestion(t("libRollbackConfirm", { label: lib.rollback.label })), { okText: t("libRollback") })) await libAct(`${libPath}/rollback`);
       }) }, t("libRollback")));
     }
     $("lib-summary").replaceChildren(...chips);
@@ -836,17 +939,24 @@
         el("td", {}, badge(OP_STATUS[op.status] || "idle", t(`os_${op.status}`), op.lastError || ""),
           op.step && op.status !== "done" ? el("span", { class: "muted small" }, ` ${t(`step_${op.step}`)}`) : null),
         el("td", { class: "num" }, op.attempts),
-        el("td", {}, op.status === "failed" ? el("button", { class: "small ghost", onclick: () => libAct(`/library/operations/${op.id}/retry`) }, t("libRetry")) : null))));
+        el("td", {}, op.status === "failed" ? el("button", { class: "small ghost", onclick: () => libAct(`${libPath}/operations/${op.id}/retry`) }, t("libRetry")) : null))));
     }
   }
 
   async function loadLibrary() {
     try {
-      const [fresh, history] = await Promise.all([api("/library"), api("/library/operations?limit=15")]);
-      const json = JSON.stringify([fresh, history]);
+      await loadLibraries();
+      renderLibSwitch();
+      const key = libKey;
+      const base = libBase();
+      const [fresh, history] = await Promise.all([api(base), api(`${base}/operations?limit=15`)]);
+      // Пока шёл запрос, переключили библиотеку — ответ уже не для экрана.
+      if (key !== libKey) return;
+      const json = JSON.stringify([base, fresh, history]);
       $("lib-error").hidden = true;
       if (json !== libJson) {
         lib = fresh;
+        libPath = base;
         libJson = json;
         renderLibrary(history);
       }
@@ -873,10 +983,10 @@
     $("lib-publish-error").hidden = true;
     const dirty = lib?.master?.dirty === true;
     // Красная всегда: публикация разбирает самую старую версию (а с недописанным мастер-томом — ещё и рискованна).
-    if (!(await confirmDialog(t(dirty ? "libPublishDirtyConfirm" : "libPublishConfirm", { label }), { okText: t("imgPublish"), danger: true }))) return;
+    if (!(await confirmDialog(libQuestion(t(dirty ? "libPublishDirtyConfirm" : "libPublishConfirm", { label })), { okText: t("imgPublish"), danger: true }))) return;
     $("lib-publish-button").disabled = true;
     try {
-      await api("/library/versions", { method: "POST", body: JSON.stringify({ label, allowDirtyMaster: dirty }) });
+      await api(`${libPath}/versions`, { method: "POST", body: JSON.stringify({ label, allowDirtyMaster: dirty }) });
       $("lib-label").value = "";
       $("lib-label").dataset.auto = "1";
       libJson = "";
@@ -1170,6 +1280,8 @@
   async function load() {
     try {
       const fresh = await api("/machines");
+      // Вторая библиотека: буква G: и названия для строк тома и сводки — из списка библиотек (раз за вход в панель).
+      if (fresh.libraries && !libs.length) await loadLibraries();
       const json = JSON.stringify(fresh);
       $("load-error").hidden = true;
       if (json !== dataJson) {

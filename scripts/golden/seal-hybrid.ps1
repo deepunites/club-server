@@ -23,8 +23,8 @@
         игры. FACEIT: его папки в AppData (Local, Roaming) профилей и в ProgramData — INFO с размером, удаляются только
         журналы и дампы (logs, log, crash dumps); вход в FACEIT скрипт не видит — выйти из аккаунта клуба вручную.
         Не удалилось — WARN;
-      - помощник: служба остановлена, удалены токены этого ПК и назначение личного диска (credentials.bin,
-        assignment.json и их .tmp) — как seal-golden.ps1: иначе они достались бы всем гибридам;
+      - помощник: служба остановлена, удалены токены этого ПК и назначения личных дисков (credentials.bin,
+        assignment.json, assignment.json.solo и их .tmp) — как seal-golden.ps1: иначе они достались бы всем гибридам;
       - образы NGEN (.NET Framework) — достройка;
       - приложения Store (Appx): пакет установлен пользователю, но не в образе (provisioned) или в другой версии —
         sysprep /generalize с ним падает («was installed for a user, but not provisioned for all users»). Копия
@@ -49,7 +49,7 @@ param(
 $ErrorActionPreference = 'Continue'
 $ServiceName = 'ClubDisklessHelper'
 $StateDir = "$env:ProgramData\ClubDiskless"
-$StateFiles = 'credentials.bin', 'credentials.bin.tmp', 'assignment.json', 'assignment.json.tmp'
+$StateFiles = 'credentials.bin', 'credentials.bin.tmp', 'assignment.json', 'assignment.json.tmp', 'assignment.json.solo', 'assignment.json.solo.tmp'
 $UnattendNs = 'urn:schemas-microsoft-com:unattend'
 $SysprepDir = Join-Path $env:SystemRoot 'System32\Sysprep'
 $SysprepExe = Join-Path $SysprepDir 'sysprep.exe'
@@ -58,8 +58,8 @@ $SuccessTag = Join-Path $SysprepDir 'Sysprep_succeeded.tag'
 $UnattendSource = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'unattend-hybrid.xml'
 # Копия без пробелов в пути и без зависимости от флешки; sysprep всё равно кладёт свою в %WINDIR%\Panther\unattend.xml.
 $UnattendCopy = Join-Path $SysprepDir 'unattend-hybrid.xml'
-# Лаунчеры и игры: по папке программы (Steam, Epic, Battle.net, Ubisoft, Rockstar, Lesta, Discord, Riot) или с диска игр G:.
-$LauncherPathPattern = '(?i)\\(Steam|Epic Games|Battle\.net|Ubisoft|Rockstar Games|Lesta|Discord|Riot Games)\\|^G:\\'
+# Лаунчеры и игры: по папке программы (Steam, Epic, Battle.net, Ubisoft, Rockstar, Lesta, Discord, Riot) или с дисков игр G: и H:.
+$LauncherPathPattern = '(?i)\\(Steam|Epic Games|Battle\.net|Ubisoft|Rockstar Games|Lesta|Discord|Riot Games)\\|^[GH]:\\'
 # Раздел «Riot и FACEIT»: закрываемые процессы (клиенты, игры и трей Vanguard; плюс всё из C:\Riot Games). Службы
 # Vanguard vgc и vgk не останавливаются.
 $GameClientProcessPattern = '(?i)^(RiotClient|League|VALORANT|FACEIT)|^vgtray$'
@@ -141,8 +141,9 @@ Write-Line '(что ставили), закройте их и игры.'
 $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path -match $LauncherPathPattern })
 foreach ($p in ($running | Sort-Object Path -Unique)) { Write-Warn ('запущен {0} ({1})' -f $p.ProcessName, $p.Path) 'выйти из аккаунта клуба и закрыть (и в трее; остальное — «Диспетчер задач» -> «Снять задачу»)' }
 if (-not $running) { Write-Pass 'лаунчеры и игры не запущены' }
-if (@(Get-IscsiSession -ErrorAction SilentlyContinue | Where-Object { $_.TargetNodeAddress -match ':club-master$' -and $_.IsConnected }).Count -gt 0) {
-    Write-Warn 'открыта правка библиотеки (таргет club-master)' 'в панели «Закончить правку» библиотеки, потом снова этот скрипт'
+# Мастер-том G: — club-master, H: — club-master-solo (у каждой библиотеки свой).
+if (@(Get-IscsiSession -ErrorAction SilentlyContinue | Where-Object { $_.TargetNodeAddress -match ':club-master(-[a-z0-9]+)?$' -and $_.IsConnected }).Count -gt 0) {
+    Write-Warn 'открыта правка библиотеки (таргет club-master или club-master-solo)' 'в панели «Закончить правку» этой библиотеки, потом снова этот скрипт'
 }
 
 # Riot (Riot Client, VALORANT, League of Legends, Vanguard) и FACEIT: вход и журналы с эталона достались бы всем гибридам.

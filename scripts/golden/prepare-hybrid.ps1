@@ -21,7 +21,8 @@
       - образы NGEN (.NET Framework) — достройка, как в seal-golden.ps1;
       - последним шагом — очистка хранилища компонентов DISM /StartComponentCleanup /ResetBase (долго).
     Проверяет: Secure Boot и TPM, VBS и HVCI работают, BitLocker выключен, IQN инициатора iSCSI — по умолчанию
-    (iqn.1991-05.com.microsoft:<имя ПК>, а не IQN места из iBFT), помощник бездиска (служба, диск игр G:).
+    (iqn.1991-05.com.microsoft:<имя ПК>, а не IQN места из iBFT), помощник бездиска (служба, диск игр G:), буква H:
+    свободна для диска офлайн-игр (или он подключён).
 
 .PARAMETER SkipCleanup
     Не запускать DISM /StartComponentCleanup /ResetBase (повторный запуск для проверки после перезагрузки).
@@ -560,6 +561,25 @@ try {
 } catch { }
 Get-IscsiSession -ErrorAction SilentlyContinue | Where-Object { "$($_.TargetNodeAddress)" -match ':games-' } |
     ForEach-Object { Write-Info ('сессия игр: {0}, подключена: {1}' -f $_.TargetNodeAddress, (Format-Bool $_.IsConnected)) }
+
+# Диск офлайн-игр H: (помощник 1.6.0, библиотека H: на сервере) — сведения: его нет, пока библиотека H: не включена или
+# не опубликована. Буква H: у другого тома (второй диск, картридер, DVD, флешка) — WARN: помощник не подключит H: (в
+# панели у ПК H: «ошибка», drive letter H is in use).
+$hVolume = Get-Volume -DriveLetter H -ErrorAction SilentlyContinue
+if (-not $hVolume) {
+    Write-Info 'буква H: свободна (диск офлайн-игр H: подключится, когда библиотека H: опубликована)'
+} else {
+    $hDisk = $null
+    try { $hDisk = Get-Partition -DriveLetter H -ErrorAction Stop | Get-Disk -ErrorAction Stop } catch { }
+    if ($hDisk -and (Get-BusName $hDisk.BusType) -eq 'iSCSI') {
+        Write-Pass ('диск офлайн-игр H: подключён: метка {0}, свободно {1:N0} ГБ из {2:N0} ГБ' -f $hVolume.FileSystemLabel, ($hVolume.SizeRemaining / 1GB), ($hVolume.Size / 1GB))
+    } else {
+        $bus = if ($hDisk) { Get-BusName $hDisk.BusType } else { '?' }
+        Write-Warn ('буква H: занята другим томом: {0}, шина {1}, метка «{2}»' -f $hVolume.DriveType, $bus, $hVolume.FileSystemLabel) '«Управление дисками» -> «Изменить букву диска» на другую (не G: и не H:): иначе помощник не подключит диск офлайн-игр H:'
+    }
+}
+Get-IscsiSession -ErrorAction SilentlyContinue | Where-Object { "$($_.TargetNodeAddress)" -match ':solo-' } |
+    ForEach-Object { Write-Info ('сессия H: {0}, подключена: {1}' -f $_.TargetNodeAddress, (Format-Bool $_.IsConnected)) }
 
 # NGEN: запуск PowerShell
 $psStart = @(1..3 | ForEach-Object { (Measure-Command { & powershell.exe -NoProfile -NonInteractive -Command 'exit' }).TotalSeconds } | Measure-Object -Minimum).Minimum

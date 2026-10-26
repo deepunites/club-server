@@ -5,8 +5,12 @@
 # (lib-*, img-*, @clean) and its disposable per-seat clones are never touched:
 #   games/club/lib        weekly  Mon 05:00, 1 week on games, 3 weeks on hdd
 #   <VM zvol>             daily   04:30,     7 days on ssd, 14 days + Sundays 8 weeks on hdd
-# Not backed up: games/club/seats, ssd/club/diskless/seats, games/club/published (rebuilt by the server), ssd/iso.
+# Not backed up: games/club/seats, ssd/club/diskless/seats, games/club/published (rebuilt by the server), ssd/iso,
+# and the second games library H: (hdd/club: its games can be downloaded again, its lib-* versions give rollback).
 # The golden image (img-* by name regex) gets its task after the first image publish.
+# Quotas: hdd is shared with H: (hdd/club, quota 900 GiB; docs/install/club.md), so backups are capped at 640 GiB
+# (games 480, diskless 160, vm 160) and both fit in the pool. A dataset that already exists gets its quota too when it
+# has none or a larger one, never below what it already uses (ZFS refuses that; free space first).
 set -eu
 VMZVOL=${1:?usage: club-backup.sh <club-server VM zvol, see: zfs list -t volume>}
 GIB=1073741824
@@ -18,8 +22,17 @@ mk() { # dataset quota-GiB
     if [ "$n" = 0 ]; then
         midclt call pool.dataset.create "{\"name\":\"$1\",\"type\":\"FILESYSTEM\",\"quota\":$(($2 * GIB)),\"atime\":\"OFF\"}" >/dev/null
         echo "created $1 (quota $2 GiB)"
+        return
+    fi
+    q=$(zfs get -Hp -o value quota "$1")
+    u=$(zfs get -Hp -o value used "$1")
+    if [ "$q" != 0 ] && [ "$q" -le $(($2 * GIB)) ]; then
+        echo "exists  $1 (quota $((q / GIB)) GiB)"
+    elif [ "$u" -ge $(($2 * GIB)) ]; then
+        echo "exists  $1: uses $((u / GIB)) GiB, quota $2 GiB NOT set - free space first" >&2
     else
-        echo "exists  $1"
+        midclt call pool.dataset.update "$1" "{\"quota\":$(($2 * GIB))}" >/dev/null
+        echo "exists  $1, quota set to $2 GiB (uses $((u / GIB)) GiB)"
     fi
 }
 
@@ -33,8 +46,8 @@ repl_id() { # name -> id or empty
 
 [ "$(midclt call pool.dataset.query "[[\"id\",\"=\",\"$VMZVOL\"]]" | json_field 'len(v)')" = 1 ] || { echo "no $VMZVOL" >&2; exit 1; }
 
-mk hdd/backup 1792
-mk hdd/backup/games 1434
+mk hdd/backup 640
+mk hdd/backup/games 480
 mk hdd/backup/diskless 160
 mk hdd/backup/vm 160
 

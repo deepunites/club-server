@@ -1,16 +1,22 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Ставит помощник бездиска (ClubDisklessHelper 1.5.1) в эталон: служба Windows, которая подключает диск игр G:,
-    правку библиотеки M: и сообщает серверу клуба состояние ПК (docs/helper.md).
+    Ставит помощник бездиска (ClubDisklessHelper 1.6.0) в эталон или обновляет его на гибриде: служба Windows, которая
+    подключает диски игр G: («Online Games») и H: («Offline Games», с 1.6.0), правку библиотек и сообщает серверу клуба
+    состояние ПК (docs/helper.md).
 
 .DESCRIPTION
     Запускать в эталоне в режиме мастера, PowerShell от администратора. Рядом со скриптом (флешка) — три файла:
-      ClubDisklessHelper.exe — сборка 1.5.1, SHA256 сверяется;
+      ClubDisklessHelper.exe — сборка 1.6.0, SHA256 сверяется;
       helper.json            — адрес сервера и ключ клуба (секрет: после установки удаляется с флешки);
       club-ca.pem            — CA клуба, которым подписан сертификат сервера.
     Помощник 1.5.0 привязывает регистрацию к HWID платы: запуск на мастере безопасен — места с другим HWID
     регистрируются сами, регистрацию мастера не наследуют. Повторный запуск обновляет файлы и перезапускает службу.
+
+    Гибрид — обновление на месте: та же флешка (helper.json не нужен — остаётся установленный), вход под администратором
+    клуба (Shift при входе — мимо киоска). G: и H: при перезапуске службы не сбрасываются и не отключаются. Только G: на
+    ПК — в helper.json "Libraries": []. Откат — install-helper.ps1 из git 1b748fa и exe 1.5.1: H: пропадёт после
+    перезагрузки, G: как прежде.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File E:\club\install-helper.ps1
@@ -24,10 +30,14 @@ $ErrorActionPreference = 'Continue'
 # $PSScriptRoot в значении параметра по умолчанию пуст при запуске powershell.exe -File (PS 5.1) — берём папку скрипта здесь.
 if (-not $Source) { $Source = Split-Path -Parent $MyInvocation.MyCommand.Path }
 
-$ExeSha256 = 'bec0828743b7095714cfab18997ad348e1dbe9cc7e5fbc429abfa8da5eef1b28'   # 1.5.1+b844e64 (.NET 10.0.13)
+# TODO-1.6.0-SHA: SHA256 сборки 1.6.0 вписывается, когда собран релиз (один exe — для эталона, гибридов и h1e;
+# patch-hybrid-wim.sh сверяет exe с этой строкой). До этого скрипт отказывается ставить.
+$ExeSha256 = 'TODO-1.6.0-SHA'   # 1.6.0+<коммит> (.NET 10.0.13)
+$ExeVersion = '1.6.0'
 $ServiceName = 'ClubDisklessHelper'
 $InstallDir = "$env:ProgramFiles\ClubDiskless"
 $StateDir = "$env:ProgramData\ClubDiskless"
+$ServiceDescription = 'Диски игр G: и H:, правка библиотек и состояние ПК для сервера клуба'
 
 # --- Вывод ------------------------------------------------------------------------------------------------------------
 $script:WarnCount = 0
@@ -49,8 +59,9 @@ try {
     $json = Join-Path $Source 'helper.json'
     $ca = Join-Path $Source 'club-ca.pem'
     foreach ($p in $exe, $ca) { if (-not (Test-Path -LiteralPath $p)) { throw "нет файла $p" } }
+    if ($ExeSha256 -notmatch '^[0-9a-fA-F]{64}$') { throw "в install-helper.ps1 не вписан SHA256 сборки $ExeVersion ($ExeSha256): скрипт ещё не готов" }
     if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ne $ExeSha256) { throw 'SHA256 ClubDisklessHelper.exe не совпадает (не та сборка или файл повреждён)' }
-    Write-Pass 'ClubDisklessHelper.exe 1.5.1: SHA256 совпадает'
+    Write-Pass "ClubDisklessHelper.exe ${ExeVersion}: SHA256 совпадает"
     $haveJson = Test-Path -LiteralPath $json
     $stateJson = Join-Path $StateDir 'helper.json'
     $stateCa = Join-Path $StateDir 'club-ca.pem'
@@ -107,12 +118,12 @@ try {
     $bin = '"{0}"' -f (Join-Path $InstallDir 'ClubDisklessHelper.exe')
     if (-not $svc) {
         New-Service -Name $ServiceName -BinaryPathName $bin -StartupType Automatic -DisplayName 'Club diskless helper' `
-            -Description 'Диск игр G:, правка библиотеки M: и состояние ПК для сервера клуба' -ErrorAction Stop | Out-Null
+            -Description $ServiceDescription -ErrorAction Stop | Out-Null
         Write-Pass 'служба создана'
     } else {
         # Путь — через реестр: PowerShell 5.1 искажает кавычки внутри аргумента для sc.exe binPath=.
         Set-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName" -Name ImagePath -Value $bin -Type ExpandString -ErrorAction Stop
-        Set-Service -Name $ServiceName -StartupType Automatic -ErrorAction Stop
+        Set-Service -Name $ServiceName -StartupType Automatic -Description $ServiceDescription -ErrorAction Stop
         Write-Pass 'служба обновлена'
     }
     # Упала — перезапуск через 5 с (дважды), потом через 30 с; счётчик сбрасывается за сутки.
@@ -138,7 +149,21 @@ try {
         Get-IscsiSession -ErrorAction SilentlyContinue | Where-Object { $_.TargetNodeAddress -match ':games-' } |
             ForEach-Object { Write-Line "сессия игр: $($_.TargetNodeAddress), подключена: $($_.IsConnected)" }
     }
-    Write-Line 'Перед публикацией эталона — seal-golden.ps1: он убирает регистрацию этого ПК из образа.'
+    # H: («Offline Games», помощник 1.6.0) — только сведения: её нет, пока на сервере не включена библиотека H:
+    # (Libraries__solo__*) или не опубликована её версия; цикл H: идёт после G:, первый диск H: сервер может готовить
+    # дольше такта. Буква H: у другого тома (второй диск, картридер, DVD, флешка) — помощник не подключит H: никогда.
+    $hVolume = Get-Volume -DriveLetter H -ErrorAction SilentlyContinue
+    if ($hVolume) {
+        $hDisk = $null
+        try { $hDisk = Get-Partition -DriveLetter H -ErrorAction Stop | Get-Disk -ErrorAction Stop } catch { }
+        if ($hDisk -and ("$($hDisk.BusType)" -eq 'iSCSI' -or "$($hDisk.BusType)" -eq '9')) { Write-Pass ('диск офлайн-игр H: подключён ({0})' -f $hVolume.FileSystemLabel) }
+        else { Write-Warn ('буква H: занята другим томом ({0}, метка «{1}»): диск офлайн-игр H: не подключится — «Управление дисками» -> «Изменить букву диска» на другую (не G: и не H:)' -f $hVolume.DriveType, $hVolume.FileSystemLabel) }
+    } else {
+        Write-Line 'диска офлайн-игр H: нет: библиотека H: на сервере не включена, не опубликована или диск ещё готовится — это не ошибка'
+        Get-IscsiSession -ErrorAction SilentlyContinue | Where-Object { $_.TargetNodeAddress -match ':solo-' } |
+            ForEach-Object { Write-Line "сессия H: $($_.TargetNodeAddress), подключена: $($_.IsConnected)" }
+    }
+    Write-Line 'Перед публикацией эталона — seal-golden.ps1: он убирает регистрацию этого ПК из образа. На гибриде (обновление на месте) больше ничего не нужно.'
 } catch {
     Write-Warn $_.Exception.Message
 } finally {

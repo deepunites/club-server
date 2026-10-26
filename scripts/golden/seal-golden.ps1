@@ -9,10 +9,11 @@
     (prepare-golden.ps1 без WARN, перезагрузка прошла). После выключения — панель «Бездиск» → «Опубликовать».
 
     Зачем: помощник на мастере регистрируется на сервере и хранит в %ProgramData%\ClubDiskless токены этого ПК
-    (credentials.bin, DPAPI машины — его расшифрует любое место с этим образом) и назначение с CHAP-секретом личного
-    диска (assignment.json). В опубликованном образе они достались бы всем местам, а сам ПК мастера при каждой загрузке
-    предъявлял бы уже использованный токен и терял регистрацию. Места с другим HWID эти файлы не используют, но читать их
-    могут. Настройки (helper.json, club-ca.pem) остаются: по ним каждое место регистрируется само.
+    (credentials.bin, DPAPI машины — его расшифрует любое место с этим образом) и назначения с CHAP-секретами личных
+    дисков (assignment.json, у H: — assignment.json.solo). В опубликованном образе они достались бы всем местам, а сам ПК
+    мастера при каждой загрузке предъявлял бы уже использованный токен и терял регистрацию. Места с другим HWID эти файлы
+    не используют, но читать их могут. Настройки (helper.json, club-ca.pem) остаются: по ним каждое место регистрируется
+    само.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File E:\club\seal-golden.ps1
@@ -26,7 +27,7 @@ param(
 $ErrorActionPreference = 'Continue'
 $ServiceName = 'ClubDisklessHelper'
 $StateDir = "$env:ProgramData\ClubDiskless"
-$StateFiles = 'credentials.bin', 'credentials.bin.tmp', 'assignment.json', 'assignment.json.tmp'
+$StateFiles = 'credentials.bin', 'credentials.bin.tmp', 'assignment.json', 'assignment.json.tmp', 'assignment.json.solo', 'assignment.json.solo.tmp'
 
 $script:WarnCount = 0
 function Write-Title([string]$Text) { Write-Host ''; Write-Host "==> $Text" -ForegroundColor Cyan }
@@ -44,8 +45,9 @@ if ($master) { Write-Pass "загрузка с мастер-тома ($($master[
 elseif ($Force) { Write-Warn 'сессии diskless-master нет — продолжаю из-за -Force' }
 else { throw 'Этот ПК загружен не с мастер-тома (нет iSCSI-сессии …:diskless-master). Скрипт — только для сеанса мастера (обойти: -Force).' }
 
-if (@(Get-IscsiSession -ErrorAction SilentlyContinue | Where-Object { $_.TargetNodeAddress -match ':club-master$' -and $_.IsConnected }).Count -gt 0) {
-    Write-Warn 'открыта правка библиотеки (таргет club-master): в панели «Закончить правку» библиотеки, потом снова этот скрипт'
+# Мастер-том G: — club-master, H: — club-master-solo (у каждой библиотеки свой).
+if (@(Get-IscsiSession -ErrorAction SilentlyContinue | Where-Object { $_.TargetNodeAddress -match ':club-master(-[a-z0-9]+)?$' -and $_.IsConnected }).Count -gt 0) {
+    Write-Warn 'открыта правка библиотеки (таргет club-master или club-master-solo): в панели «Закончить правку» этой библиотеки, потом снова этот скрипт'
 }
 # Вход в лаунчеры под аккаунтами клуба остался бы в образе и библиотеке — игроки получили бы эти аккаунты.
 Write-Line 'Перед публикацией: выйдите из аккаунтов клуба в Steam, Epic, Battle.net, Ubisoft, Rockstar, Lesta (и закройте их).'

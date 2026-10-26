@@ -133,7 +133,11 @@
 
     <section id="library" hidden>
       <div class="screen-head">
-        <h1 data-i18n="tabLibrary">Библиотека игр</h1>
+        <!-- Переключатель библиотек «Online Games (G:) / Offline Games (H:)» — только когда их больше одной (app.js). -->
+        <div class="screen-title">
+          <h1 data-i18n="tabLibrary">Библиотека игр</h1>
+          <div id="lib-switch" class="lib-switch" role="group" hidden></div>
+        </div>
         <div class="summary" id="lib-summary"></div>
       </div>
       <p id="lib-error" class="error" hidden></p>
