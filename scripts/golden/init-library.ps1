@@ -1,7 +1,7 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Первая разметка мастер-тома библиотеки игр: GPT, один раздел NTFS (кластер 64 КБ = блок zvol), метка ClubGames, буква M:.
+    Первая разметка мастер-тома библиотеки игр: GPT, один раздел NTFS (кластер 64 КБ = блок zvol), метка Online Games, буква M:.
 
 .DESCRIPTION
     Только один раз, на ПК, которому в панели открыта правка библиотеки (помощник подключил таргет …:club-master).
@@ -35,6 +35,6 @@ if ($disk.IsOffline) { Set-Disk -Number $disk.Number -IsOffline $false }
 if ($disk.IsReadOnly) { Set-Disk -Number $disk.Number -IsReadOnly $false }
 Initialize-Disk -Number $disk.Number -PartitionStyle GPT
 $part = New-Partition -DiskNumber $disk.Number -UseMaximumSize -DriveLetter M
-$vol = Format-Volume -Partition $part -FileSystem NTFS -AllocationUnitSize 65536 -NewFileSystemLabel 'ClubGames' -Confirm:$false
+$vol = Format-Volume -Partition $part -FileSystem NTFS -AllocationUnitSize 65536 -NewFileSystemLabel 'Online Games' -Confirm:$false
 Write-Host ("Готово: M: — {0}, {1:N0} ГБ свободно, кластер 64 КБ." -f $vol.FileSystemLabel, ($vol.SizeRemaining / 1GB)) -ForegroundColor Green
 Write-Host 'Ставьте Steam и игры на M:. Потом — в панели «Закончить правку» и «Опубликовать».' -ForegroundColor Green

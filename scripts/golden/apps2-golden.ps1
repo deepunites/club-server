@@ -42,7 +42,7 @@ try {
     $library = Get-Volume -DriveLetter G -ErrorAction SilentlyContinue
     $session = @(Get-IscsiSession -ErrorAction SilentlyContinue | Where-Object { $_.TargetNodeAddress -match ':club-master$' -and $_.IsConnected })
     $gDisk = Get-Partition -DriveLetter G -ErrorAction SilentlyContinue | Get-Disk -ErrorAction SilentlyContinue
-    if (-not $library -or $library.FileSystemLabel -ne 'ClubGames' -or $session.Count -ne 1 -or -not $gDisk -or
+    if (-not $library -or $library.FileSystemLabel -notin @('Online Games', 'ClubGames') -or $session.Count -ne 1 -or -not $gDisk -or
         ($session[0] | Get-Disk).Number -ne $gDisk.Number -or $gDisk.IsReadOnly) {
         throw 'G: — не том правки библиотеки (club-master, на запись): откройте в панели правку библиотеки для этого ПК и подождите 30 с.'
     }
