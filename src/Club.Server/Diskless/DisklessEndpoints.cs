@@ -100,6 +100,11 @@ public static partial class DisklessEndpoints
             return volume is not null ? Results.Json(volume, ApiJson.Options) : Results.NoContent();
         });
         api.MapPut("/machines/{machineId:guid}/status", StatusAsync);
+
+        // Вторая и следующие библиотеки (H: — solo, помощник 1.6.0+): те же тела по своим путям. Пути выше — только G:, их
+        // ответы от этих библиотек не меняются. Выключенная или неизвестная библиотека — 404: помощник 1.6.0 усыпляет её цикл.
+        api.MapGet("/machines/{machineId:guid}/libraries/{key}/volume", LibraryVolumeAsync);
+        api.MapPut("/machines/{machineId:guid}/libraries/{key}/status", LibraryStatusAsync);
     }
 
     /// <summary>Текущая опубликованная версия библиотеки. Том всегда read-only: он общий для всех ПК.</summary>
@@ -274,6 +279,65 @@ public static partial class DisklessEndpoints
             : await AssignmentAsync(library, options);
         return Results.Json(new StatusAccepted(clock.GetUtcNow(), volume, masterAssignment, reserved ? true : null), ApiJson.Options);
     }
+
+    /// <summary>
+    /// Запрос при старте помощника по библиотеке не-G: — то же, что <c>GET …/volume</c> у G: с личным слоем: точка сброса
+    /// личного диска места этой библиотеки. Помощник старше её PersonalMinHelper (1.6.0) назначения не получает (204).
+    /// </summary>
+    private static async Task<IResult> LibraryVolumeAsync(Guid machineId, string key, bool? attached, HttpContext context, LibrarySet libraries,
+        MachineRepository machines, CancellationToken ct)
+    {
+        RequireSelf(context, machineId);
+        var library = ExtraLibrary(libraries, key);
+        if (LibraryLetterReserved(await MasterAssignmentAsync(machineId, library.Master, library.Options), library.Options))
+        {
+            // Буква тома отдана мастер-тому этой библиотеки на этом ПК: как у G:, личный диск не сбрасывается.
+            context.Response.Headers[LibraryLetterReservedHeader] = "true";
+            return Results.NoContent();
+        }
+
+        var volume = await machines.FindAsync(machineId) is { } machine ? await library.Seats.AssignmentAsync(machine, atBoot: true, ct, attached) : null;
+        return volume is not null ? Results.Json(volume, ApiJson.Options) : Results.NoContent();
+    }
+
+    /// <summary>
+    /// Отчёт помощника по библиотеке не-G:. Из тела берутся только helperVersion, volume и master; пишется только
+    /// <c>machine_library</c> её схемы. Столбцы G:, last_seen и имя ПК в <c>machines</c> — дело отчёта по G:
+    /// (<see cref="StatusAsync"/>), поэтому отчёт здесь продублирован, а не общий. В ответе — том и мастер-том этой
+    /// библиотеки.
+    /// </summary>
+    private static async Task<IResult> LibraryStatusAsync(Guid machineId, string key, MachineStatus request, HttpContext context, LibrarySet libraries,
+        MachineRepository machines, TimeProvider clock, CancellationToken ct)
+    {
+        RequireSelf(context, machineId);
+        var library = ExtraLibrary(libraries, key);
+        Require(request.HelperVersion, "helperVersion");
+        if (request.Volume is null || !VolumeStates.Contains(request.Volume.State))
+        {
+            throw ApiException.Validation("volume.state", "unknown");
+        }
+
+        var v = request.Volume;
+        // Мастер-том — по правилам G: (нет master — сброс, unknown и незнакомое состояние — прежнее; LibraryMachineRepository).
+        await library.Machines!.RecordAsync(
+            machineId, new VolumeReport(v.State, v.TargetIqn, v.LibraryVersion, v.ReadOnlyVerified, Truncate(v.Error, 2000)),
+            request.Master?.State, request.Master?.Error, clock.GetUtcNow());
+        // Состав версии — со свежего личного клона, как у G: с личным слоем (у этих библиотек другого нет).
+        if (v is { State: "mounted", LibraryVersion: { } mountedVersion, Contents: { } contents })
+        {
+            await library.Repository.SetContentsAsync(mountedVersion, CleanFolders(contents), clock.GetUtcNow());
+        }
+
+        var masterAssignment = await MasterAssignmentAsync(machineId, library.Master, library.Options);
+        var reserved = LibraryLetterReserved(masterAssignment, library.Options);
+        var volume = reserved ? null
+            : await machines.FindAsync(machineId) is { } machine ? await library.Seats.AssignmentAsync(machine, atBoot: false, ct) : null;
+        return Results.Json(new StatusAccepted(clock.GetUtcNow(), volume, masterAssignment, reserved ? true : null), ApiJson.Options);
+    }
+
+    /// <summary>Работающая библиотека не-G: по ключу из пути. G: (у неё старые пути), выключенная или неизвестная — 404.</summary>
+    private static LibrarySlot ExtraLibrary(LibrarySet libraries, string key) =>
+        libraries.Find(key) is { Machines: not null } library ? library : throw ApiException.NotFound("library");
 
     /// <summary>
     /// Буква тома библиотеки отдана мастер-тому: правка открыта этому ПК, а мастер-том — на букве библиотеки

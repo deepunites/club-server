@@ -17,7 +17,17 @@ public sealed record MachineView(
     Guid Id, int Number, string Name, string Zone, string Status, string Hostname, string? IpAddress,
     IReadOnlyList<string> MacAddresses, string? HelperVersion, string? OsVersion, DateTimeOffset? LastSeenAt,
     DateTimeOffset? BootTime, MachineVolumeView Volume, DateTimeOffset RegisteredAt, string? ImageVersion, ReimageView? Reimage,
-    Diskless.SecureBootReport? SecureBoot = null, string? MasterState = null, string BootMode = "local", string? MasterError = null);
+    Diskless.SecureBootReport? SecureBoot = null, string? MasterState = null, string BootMode = "local", string? MasterError = null,
+    IReadOnlyList<MachineLibraryView>? Libraries = null);
+
+/// <summary>
+/// Вторая (третья, …) библиотека на ПК — по последнему отчёту помощника о ней (<c>machine_library</c>; нет отчёта — том
+/// <c>none</c>). <c>supported</c> — помощник ПК её умеет (Libraries:&lt;ключ&gt;:PersonalMinHelper, 1.6.0): иначе ПК
+/// её личного диска не получает. <c>volume</c> — как у G: (<see cref="MachineVolumeView"/>), <c>personal</c> — подключён
+/// личный диск этой библиотеки. Мастер-том на её букве — <c>masterState</c>, <c>masterError</c>, как у G:.
+/// </summary>
+public sealed record MachineLibraryView(
+    string Key, string DriveLetter, bool Supported, MachineVolumeView Volume, string? MasterState = null, string? MasterError = null);
 
 /// <summary>
 /// Перезаливка машины (последнее задание, если оно не закрыто или закрыто меньше суток назад). <c>state</c>:
@@ -42,11 +52,17 @@ public sealed record ZoneView(string Id, string Name, int Machines, bool IsDefau
 public sealed record MachineFeedView(
     string State, string Target, DateTimeOffset? LastDeliveredAt, DateTimeOffset? LastAttemptAt, int Machines, string? Error, int Failures);
 
-/// <summary><c>masterDriveLetter</c> — буква мастер-тома на ПК правки (Library:MasterDriveLetter), для отметки у машины.</summary>
+/// <summary>
+/// <c>masterDriveLetter</c> — буква мастер-тома на ПК правки (Library:MasterDriveLetter), для отметки у машины.
+/// <c>libraries</c> — работающие библиотеки не-G: (нет таких — поля нет, как и <c>libraries</c> у машин).
+/// </summary>
 public sealed record MachinesOverview(
     IReadOnlyList<MachineView> Machines, IReadOnlyList<ZoneView> Zones, string? CurrentLibraryVersion,
     int Online, int Offline, int Pending, int Maintenance, string? CurrentImageVersion = null, int Reimaging = 0,
-    MachineFeedView? MachineFeed = null, string? MasterDriveLetter = null);
+    MachineFeedView? MachineFeed = null, string? MasterDriveLetter = null, IReadOnlyList<MachinesLibraryView>? Libraries = null);
+
+/// <summary>Библиотека не-G: в обзоре «Рабочих станций»: название, текущая версия (по ней <c>outdated</c>) и буква мастер-тома.</summary>
+public sealed record MachinesLibraryView(string Key, string Title, string? CurrentVersion, string MasterDriveLetter);
 
 /// <summary><c>allowNotGeneralized</c> — только API (в панели нет): залить образ без sysprep, только этим заданием.</summary>
 public sealed record ReimageRequest(string? Image, bool? AllowNewDisk, bool? AllowNotGeneralized);
@@ -63,15 +79,24 @@ public static class MachinesPanelEndpoints
     {
         var panel = app.MapGroup(PanelAuthMiddleware.Prefix + "/v1");
 
-        panel.MapGet("/machines", async (MachineRepository machines, ZoneRepository zones, LibraryRepository library, LibraryOptions libraryOptions, Imaging.ImageRepository images, Integration.MachineFeedOptions feedOptions, Integration.MachineFeedState feed, TimeProvider clock, ILoggerFactory logs) =>
+        panel.MapGet("/machines", async (MachineRepository machines, ZoneRepository zones, LibraryRepository library, LibraryOptions libraryOptions, LibrarySet libraries, Imaging.ImageRepository images, Integration.MachineFeedOptions feedOptions, Integration.MachineFeedState feed, TimeProvider clock, ILoggerFactory logs) =>
         {
             var logger = logs.CreateLogger("Club.Server.Panel.Sanity");
             var now = clock.GetUtcNow();
             var current = (await library.PointersAsync()).Current?.Label;
             var jobs = await images.LatestJobsAsync();
             var labels = (await images.ImagesAsync()).ToDictionary(i => i.Id, i => i.Label);
+            var extras = new List<ExtraLibrary>();
+            foreach (var slot in libraries.Extras.Where(s => s.Options.Enabled))
+            {
+                extras.Add(new ExtraLibrary(slot, (await slot.Repository.PointersAsync()).Current?.Label, (await slot.Machines!.AllAsync()).ToDictionary(r => r.MachineId)));
+            }
+
             var views = (await machines.AllAsync())
-                .Select(m => View(m, current, now, logger, jobs.TryGetValue(m.Id, out var job) ? job : null, labels))
+                .Select(m => View(m, current, now, logger, jobs.TryGetValue(m.Id, out var job) ? job : null, labels) with
+                {
+                    Libraries = extras.Count == 0 ? null : extras.Select(e => LibraryView(m, e)).ToList(),
+                })
                 .ToList();
             return Results.Json(
                 new MachinesOverview(
@@ -85,7 +110,8 @@ public static class MachinesPanelEndpoints
                     (await images.PointersAsync()).Current?.Label,
                     views.Count(v => v.Status == "reimaging"),
                     FeedView(feedOptions, feed),
-                    libraryOptions.MasterDriveLetter),
+                    libraryOptions.MasterDriveLetter,
+                    extras.Count == 0 ? null : extras.Select(e => new MachinesLibraryView(e.Slot.Key, e.Slot.Title, e.Current, e.Slot.Options.MasterDriveLetter)).ToList()),
                 ApiJson.Options);
         });
 
@@ -145,6 +171,27 @@ public static class MachinesPanelEndpoints
                 _ => throw ApiException.Validation("zone", "unknown"),
             };
         });
+    }
+
+    /// <summary>Работающая библиотека не-G: для экрана: текущая версия и отчёты ПК о ней.</summary>
+    private sealed record ExtraLibrary(LibrarySlot Slot, string? Current, IReadOnlyDictionary<Guid, LibraryMachineRow> Reports);
+
+    /// <summary>Библиотека не-G: на ПК — как <see cref="MachineView.Volume"/> и мастер-том у G:, только из её отчёта.</summary>
+    private static MachineLibraryView LibraryView(MachineRow m, ExtraLibrary library)
+    {
+        var options = library.Slot.Options;
+        if (!library.Reports.TryGetValue(m.Id, out var r))
+        {
+            return new MachineLibraryView(library.Slot.Key, options.DriveLetter, options.SupportsHelper(m.HelperVersion), new MachineVolumeView("none", null, null, false, null));
+        }
+
+        var outdated = r.VolumeState == "mounted" && library.Current is not null && r.VolumeVersion != library.Current;
+        return new MachineLibraryView(
+            library.Slot.Key, options.DriveLetter, options.SupportsHelper(m.HelperVersion),
+            new MachineVolumeView(r.VolumeState, r.VolumeVersion, null, outdated, r.VolumeError,
+                r.VolumeIqn?.Contains($":{library.Slot.Names.SeatTargetPrefix}", StringComparison.Ordinal) == true),
+            r.MasterState is "mounted" or "mounting" or "failed" ? r.MasterState : null,
+            r.MasterState is "mounting" or "failed" ? r.MasterError : null);
     }
 
     private static MachineFeedView? FeedView(Integration.MachineFeedOptions options, Integration.MachineFeedState feed) =>

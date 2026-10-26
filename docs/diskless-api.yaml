@@ -4,14 +4,18 @@ info:
   version: 1.0.0
   description: |
     API бездиска между сервером клуба и помощником бездиска на ПК (служба Windows). Не зависит от шелла: касса,
-    игроки и сессии — зона шелла, здесь только машины и том библиотеки игр.
+    игроки и сессии — зона шелла, здесь только машины и тома библиотек игр.
 
     - JSON: camelCase, время `2026-09-27T10:15:30.123Z`, null не передаётся.
     - Ошибки: `{ "error": { "code", "message", "details", "traceId" } }`.
     - Доступ: регистрация по `X-Club-Key`; дальше `Authorization: Bearer <accessToken>` (JWT, ~1 ч) и одноразовый
       refresh. Только HTTPS в клубе.
-    - Помощник монтирует том всегда read-only. Сервер никогда не управляет Windows напрямую: помощник сам опрашивает
-      состояние и сообщает факты.
+    - Общий том версии помощник монтирует только read-only; на запись — только личный диск своего места (личный слой
+      игр, Library:PersonalGames: свой таргет и CHAP) и мастер-том на ПК, которому открыта правка. Сервер никогда не
+      управляет Windows напрямую: помощник сам опрашивает состояние и сообщает факты.
+    - Библиотеки игр: G: — пути `/machines/{machineId}/volume` и `/status`. Вторая и следующие (H: — `solo`,
+      Libraries:<ключ>, только личный слой, помощник 1.6.0+) — `/machines/{machineId}/libraries/{key}/volume` и `/status`
+      с теми же телами; их тома, мастер-тома и `libraryLetterReserved` в ответах путей G: не появляются никогда.
 servers:
   - url: https://{host}/diskless/v1
     variables:
@@ -141,6 +145,103 @@ paths:
           $ref: '#/components/responses/Error'
         '403':
           $ref: '#/components/responses/Error'
+  /machines/{machineId}/libraries/{key}/volume:
+    parameters:
+      - $ref: '#/components/parameters/MachineId'
+      - $ref: '#/components/parameters/LibraryKey'
+    get:
+      operationId: getLibraryVolume
+      summary: 'Какой личный диск библиотеки по ключу монтировать сейчас (H: — solo, помощник 1.6.0+)'
+      description: >-
+        То же, что GET …/volume у G: с личным слоем, для своей библиотеки: запрос при старте помощника и точка сброса
+        личного диска места этой библиотеки (таргет <ключ>-seat-NN, буква Libraries:<ключ>:DriveLetter). Диски G: и этой
+        библиотеки одного ПК сбрасываются и пересобираются независимо. Помощник старше Libraries:<ключ>:PersonalMinHelper
+        (1.6.0; версия — из последнего отчёта по G:) назначения не получает.
+      security:
+        - machineBearer: []
+      parameters:
+        - name: attached
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: >-
+            Подключён ли на ПК личный диск этой библиотеки (помощник проверяет свои iSCSI-сессии по метке
+            `:<ключ>-seat-`). Смысл — как у GET …/volume.
+      responses:
+        '200':
+          description: Личный диск места в этой библиотеке (readOnly=false, chapUser и chapSecret).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VolumeAssignment'
+        '204':
+          description: >-
+            Тома нет: версия не опубликована, диск не подготовлен за 12 с (назначение придёт в ответе на отчёт), IQN ПК
+            ещё неизвестен, помощник старше 1.6.0 — или буква тома отдана мастер-тому этой библиотеки на этом ПК
+            (заголовок X-Library-Letter-Reserved, как у GET …/volume). Личный диск места при этом не сбрасывается.
+          headers:
+            X-Library-Letter-Reserved:
+              description: >-
+                true — тома нет, потому что его буква отдана мастер-тому этой библиотеки на этом ПК
+                (Libraries:<ключ>:MasterDriveLetter совпадает с Libraries:<ключ>:DriveLetter, у H: так по умолчанию).
+              schema:
+                type: string
+                enum: ['true']
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          description: >-
+            Библиотеки с таким ключом нет или она выключена (`notFound`, `details.what = library`; у G: ключа нет — её
+            пути выше). Старый сервер отвечает 404 без конверта. Помощник 1.6.0 в обоих случаях усыпляет цикл этой
+            библиотеки и спрашивает снова через 10 минут.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /machines/{machineId}/libraries/{key}/status:
+    parameters:
+      - $ref: '#/components/parameters/MachineId'
+      - $ref: '#/components/parameters/LibraryKey'
+    put:
+      operationId: reportLibraryStatus
+      summary: Факты с ПК о библиотеке по ключу и в ответ — её том и мастер-том
+      description: >-
+        Тело — MachineStatus, но сервер берёт из него только helperVersion, volume (о томе этой библиотеки) и master
+        (о мастер-томе этой библиотеки; правила те же, что у PUT …/status: нет master — не подключён, unknown — без
+        изменений). Остальные поля пропускаются: время на связи, имя ПК, IQN и прочие факты пишет только отчёт по G:.
+        Состав (`volume.contents`) принимается при state=mounted и уходит в версии этой библиотеки.
+      security:
+        - machineBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MachineStatus'
+      responses:
+        '200':
+          description: >-
+            Принято. `volume` — личный диск этой библиотеки (нет — тома нет), `master` — её мастер-том, если правка
+            открыта этому ПК, `libraryLetterReserved` — буква её тома отдана её мастер-тому.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusAccepted'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          description: Библиотеки с таким ключом нет или она выключена — как у GET …/libraries/{key}/volume.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
 webhooks:
   machinesSnapshot:
     post:
@@ -207,6 +308,15 @@ components:
       schema:
         type: string
         format: uuid
+    LibraryKey:
+      name: key
+      in: path
+      required: true
+      description: 'Ключ библиотеки не-G: (секция Libraries:<ключ> сервера); сейчас бывает только `solo` (H:).'
+      schema:
+        type: string
+        pattern: '^[a-z][a-z0-9]{1,11}$'
+        examples: [solo]
   responses:
     Error:
       description: Ошибка.
@@ -288,7 +398,8 @@ components:
       required: [libraryVersion, portal, targetIqn, readOnly, driveLetter]
       description: >-
         Общий том версии — read-only, без CHAP, таргет games-<версия>. Личный диск места (Library:PersonalGames) —
-        таргет games-seat-NN, readOnly=false, chapUser и chapSecret обязательны; помощник подключает на запись только его.
+        таргет games-seat-NN (у библиотеки по ключу — <ключ>-seat-NN, у H: solo-seat-NN), readOnly=false, chapUser и
+        chapSecret обязательны; помощник подключает на запись только его.
       properties:
         libraryVersion:
           type: string
@@ -300,7 +411,7 @@ components:
           type: string
         readOnly:
           type: boolean
-          description: true — общий том всем ПК, только чтение; false — только личный диск места (games-seat-NN) с CHAP.
+          description: true — общий том всем ПК, только чтение; false — только личный диск места (games-seat-NN, solo-seat-NN) с CHAP.
         driveLetter:
           type: string
           pattern: '^[D-Z]$'
@@ -502,7 +613,8 @@ components:
             X-Library-Letter-Reserved), личный диск места не сбрасывается и не удаляется. Помощник 1.5.1+ отпускает том
             библиотеки (личный диск — со сбросом кэша и offline), подключает мастер-том на эту букву и, пока назначение
             мастер-тома есть, том библиотеки не монтирует. Иначе поля нет; старые помощники его пропускают (1.5.0 при этом не отдаёт личный диск, и мастер-том
-            не подключается: буква занята).
+            не подключается: буква занята). В ответе PUT …/libraries/{key}/status — то же для библиотеки по ключу
+            (Libraries:<ключ>:MasterDriveLetter и DriveLetter; у H: обе — H).
     MachinesSnapshot:
       type: object
       required: [schema, generatedAt, contentHash, machines]

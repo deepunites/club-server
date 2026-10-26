@@ -21,15 +21,17 @@ camelCase, enum строками, время `2026-09-27T10:15:30.123Z`, оши�
 | `GET /library/operations/{id}` | Одна операция | 200; 404 |
 | `POST /library/operations/{id}/retry` | Повторить упавшую операцию (после исправления причины) | 202; 404; 409 (`notFailed`) |
 | `GET /storage/warnings` | Активные предупреждения сверки намерений с TrueNAS | 200 |
-| `POST /library/master/open` `{ machineId }` | Открыть мастер-том на запись этому ПК (суперклиент, `docs/master-editing.md`) | 202; 409 (`noInitiator`, `notApproved`, `publishPending`, `masterBusy`) |
+| `POST /library/master/open` `{ machineId }` | Открыть мастер-том на запись этому ПК (суперклиент, `docs/master-editing.md`) | 202; 409 (`noInitiator`, `notApproved`, `publishPending`, `masterBusy`; у библиотеки по ключу ещё `helperTooOld`) |
 | `POST /library/master/close` `{ force? }` | Закончить правку (ждёт отключения ПК) или отключить принудительно | 202; 409 (`masterClosed`) |
+| `GET /libraries` | Библиотеки сервера: `[{ key, title, enabled, driveLetter, masterDriveLetter, minHelper, path }]`, первой — G: | 200 |
+| `GET /libraries/{key}` и `/libraries/{key}/…` | Экран библиотеки по ключу: те же пути и ответы, что `/library/…` (versions, rollback, operations, operations/{id}, operations/{id}/retry, master/open, master/close) | как у `/library/…`; 404 `notFound` (`details.what = library`) |
 
 `POST /library/versions` принимает `allowDirtyMaster` и отвечает 409 `masterOpen` (мастер-том открыт) или
 `masterDirty` (отключён принудительно, нужна явная публикация с `allowDirtyMaster: true`).
 
 В обзоре `master { state (closed|opening|open|closing|failed), machineId, machineName, machineState, machineError, dirty,
-forceClose, openedAt, closeRequestedAt, closedAt, lastError, driveLetter }` и `masterCandidates [{ id, number, name, online }]` —
-одобренные ПК, чей помощник сообщил IQN инициатора. `lastError` у открытого тома — оговорка открытия шага verify, а
+forceClose, openedAt, closeRequestedAt, closedAt, lastError, driveLetter }` и `masterCandidates [{ id, number, name, online, supported }]` —
+одобренные ПК, чей помощник сообщил IQN инициатора (`supported` — только у библиотеки по ключу, см. ниже). `lastError` у открытого тома — оговорка открытия шага verify, а
 не ошибка: либо таргет мастер-тома так и не стал виден ПК суперклиента и после повторных применений конфигурации iSCSI
 (`The master target is not visible to the superclient PC …`, подсказка — перезапуск службы iSCSI, если буква
 мастер-тома не появится), либо группа инициаторов мастер-тома не включает IQN этого ПК (`The initiator group of the master target
@@ -74,8 +76,33 @@ extent|lun|verify|promote|done), attempts, lastError, requestedBy, createdAt, up
 пускает `*` либо строка с `!`, — подсказка перезапустить службу iSCSI, это рвёт сессии всех ПК), `targetNotDiscoveredListed` (то же, но таргет открыт только по списку
 инициаторов: подсказка сначала проверить, что список включает имя проверки `Library:ProbeInitiatorIqn`, и добавить
 его, если нет), `discoveryUnavailable` (сервер не может проверить портал: `subject` — адрес), `probeDenied` (группа
-инициаторов таргета версии не включает имя проверки сервера — проверить таргет нельзя), `orphanClone`, `retireBlocked`.
+инициаторов таргета версии не включает имя проверки сервера — проверить таргет нельзя), `orphanClone`, `retireBlocked`,
+`retiredHeld` (личный слой: снапшот разобранной версии ещё держат личные диски мест, `subject` — снапшот, в `message` — эти
+места; место освободится после их перезагрузки — диск пересоберётся на текущей версии).
 Сервер ничего не исправляет сам — решение за администратором.
+
+### Несколько библиотек (G: и H:)
+
+Кроме G: (секция `Library`, «Online Games») у сервера могут быть библиотеки по ключу — секции `Libraries:<ключ>`; сейчас
+только `solo` — H:, «Offline Games» (название — `Libraries:solo:Title`, у G: — `Library:Title`). Подробно — `docs/master-editing.md`.
+
+- `GET /libraries` — G: (`key: games`, `path: /library`) и все настроенные библиотеки по ключу (`path: /libraries/<ключ>`;
+  пути относительно `/panel/api/v1`). `enabled: false` — библиотека выключена (`Libraries:<ключ>:Enabled`, выключенный
+  `Library:Enabled` или схема БД не прошла проверку при старте): её экран отвечает 404. `minHelper` — с какой версии
+  помощник получает личный диск библиотеки (`PersonalMinHelper`; у G: без личного слоя поля нет), у H: — `1.6.0`.
+  Переключатель библиотек на экране нужен, только когда работающих (`enabled`) больше одной.
+- `/libraries/{key}/…` — те же пути, тела и ответы, что `/library/…`; `games` — тоже G: (те же данные, что `/library`).
+  Неизвестный ключ или выключенная библиотека — 404 `notFound`, `details.what = library`. `/library/…` и
+  `/storage/warnings` — по-прежнему только G:.
+- Версии, операции, мастер-том и предупреждения у каждой библиотеки свои (H: — схема БД `solo`): операция G: по пути H:
+  — 404, публикация H: не мешает правке G: и наоборот.
+- Обзор библиотеки по ключу: `machines` и `mountedOn` — по отчётам помощника об этой библиотеке (`PUT …/libraries/{key}/status`,
+  docs/diskless-api.yaml); ПК на связи (по отчёту G:) без свежего отчёта о ней (помощник старше 1.6.0, цикл H: не
+  отвечает) — `notMounted`. `master.machineState`/`machineError` — из того же отчёта, мастер-том G: на это не влияет.
+  `masterCandidates[].supported` — помощник ПК умеет эту библиотеку (`minHelper`); открытие правки остальным — 409
+  `helperTooOld`. У G: поля `supported` нет.
+- Предупреждения библиотеки по ключу хранятся с источником `<ключ>` и приставкой `<ключ>:` у `subject` (`solo:v1`),
+  чтобы не совпасть с G:; на её экране `subject` — без приставки (`v1`).
 
 ## Рабочие станции
 
@@ -109,7 +136,12 @@ ru/uz/en; узбекский перевод — черновой, провери
 режим «Бездиск» и ставит курсор в поле MAC.
 
 Машина: `id, number, name, zone, status, hostname, ipAddress, macAddresses, helperVersion, osVersion, lastSeenAt,
-bootTime, volume { state, libraryVersion, readOnlyVerified, outdated, error, personal }, registeredAt`.
+bootTime, volume { state, libraryVersion, readOnlyVerified, outdated, error, personal }, registeredAt, libraries`.
+`libraries` — только если работает библиотека по ключу (H:): `[{ key, driveLetter, supported, volume, masterState,
+masterError }]` по последнему отчёту помощника о ней (нет отчёта — `volume.state: none`); `volume` — того же вида, что у
+G: (`personal` — подключён личный диск этой библиотеки, `outdated` — не текущая её версия), `supported` — помощник ПК её
+умеет (иначе личного диска H: ПК не получит), `masterState`/`masterError` — мастер-том этой библиотеки, как у G:. В обзоре
+тогда же `libraries [{ key, title, currentVersion, masterDriveLetter }]`. Без библиотек по ключу полей нет вовсе.
 `hostname` — имя Windows: из регистрации помощника, а с помощником 1.5.2+ — из каждого его отчёта (`hostname` в
 `MachineStatus`, docs/diskless-api.yaml): гибрид регистрируется в specialize, до переименования ПК, и раньше в панели
 навсегда оставалось `WIN-…`.

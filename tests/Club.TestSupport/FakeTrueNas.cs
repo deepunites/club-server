@@ -41,6 +41,7 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
     private readonly Dictionary<string, int> _rollbacks = new();
     private int _nextSnapshotSeq = 1;
     private readonly ConcurrentDictionary<string, int> _dropAfterExecute = new();
+    private readonly ConcurrentDictionary<string, (string Match, TimeSpan Delay)> _delays = new();
     private int _nextId = 1;
 
     public string CaPath { get; }
@@ -126,6 +127,13 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
     /// <summary>Следующий вызов метода выполнится, но ответ «потеряется»: соединение закроется (сбой посреди операции).</summary>
     public void DropResponseAfterExecuting(string method) => _dropAfterExecute[method] = 1;
 
+    /// <summary>
+    /// Медленная операция TrueNAS: вызовы <paramref name="method"/>, в параметрах которых есть <paramref name="paramsContain"/>,
+    /// выполняются через <paramref name="delay"/>. Остальные вызовы того же соединения не ждут их, как в TrueNAS (каждый
+    /// вызов — своя задача middlewared).
+    /// </summary>
+    public void Delay(string method, string paramsContain, TimeSpan delay) => _delays[method] = (paramsContain, delay);
+
     public void AddSession(string initiator, string targetName)
     {
         lock (_lock)
@@ -204,6 +212,7 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
 
         Interlocked.Increment(ref Connections);
         using var socket = await context.WebSockets.AcceptWebSocketAsync();
+        var send = new SemaphoreSlim(1, 1); // не Dispose: задержанный вызов может ответить и после закрытия соединения
         var authenticated = false;
         var buffer = new byte[1 << 20];
         while (socket.State == WebSocketState.Open)
@@ -240,29 +249,64 @@ public sealed partial class FakeTrueNas : IAsyncDisposable
                 _callRecords.Add($"{method} {args.ToJsonString()}");
             }
 
-            JsonObject response;
-            try
+            if (authenticated && _delays.TryGetValue(method, out var slow) && args.ToJsonString().Contains(slow.Match, StringComparison.Ordinal))
             {
-                if (!authenticated && method != "auth.login_ex")
+                _ = Task.Run(async () =>
                 {
-                    throw CallError(207, "ENOTAUTHENTICATED", "Not authenticated");
-                }
-
-                var value = Dispatch(method, args, ref authenticated);
-                response = new JsonObject { ["jsonrpc"] = "2.0", ["id"] = id, ["result"] = value };
-            }
-            catch (RpcError error)
-            {
-                response = new JsonObject { ["jsonrpc"] = "2.0", ["id"] = id, ["error"] = error.Payload };
+                    await Task.Delay(slow.Delay);
+                    var loggedIn = true;
+                    await SendAsync(socket, send, Respond(method, args, id, ref loggedIn));
+                });
+                continue;
             }
 
+            var response = Respond(method, args, id, ref authenticated);
             if (_dropAfterExecute.TryRemove(method, out _))
             {
                 socket.Abort();
                 return;
             }
 
-            await socket.SendAsync(Encoding.UTF8.GetBytes(response.ToJsonString()), WebSocketMessageType.Text, true, CancellationToken.None);
+            await SendAsync(socket, send, response);
+        }
+    }
+
+    private JsonObject Respond(string method, JsonArray args, JsonNode? id, ref bool authenticated)
+    {
+        try
+        {
+            if (!authenticated && method != "auth.login_ex")
+            {
+                throw CallError(207, "ENOTAUTHENTICATED", "Not authenticated");
+            }
+
+            var value = Dispatch(method, args, ref authenticated);
+            return new JsonObject { ["jsonrpc"] = "2.0", ["id"] = id, ["result"] = value };
+        }
+        catch (RpcError error)
+        {
+            return new JsonObject { ["jsonrpc"] = "2.0", ["id"] = id, ["error"] = error.Payload };
+        }
+    }
+
+    /// <summary>Ответы одного соединения — по одному: задержанный вызов отвечает из своей задачи.</summary>
+    private static async Task SendAsync(WebSocket socket, SemaphoreSlim send, JsonObject response)
+    {
+        await send.WaitAsync();
+        try
+        {
+            if (socket.State == WebSocketState.Open)
+            {
+                await socket.SendAsync(Encoding.UTF8.GetBytes(response.ToJsonString()), WebSocketMessageType.Text, true, CancellationToken.None);
+            }
+        }
+        catch (Exception ex) when (ex is WebSocketException or ObjectDisposedException)
+        {
+            // соединение уже закрыто: ответ задержанного вызова некому отдать
+        }
+        finally
+        {
+            send.Release();
         }
     }
 
