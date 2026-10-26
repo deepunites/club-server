@@ -17,6 +17,53 @@ public sealed class HelperOptions
     public int DiskWaitSec { get; set; } = 30;
 
     public string HelperVersion { get; set; } = "1.0.0";
+
+    /// <summary>Библиотеки, кроме G:, по умолчанию (1.6.0): H: — <c>solo</c>.</summary>
+    public static readonly IReadOnlyList<string> DefaultLibraries = ["solo"];
+
+    /// <summary>
+    /// Библиотеки игр кроме G:, ключи сервера (<c>Libraries:&lt;ключ&gt;</c>): у каждой свой цикл (<see cref="HelperLoops"/>).
+    /// В helper.json — <c>"Libraries": []</c>, чтобы на этом ПК была только G:. Нет ключа — <see cref="DefaultLibraries"/>.
+    /// Читается <see cref="LibrariesFrom"/>, а не привязкой конфигурации: та дописала бы список к умолчанию, а пустой
+    /// <c>[]</c> не отличила бы от отсутствующего.
+    /// </summary>
+    public IReadOnlyList<string> Libraries { get; set; } = DefaultLibraries;
+
+    /// <summary>
+    /// Список библиотек из настроек (<c>configuration.AsEnumerable()</c>): ключа <c>&lt;section&gt;:Libraries</c> нет —
+    /// <see cref="DefaultLibraries"/>; пустой список (<c>[]</c> или <c>""</c>) — только G:; строка — ключи через запятую.
+    /// </summary>
+    public static IReadOnlyList<string> LibrariesFrom(IEnumerable<KeyValuePair<string, string?>> settings, string section = "Helper")
+    {
+        var key = $"{section}:Libraries";
+        var found = false;
+        var items = new SortedList<int, string>();
+        string? text = null;
+        foreach (var (path, value) in settings)
+        {
+            if (path.Equals(key, StringComparison.OrdinalIgnoreCase))
+            {
+                found = true;
+                text = value;
+            }
+            else if (path.StartsWith(key + ":", StringComparison.OrdinalIgnoreCase) && int.TryParse(path[(key.Length + 1)..], out var index))
+            {
+                found = true;
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    items[index] = value.Trim();
+                }
+            }
+        }
+
+        if (!found)
+        {
+            return DefaultLibraries;
+        }
+
+        return items.Count > 0 ? [.. items.Values]
+            : [.. (text ?? "").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)];
+    }
 }
 
 /// <summary>Диск Windows, пришедший из iSCSI-сессии таргета.</summary>

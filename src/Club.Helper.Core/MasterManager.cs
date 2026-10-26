@@ -11,9 +11,13 @@ namespace Club.Helper.Core;
 /// перезапустил iSCSI): том всё ещё смонтирован на своей букве. Связь не вернулась за <see cref="ReconnectingDetachAfter"/>
 /// — сессия отключается без сброса кэша, сбрасывать уже некуда; иначе букву (на букве библиотеки — G:) никто не отпустил
 /// бы до перезагрузки ПК.
+/// Экземпляр ведёт мастер-том одной библиотеки (<paramref name="markers"/>, по умолчанию G:): мастер-том H:
+/// (<c>club-master-solo</c>, помощник 1.6.0) для мастер-тома G: чужой и не отключается, и наоборот.
 /// </summary>
-public sealed class MasterManager(IWindowsStorage storage, HelperOptions options, TimeProvider clock, ILogger<MasterManager> logger)
+public sealed class MasterManager(IWindowsStorage storage, HelperOptions options, TimeProvider clock, ILogger logger, LibraryMarkers? markers = null)
 {
+    private readonly LibraryMarkers _markers = markers ?? LibraryMarkers.Games;
+
     /// <summary>Таргет мастер-тома на сервере называется <c>club-master</c>; по нему находится и после перезапуска помощника.</summary>
     public const string TargetMarker = ":club-master";
 
@@ -101,7 +105,7 @@ public sealed class MasterManager(IWindowsStorage storage, HelperOptions options
         }
     }
 
-    private static bool IsMaster(string iqn) => iqn.EndsWith(TargetMarker, StringComparison.Ordinal);
+    private bool IsMaster(string iqn) => _markers.IsMaster(iqn);
 
     /// <summary>
     /// Сессия без диска: сколько ещё ждать восстановления связи, прежде чем отключить; <c>null</c> — ждать хватит.

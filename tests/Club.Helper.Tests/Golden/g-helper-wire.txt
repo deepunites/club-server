@@ -1,0 +1,27 @@
+POST /diskless/v1/machines/register -> 200
+  {"hwid":"*","hostname":"PC-TEST","macAddresses":["aa:bb:cc:dd:ee:01"],"helperVersion":"1.6.0","osVersion":"Windows 11 Pro 24H2"}
+GET /diskless/v1/machines/{id}/volume?attached=false -> 204
+PUT /diskless/v1/machines/{id}/status -> 200
+  {"helperVersion":"1.6.0","bootTime":"*","volume":{"state":"none"},"dhcpServers":[],"initiatorIqn":"iqn.1991-05.com.microsoft:pc-test","hostname":"PC-TEST"}
+GET /diskless/v1/machines/{id}/volume?attached=false -> 200
+PUT /diskless/v1/machines/{id}/status -> 200
+  {"helperVersion":"1.6.0","bootTime":"*","volume":{"state":"mounted","targetIqn":"iqn.2005-10.org.freenas.ctl:games-seat-01","libraryVersion":"v1","driveLetter":"G","contents":["Counter-Strike 2","Steam"]},"dhcpServers":[],"initiatorIqn":"iqn.1991-05.com.microsoft:pc-test","hostname":"PC-TEST"}
+PUT /diskless/v1/machines/{id}/status -> 200
+  {"helperVersion":"1.6.0","bootTime":"*","volume":{"state":"mounted","targetIqn":"iqn.2005-10.org.freenas.ctl:games-seat-01","libraryVersion":"v1","driveLetter":"G"},"dhcpServers":[],"initiatorIqn":"iqn.1991-05.com.microsoft:pc-test","hostname":"PC-TEST"}
+PUT /diskless/v1/machines/{id}/status -> 200
+  {"helperVersion":"1.6.0","bootTime":"*","volume":{"state":"mounted","targetIqn":"iqn.2005-10.org.freenas.ctl:games-seat-01","libraryVersion":"v1","driveLetter":"G"},"dhcpServers":[],"initiatorIqn":"iqn.1991-05.com.microsoft:pc-test","hostname":"PC-TEST"}
+PUT /diskless/v1/machines/{id}/status -> 200
+  {"helperVersion":"1.6.0","bootTime":"*","volume":{"state":"none","error":"drive letter G: is given to the master volume (library editing)"},"dhcpServers":[],"initiatorIqn":"iqn.1991-05.com.microsoft:pc-test","master":{"state":"mounted","targetIqn":"iqn.2005-10.org.freenas.ctl:club-master","driveLetter":"G"},"hostname":"PC-TEST"}
+PUT /diskless/v1/machines/{id}/status -> 200
+  {"helperVersion":"1.6.0","bootTime":"*","volume":{"state":"none","error":"drive letter G: is given to the master volume (library editing)"},"dhcpServers":[],"initiatorIqn":"iqn.1991-05.com.microsoft:pc-test","master":{"state":"mounted","targetIqn":"iqn.2005-10.org.freenas.ctl:club-master","driveLetter":"G"},"hostname":"PC-TEST"}
+PUT /diskless/v1/machines/{id}/status -> 200
+  {"helperVersion":"1.6.0","bootTime":"*","volume":{"state":"none","error":"drive letter G: is given to the master volume (library editing)"},"dhcpServers":[],"initiatorIqn":"iqn.1991-05.com.microsoft:pc-test","master":{"state":"mounted","targetIqn":"iqn.2005-10.org.freenas.ctl:club-master","driveLetter":"G"},"hostname":"PC-TEST"}
+PUT /diskless/v1/machines/{id}/status -> 200
+  {"helperVersion":"1.6.0","bootTime":"*","volume":{"state":"mounted","targetIqn":"iqn.2005-10.org.freenas.ctl:games-seat-01","libraryVersion":"v1","driveLetter":"G"},"dhcpServers":[],"initiatorIqn":"iqn.1991-05.com.microsoft:pc-test","master":{"state":"none"},"hostname":"PC-TEST"}
+GET /diskless/v1/machines/{id}/volume?attached=false -> 200
+PUT /diskless/v1/machines/{id}/status -> 200
+  {"helperVersion":"1.6.0","bootTime":"*","volume":{"state":"mounted","targetIqn":"iqn.2005-10.org.freenas.ctl:games-seat-01","libraryVersion":"v1","driveLetter":"G","contents":["Counter-Strike 2","Steam"]},"dhcpServers":[],"initiatorIqn":"iqn.1991-05.com.microsoft:pc-test","hostname":"PC-TEST"}
+PUT /diskless/v1/machines/{id}/status -> 200
+  {"helperVersion":"1.6.0","bootTime":"*","volume":{"state":"mounted","targetIqn":"iqn.2005-10.org.freenas.ctl:games-seat-01","libraryVersion":"v1","driveLetter":"G"},"dhcpServers":[],"initiatorIqn":"iqn.1991-05.com.microsoft:pc-test","hostname":"PC-TEST"}
+PUT /diskless/v1/machines/{id}/status -> 200
+  {"helperVersion":"1.6.0","bootTime":"*","volume":{"state":"mounted","targetIqn":"iqn.2005-10.org.freenas.ctl:games-seat-01","libraryVersion":"v1","driveLetter":"G"},"dhcpServers":[],"initiatorIqn":"iqn.1991-05.com.microsoft:pc-test","hostname":"PC-TEST"}

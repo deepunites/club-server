@@ -17,6 +17,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Эталон провода G: (GamesWireTests), записан помощником 1.5.2 до второй библиотеки. -->
+    <None Include="Golden\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\Club.Helper.Core\Club.Helper.Core.csproj" />
     <ProjectReference Include="..\..\src\Club.Server\Club.Server.csproj" />
     <ProjectReference Include="..\Club.TestSupport\Club.TestSupport.csproj" />

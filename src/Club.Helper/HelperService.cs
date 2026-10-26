@@ -2,8 +2,11 @@ using Club.Helper.Core;
 
 namespace Club.Helper;
 
-/// <summary>Такт помощника сразу после старта службы и дальше каждые <see cref="HelperOptions.PollIntervalSec"/> секунд.</summary>
-public sealed class HelperService(HelperLoop loop, HelperOptions options, ILogger<HelperService> logger) : BackgroundService
+/// <summary>
+/// Такт помощника сразу после старта службы и дальше каждые <see cref="HelperOptions.PollIntervalSec"/> секунд: G:, потом
+/// остальные библиотеки (<see cref="HelperLoops"/>; сбой такта — там же, в журнал).
+/// </summary>
+public sealed class HelperService(HelperLoops loops, HelperOptions options, ILogger<HelperService> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -11,16 +14,7 @@ public sealed class HelperService(HelperLoop loop, HelperOptions options, ILogge
         var interval = TimeSpan.FromSeconds(Math.Max(5, options.PollIntervalSec));
         while (!stoppingToken.IsCancellationRequested)
         {
-            try
-            {
-                await loop.TickAsync(stoppingToken);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                // Любой сбой такта — в журнал; том остаётся как есть, следующий такт попробует снова.
-                logger.LogError(ex, "Helper tick failed");
-            }
-
+            await loops.TickAsync(stoppingToken);
             await Task.Delay(interval, stoppingToken);
         }
     }

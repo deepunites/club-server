@@ -5,6 +5,7 @@ using Club.Helper.Core;
 
 // Помощник бездиска: служба Windows (LocalSystem). Настройки — %ProgramData%\ClubDiskless\helper.json:
 // { "Helper": { "ServerUrl": "https://club-server", "ClubKey": "...", "CaCertificatePath": "C:\\ProgramData\\ClubDiskless\\club-ca.pem" } }
+// Библиотеки кроме G: (1.6.0) — "Libraries": по умолчанию ["solo"] (H:), [] — только G: на этом ПК.
 var builder = Host.CreateApplicationBuilder(args);
 builder.Configuration.AddJsonFile(Path.Combine(StateDirectory.Path, "helper.json"), optional: true, reloadOnChange: false);
 builder.Services.AddWindowsService(o => o.ServiceName = "ClubDisklessHelper");
@@ -12,6 +13,7 @@ builder.Logging.AddEventLog(o => o.SourceName = "ClubDisklessHelper");
 
 var options = builder.Configuration.GetSection("Helper").Get<HelperOptions>() ?? new HelperOptions();
 options.HelperVersion = typeof(HelperService).Assembly.GetName().Version?.ToString(3) ?? options.HelperVersion;
+options.Libraries = HelperOptions.LibrariesFrom(builder.Configuration.AsEnumerable());
 
 builder.Services.AddSingleton(options);
 builder.Services.AddSingleton(TimeProvider.System);
@@ -20,16 +22,19 @@ builder.Services.AddSingleton<IProcessInspector, ProcessInspector>();
 builder.Services.AddSingleton<IMachineFactsSource, WindowsMachineFacts>();
 builder.Services.AddSingleton<IMachineIdentity, CachedMachineIdentity>();
 builder.Services.AddSingleton<ICredentialStore, DpapiCredentialStore>();
-builder.Services.AddSingleton<IAssignmentCache, FileAssignmentCache>();
 builder.Services.AddSingleton(_ => new HttpClient(ServerHandler(options))
 {
     BaseAddress = new Uri(options.ServerUrl.TrimEnd('/') + "/"),
     Timeout = TimeSpan.FromSeconds(20),
 });
 builder.Services.AddSingleton<DisklessApiClient>();
-builder.Services.AddSingleton<VolumeManager>();
-builder.Services.AddSingleton<MasterManager>();
-builder.Services.AddSingleton<HelperLoop>();
+// Цикл G: и по циклу на библиотеку (H: — solo) над одной Windows и одним клиентом API; у каждой библиотеки свой файл
+// назначения (assignment.json, assignment.json.solo) и свои категории журнала.
+builder.Services.AddSingleton(services => HelperLoops.Create(
+    services.GetRequiredService<DisklessApiClient>(), services.GetRequiredService<IWindowsStorage>(), services.GetRequiredService<IProcessInspector>(),
+    services.GetRequiredService<IMachineIdentity>(), options, services.GetRequiredService<TimeProvider>(), services.GetRequiredService<ILoggerFactory>(),
+    library => new FileAssignmentCache(StateDirectory.Ensure(), FileAssignmentCache.FileFor(library)),
+    services.GetRequiredService<ILogger<HelperService>>()));
 builder.Services.AddHostedService<HelperService>();
 
 builder.Build().Run();

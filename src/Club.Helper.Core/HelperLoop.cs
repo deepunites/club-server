@@ -1,3 +1,4 @@
+using System.Net;
 using Microsoft.Extensions.Logging;
 
 namespace Club.Helper.Core;
@@ -45,12 +46,27 @@ public sealed class InMemoryAssignmentCache : IAssignmentCache
 /// (<see cref="MasterLetter"/>). Правку закрыли — наоборот: сначала отключается мастер-том (не отключился, на нём открыты
 /// файлы, — том библиотеки ждёт), потом возвращается том библиотеки. Без назначения (служба перезапустилась, сервер ещё
 /// не ответил или недоступен) опора — то, что на ПК: мастер-том на букве тома библиотеки её не отдаёт (<see cref="HeldLetter"/>).
+/// Цикл ведёт одну библиотеку: G: (<paramref name="library"/> = <c>null</c>, прежние пути API) или библиотеку с ключом (H: —
+/// <c>solo</c>, помощник 1.6.0: пути <c>machines/{id}/libraries/{key}/…</c>; <paramref name="volumes"/>,
+/// <paramref name="masters"/> и <paramref name="cache"/> — её собственные). Такого пути на сервере нет (404: библиотека
+/// выключена или неизвестна, сервер старше 1.6.0) — цикл библиотеки засыпает на <see cref="DormantFor"/>: Windows не
+/// трогается вовсе, подключённое остаётся до перезагрузки, assignment.json библиотеки стирается.
 /// </summary>
 public sealed class HelperLoop(
-    DisklessApiClient api, VolumeManager volumes, IAssignmentCache cache, IMachineIdentity identity, HelperOptions options, ILogger<HelperLoop> logger,
-    MasterManager? masters = null, TimeProvider? clock = null)
+    DisklessApiClient api, VolumeManager volumes, IAssignmentCache cache, IMachineIdentity identity, HelperOptions options, ILogger logger,
+    MasterManager? masters = null, TimeProvider? clock = null, string? library = null)
 {
+    /// <summary>Сколько спит цикл библиотеки, которой нет на сервере (404), прежде чем спросить снова.</summary>
+    public static readonly TimeSpan DormantFor = TimeSpan.FromMinutes(10);
+
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
+
+    /// <summary>С какого момента (монотонная отметка) цикл библиотеки спит: сервер ответил 404 на её путь; null — не спит.</summary>
+    private long? _dormantSince;
+
+    /// <summary>О сне уже написано в журнал: повторный 404 после пробуждения — без новой записи.</summary>
+    private bool _dormancyLogged;
+
     private VolumeAssignment? _desired;
     private bool _known;
     private MasterAssignment? _master;
@@ -104,6 +120,18 @@ public sealed class HelperLoop(
 
     public MountedVolume? LastReport { get; private set; }
 
+    /// <summary>Ключ библиотеки этого цикла; <c>null</c> — G:.</summary>
+    public string? Library => library;
+
+    /// <summary>Цикл библиотеки спит: её нет на сервере (404).</summary>
+    public bool Dormant => _dormantSince is not null;
+
+    /// <summary>
+    /// В последнем такте Windows не ответила на том (таймаут PowerShell, 120 с): следующая библиотека в этом такте не
+    /// применяется (<see cref="HelperLoops"/>), чтобы отчёт G: следующего такта не ждал ещё столько же.
+    /// </summary>
+    public bool WindowsTimedOut => _windowsTimedOut;
+
     /// <summary>
     /// Буква, которую мастер-том занимает вместо тома библиотеки: мастер-том назначен, и его буква — буква назначенного тома
     /// библиотеки, или сервер прямо сказал, что буква отдана мастер-тому (тогда назначения тома может и не быть: ПК
@@ -127,9 +155,23 @@ public sealed class HelperLoop(
 
     public async Task TickAsync(CancellationToken ct)
     {
+        if (_dormantSince is { } since)
+        {
+            if (_clock.GetElapsedTime(since) < DormantFor)
+            {
+                return;
+            }
+
+            _dormantSince = null; // проснулись: снова запрос при старте — вдруг библиотеку включили
+        }
+
         if (!_known)
         {
             await LearnAssignmentAsync(ct);
+            if (Dormant)
+            {
+                return;
+            }
         }
 
         // Порядок важен, когда мастер-том на букве библиотеки: букву сначала отпускают, потом берут. Обычно первым идёт том
@@ -151,7 +193,7 @@ public sealed class HelperLoop(
         }
 
         var reply = await ReportAsync(report, master, ct);
-        if (reply is null)
+        if (reply is null || Dormant)
         {
             return;
         }
@@ -179,17 +221,22 @@ public sealed class HelperLoop(
             // вернётся (с ответом сервера, как прежде), а при перезагрузке без сервера будет что подключить.
             logger.LogDebug("Server withholds the library volume: its drive letter is given to the master volume");
         }
-        else if (reply.Volume is null && _desired is not null && VolumeManager.IsPersonal(_desired))
+        else if (reply.Volume is null && _desired is not null && volumes.IsPersonalTarget(_desired))
         {
             // Личный диск не отпускаем из-за пустого ответа (диск готовится, сбой TrueNAS): на нём сессия игрока. Он
             // сменится при следующем старте помощника.
             logger.LogDebug("Server sent no assignment; keeping the personal games disk until the next helper start");
         }
-        else if (reply.Volume is { } offered && VolumeManager.IsPersonal(offered) && offered.TargetIqn != _personalConfirmed)
+        else if (reply.Volume is { } offered && volumes.IsPersonalTarget(offered) && offered.TargetIqn != _personalConfirmed)
         {
             // Личный диск в ответе на отчёт: сервер не сбрасывал его для этой загрузки. Берём только из запроса при старте.
             logger.LogInformation("Personal games disk offered in a status reply; asking for it at boot to get it reset first");
             await LearnAssignmentAsync(ct);
+            if (Dormant)
+            {
+                return;
+            }
+
             report = await ApplyAsync(ct);
             volumeApplied = changed = true;
         }
@@ -296,11 +343,12 @@ public sealed class HelperLoop(
     {
         try
         {
-            var answer = await api.GetVolumeAsync(await volumes.PersonalAttachedAsync(ct), ct);
+            var answer = await api.GetVolumeAsync(await volumes.PersonalAttachedAsync(ct), ct, library);
+            Awake();
             _desired = answer.Volume;
             _known = true;
             _unreachableSince = null;
-            _personalConfirmed = _desired is not null && VolumeManager.IsPersonal(_desired) ? _desired.TargetIqn : null;
+            _personalConfirmed = _desired is not null && volumes.IsPersonalTarget(_desired) ? _desired.TargetIqn : null;
             if (answer.LibraryLetterReserved)
             {
                 // Тома нет, потому что его буква отдана мастер-тому (ПК загрузили во время правки), а не потому, что нечего
@@ -311,6 +359,10 @@ public sealed class HelperLoop(
             {
                 await cache.SaveAsync((await identity.ReadAsync(ct)).Hwid, _desired, ct);
             }
+        }
+        catch (ServerUnavailableException ex) when (IsMissingLibrary(ex))
+        {
+            await SleepAsync(ex, ct);
         }
         catch (Exception ex) when (ex is ServerUnavailableException or PendingApprovalException)
         {
@@ -325,7 +377,7 @@ public sealed class HelperLoop(
                 _unreachableSince = null;
             }
 
-            if (_desired is not null && VolumeManager.IsPersonal(_desired))
+            if (_desired is not null && volumes.IsPersonalTarget(_desired))
             {
                 // Личный диск без сброса сервером — с данными прошлого игрока. Пока сервер отвечает ошибкой или недоступен
                 // недолго (перезапуск службы, DHCP ещё не выдал адрес), спрашиваем снова каждый такт; дольше
@@ -398,12 +450,15 @@ public sealed class HelperLoop(
                 report = report with { Contents = await volumes.ContentsAsync(report, ct) };
             }
 
-            // Имя Windows — в каждом отчёте (1.5.2): регистрация гибрида была ещё в specialize, до переименования ПК.
+            // Имя Windows — в каждом отчёте (1.5.2): регистрация гибрида была ещё в specialize, до переименования ПК. Отчёт
+            // библиотеки не-G: — только её том и мастер-том: факты о ПК сервер берёт из отчёта G:.
             var facts = await identity.ReadAsync(ct);
-            var reply = await api.ReportStatusAsync(
-                new MachineStatus(options.HelperVersion, facts.BootTime, report, facts.DhcpServers, facts.ImageVersion, facts.SystemDisk, facts.SecureBoot,
-                    facts.InitiatorIqn, master, facts.Hostname),
-                ct);
+            var status = library is null
+                ? new MachineStatus(options.HelperVersion, facts.BootTime, report, facts.DhcpServers, facts.ImageVersion, facts.SystemDisk, facts.SecureBoot,
+                    facts.InitiatorIqn, master, facts.Hostname)
+                : new MachineStatus(options.HelperVersion, facts.BootTime, report, Master: master);
+            var reply = await api.ReportStatusAsync(status, ct, library);
+            Awake();
             if (report.Contents is not null)
             {
                 _contentsReportedFor = report.LibraryVersion;
@@ -411,10 +466,51 @@ public sealed class HelperLoop(
 
             return reply;
         }
+        catch (ServerUnavailableException ex) when (IsMissingLibrary(ex))
+        {
+            await SleepAsync(ex, ct);
+            return null;
+        }
         catch (Exception ex) when (ex is ServerUnavailableException or PendingApprovalException)
         {
             logger.LogWarning("Status report failed: {Reason}", ex.Message);
             return null;
+        }
+    }
+
+    /// <summary>Сервер ответил 404 на путь библиотеки не-G:: её на сервере нет (выключена, неизвестна, сервер старше 1.6.0).</summary>
+    private bool IsMissingLibrary(ServerUnavailableException ex) => library is not null && ex.Status == HttpStatusCode.NotFound;
+
+    /// <summary>
+    /// Цикл библиотеки засыпает на <see cref="DormantFor"/>: Windows не трогается (подключённый том и мастер-том остаются до
+    /// перезагрузки, новые не подключаются), assignment.json библиотеки стирается — без сервера после перезагрузки её том не
+    /// подключится. После сна — снова запрос при старте.
+    /// </summary>
+    private async Task SleepAsync(ServerUnavailableException ex, CancellationToken ct)
+    {
+        _dormantSince = _clock.GetTimestamp();
+        _known = false;
+        _desired = null;
+        _personalConfirmed = null;
+        await cache.SaveAsync((await identity.ReadAsync(ct)).Hwid, null, ct);
+        if (_dormancyLogged)
+        {
+            logger.LogDebug("Library {Library} is still not on the server; checking again in {Wait}", library, DormantFor);
+            return;
+        }
+
+        _dormancyLogged = true;
+        logger.LogInformation(
+            "Library {Library} is not on the server ({Reason}); not touching its volumes, checking again every {Wait}", library, ex.Message, DormantFor);
+    }
+
+    /// <summary>Путь библиотеки ответил: если она спала — в журнал, что снова работает.</summary>
+    private void Awake()
+    {
+        if (_dormancyLogged)
+        {
+            _dormancyLogged = false;
+            logger.LogInformation("Library {Library} is on the server again", library);
         }
     }
 }

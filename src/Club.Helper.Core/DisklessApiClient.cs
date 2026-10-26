@@ -54,10 +54,16 @@ internal sealed record RefreshRequest(string RefreshToken, string Hwid);
 internal sealed record RefreshResponse(string AccessToken, string RefreshToken, DateTimeOffset ExpiresAt);
 
 /// <summary>Сервер недоступен или ответил ошибкой: том не трогаем, повторим на следующем такте.</summary>
-public sealed class ServerUnavailableException(string message, Exception? inner = null) : Exception(message, inner)
+public sealed class ServerUnavailableException(string message, Exception? inner = null, HttpStatusCode? status = null) : Exception(message, inner)
 {
     /// <summary>До сервера не дошли (сеть, отказ соединения), а не «ответил ошибкой» или «не успел».</summary>
     public bool Unreachable => InnerException is HttpRequestException;
+
+    /// <summary>
+    /// Код ответа сервера, если он ответил ошибкой (<c>null</c> — не ответил). 404 на пути библиотеки — её на сервере нет
+    /// (выключена, неизвестна, сервер старше 1.6.0): цикл этой библиотеки засыпает (<see cref="HelperLoop"/>).
+    /// </summary>
+    public HttpStatusCode? Status { get; } = status;
 }
 
 /// <summary>Машина в реестре, но ждёт одобрения администратора.</summary>
@@ -66,6 +72,8 @@ public sealed class PendingApprovalException() : Exception("Machine is waiting f
 /// <summary>
 /// Клиент API бездиска. Держит токены машины: при 401 обновляет их refresh-токеном, при отказе refresh
 /// регистрируется заново по ключу клуба (номер места сохраняется — сервер узнаёт машину по HWID).
+/// Один экземпляр на все библиотеки (циклы G: и H: идут по очереди, <see cref="HelperLoops"/>): refresh-токен одноразовый,
+/// второй клиент с той же парой предъявил бы уже использованный — сервер принял бы это за кражу и отозвал бы токены машины.
 /// </summary>
 public sealed class DisklessApiClient(HttpClient http, HelperOptions options, ICredentialStore store, IMachineIdentity identity)
 {
@@ -84,24 +92,30 @@ public sealed class DisklessApiClient(HttpClient http, HelperOptions options, IC
     /// <summary>
     /// Назначение при старте помощника. <paramref name="attached"/> — подключён ли на ПК личный диск игр (<c>null</c> —
     /// неизвестно): <c>false</c> разрешает серверу сбросить диск, даже если на нём висит сессия прошлой загрузки.
+    /// <paramref name="library"/> — ключ библиотеки не-G: (путь <c>machines/{id}/libraries/{key}/volume</c>, сервер 1.6.0+);
+    /// <c>null</c> — G:, прежний путь.
     /// </summary>
-    public async Task<BootAssignment> GetVolumeAsync(bool? attached, CancellationToken ct)
+    public async Task<BootAssignment> GetVolumeAsync(bool? attached, CancellationToken ct, string? library = null)
     {
         var query = attached is { } a ? $"?attached={(a ? "true" : "false")}" : "";
-        using var response = await SendAuthorizedAsync(id => new HttpRequestMessage(HttpMethod.Get, $"diskless/v1/machines/{id}/volume{query}"), ct);
+        using var response = await SendAuthorizedAsync(id => new HttpRequestMessage(HttpMethod.Get, $"{MachinePath(id, library)}/volume{query}"), ct);
         return response.StatusCode == HttpStatusCode.NoContent
             ? new BootAssignment(null, response.Headers.TryGetValues(LibraryLetterReservedHeader, out var reserved)
                 && reserved.Any(v => v.Equals("true", StringComparison.OrdinalIgnoreCase)))
             : new BootAssignment(await ReadAsync<VolumeAssignment>(response, ct));
     }
 
-    public async Task<StatusAccepted> ReportStatusAsync(MachineStatus status, CancellationToken ct)
+    /// <summary>Отчёт о ПК; <paramref name="library"/> — как у <see cref="GetVolumeAsync"/> (<c>…/libraries/{key}/status</c>).</summary>
+    public async Task<StatusAccepted> ReportStatusAsync(MachineStatus status, CancellationToken ct, string? library = null)
     {
         using var response = await SendAuthorizedAsync(
-            id => new HttpRequestMessage(HttpMethod.Put, $"diskless/v1/machines/{id}/status") { Content = JsonContent.Create(status, options: Json) },
+            id => new HttpRequestMessage(HttpMethod.Put, $"{MachinePath(id, library)}/status") { Content = JsonContent.Create(status, options: Json) },
             ct);
         return await ReadAsync<StatusAccepted>(response, ct);
     }
+
+    private static string MachinePath(Guid id, string? library) =>
+        library is null ? $"diskless/v1/machines/{id}" : $"diskless/v1/machines/{id}/libraries/{library}";
 
     private async Task<HttpResponseMessage> SendAuthorizedAsync(Func<Guid, HttpRequestMessage> build, CancellationToken ct)
     {
@@ -117,7 +131,7 @@ public sealed class DisklessApiClient(HttpClient http, HelperOptions options, IC
                 {
                     var text = await response.Content.ReadAsStringAsync(ct);
                     response.Dispose();
-                    throw new ServerUnavailableException($"{request.Method} {request.RequestUri}: {(int)response.StatusCode} {text}");
+                    throw new ServerUnavailableException($"{request.Method} {request.RequestUri}: {(int)response.StatusCode} {text}", status: response.StatusCode);
                 }
 
                 return response;

@@ -33,6 +33,9 @@ public sealed class FakeWindowsStorage : IWindowsStorage
 
     public void AddForeignSession(string iqn) => _sessions[iqn] = new FakeDisk { Number = _nextDisk++, ReadOnly = false, Offline = false, Letter = 'E' };
 
+    /// <summary>Буквы локальных томов ПК, не iSCSI (картридер, второй диск): занятую ими букву тому библиотеки не назначить.</summary>
+    public HashSet<char> LocalLetters { get; } = [];
+
     public Task EnsureSanPolicyOfflineSharedAsync(CancellationToken ct)
     {
         Log.Add("san");
@@ -173,7 +176,7 @@ public sealed class FakeWindowsStorage : IWindowsStorage
     public Task AssignDriveLetterAsync(int diskNumber, char letter, CancellationToken ct)
     {
         Log.Add($"letter {diskNumber} {letter}");
-        if (_sessions.Values.Any(d => d.Number != diskNumber && d.Letter == letter))
+        if (LocalLetters.Contains(letter) || _sessions.Values.Any(d => d.Number != diskNumber && d.Letter == letter))
         {
             throw new InvalidOperationException($"drive letter {letter} is in use");
         }
@@ -248,7 +251,7 @@ public sealed class FakeWindowsStorage : IWindowsStorage
     {
         for (var c = 'F'; c <= 'Z'; c++)
         {
-            if (_sessions.Values.All(d => d.Letter != c))
+            if (!LocalLetters.Contains(c) && _sessions.Values.All(d => d.Letter != c))
             {
                 return c;
             }
@@ -363,6 +366,45 @@ public sealed class ManualClock : TimeProvider
 
     /// <summary>Перевод системного времени (NTP поправил RTC): монотонные отметки не двигаются.</summary>
     public void StepWallClock(TimeSpan by) => _now += by;
+}
+
+/// <summary>Журналы в память по категориям (циклы библиотек пишут каждый под своей).</summary>
+public sealed class ListLoggerFactory : ILoggerFactory
+{
+    public List<(string Category, LogLevel Level, string Message)> Entries { get; } = [];
+
+    public IEnumerable<(LogLevel Level, string Message)> Of(string category)
+    {
+        lock (Entries)
+        {
+            return Entries.Where(e => e.Category == category).Select(e => (e.Level, e.Message)).ToList();
+        }
+    }
+
+    public ILogger CreateLogger(string categoryName) => new Logger(this, categoryName);
+
+    public void AddProvider(ILoggerProvider provider)
+    {
+    }
+
+    public void Dispose()
+    {
+    }
+
+    private sealed class Logger(ListLoggerFactory factory, string category) : ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            lock (factory.Entries)
+            {
+                factory.Entries.Add((category, logLevel, formatter(state, exception)));
+            }
+        }
+    }
 }
 
 /// <summary>Журнал в память: тесты проверяют, что и с каким уровнем попало бы в журнал Windows.</summary>
