@@ -9,8 +9,10 @@
       1. если WebView2 Runtime уже зарегистрирован (HKLM ...\EdgeUpdate\Clients\{F3017226-...}, pv) — ничего;
       2. скачивает официальный загрузчик Evergreen с go.microsoft.com, проверяет подпись Microsoft;
       3. ставит тихо (/silent /install) и проверяет, что версия зарегистрирована.
+    -FromInstall — запуск из shell-install.ps1 (его шаг 3): без подсказки «теперь запустите shell-install», он уже идёт.
     Строки вывода — только ASCII.
 #>
+param([switch]$FromInstall)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
@@ -43,7 +45,8 @@ Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue
 
 $version = Get-WebView2Version
 if ($version -and $version -ne '0.0.0.0') {
-    Write-Host "Done: WebView2 Runtime $version installed (exit code $($process.ExitCode)). Now run shell-install-run-as-admin.cmd." -ForegroundColor Green
+    Write-Host "Done: WebView2 Runtime $version installed (exit code $($process.ExitCode))." -ForegroundColor Green
+    if (-not $FromInstall) { Write-Host 'Now run shell-install-run-as-admin.cmd.' -ForegroundColor Green }
 } else {
     throw "WebView2 Runtime is not registered after the install (exit code $($process.ExitCode))."
 }

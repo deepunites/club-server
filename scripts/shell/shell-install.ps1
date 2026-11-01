@@ -1,18 +1,26 @@
 <#
 .SYNOPSIS
-    Ставит ClubShell 1.0.18 (касса клуба Deagle) на один гибрид: свой agent.json до установки, установщик без ключа в
-    командной строке, проверки после установки, пароль Club и PIN администратора киоска, шаги в кассе.
+    Ставит ClubShell 1.0.18 (касса клуба Deagle) на один гибрид: WebView2, свой agent.json до установки, установщик без
+    ключа в командной строке, проверки после установки, пароль Club и PIN администратора киоска, шаги в кассе, после
+    одобрения — киоск (kiosk-on.ps1) и перезагрузка в него.
 .DESCRIPTION
-    Запускать на гибриде под «Club», от администратора: shell-install-run-as-admin.cmd. Лаунчер сначала копирует папку
-    набора в C:\ClubShellKit и работает оттуда: сразу после установки агент применяет политику, вшитую в MSI (касса ещё
-    не одобрила ПК), — накопители USB выключаются на всей машине, вставленная флешка извлекается.
-    По сети (irm | iex) этот скрипт не запускается: ему нужны установщик и соседние скрипты набора.
+    Запускать на гибриде под «Club», от администратора. Обычно его запускает get-shell-kit.ps1: одна команда в
+    PowerShell от администратора приносит набор по сети клуба в C:\ClubShellKit и запускает этот скрипт оттуда
+    (docs/shell-install.md). Без сети клуба — shell-install-run-as-admin.cmd с флешки: лаунчер сначала копирует папку
+    набора в C:\ClubShellKit и работает оттуда. Набор должен быть на C: в обоих случаях: сразу после установки агент
+    применяет политику, вшитую в MSI (касса ещё не одобрила ПК), — накопители USB выключаются на всей машине, вставленная
+    флешка извлекается.
+    Сам по сети (irm | iex) этот скрипт не запускается: ему нужны установщик и соседние скрипты набора.
     Что делает, по порядку:
       1. shell-preflight.ps1: есть FAIL — стоп, ничего не изменено; есть WARN — спрашивает, продолжать ли;
       2. находит ClubShellSetup-1.0.18.exe (C:\ClubShellKit, рядом со скриптом, «Загрузки»; нет — предлагает скачать из
          релиза v1.0.18 на GitHub), сверяет размер и SHA256 из SHA256SUMS.txt релиза, снимает метку «из интернета»;
-      3. запоминает DNS всех адаптеров и SHA256 помощника — для сверки после установки;
-      4. спрашивает ключ ПК (ввод скрыт) и пишет C:\ProgramData\ClubShell\agent.json ДО установки, с правами только
+      3. WebView2 Runtime не зарегистрирован — ставит его install-webview2.ps1 из набора (нужен интернет; не вышло —
+         стоп, ClubShell не ставится). Бандл 1.0.18 качает загрузчик WebView2 сам и сверяет его с хэшем, зашитым при
+         сборке; Microsoft файл обновила, и установка падала с 0x80091007 (PC-01, 2026-11-01). Если WebView2 уже стоит,
+         бандл этот шаг пропускает;
+      4. запоминает DNS всех адаптеров и SHA256 помощника — для сверки после установки;
+         спрашивает ключ ПК (ввод скрыт) и пишет C:\ProgramData\ClubShell\agent.json ДО установки, с правами только
          SYSTEM и Administrators. MSI видит готовый файл и оставляет его как есть (свой agent.json он пишет только на
          чистый ПК, KIOSKUSER в готовый файл не пишет), поэтому ключ не попадает ни в командную строку, ни в журналы
          установки (SHELL_CHANGES 70). При первом старте агент переносит ключ в secure\club.key (DPAPI) и стирает его в
@@ -36,11 +44,18 @@
          INSTALLDISKLESS / DISKLESS* (в релизном MSI помощника нет; наш 1.6.0 не трогаем). KIOSKUSER нужен всё равно:
          MSI запоминает его в HKLM\SOFTWARE\ClubShell\KioskUser, по нему работает удаление;
       6. проверяет: служба агента работает; ключ ушёл из agent.json в secure\club.key; киоск «player» создан и не в
-         привилегированных группах; автовход переключён на player; Club — по-прежнему администратор; папок ClubShell на
-         G:/H: нет (перенаправления не было); помощник тот же и G:/H: на месте; DNS не изменился; журнал агента
-         (регистрация: ждёт одобрения / ключ не принят / помощник признан владельцем G:);
+         привилегированных группах; Club — по-прежнему администратор; папок ClubShell на G:/H: нет (перенаправления не
+         было); помощник тот же и G:/H: на месте; DNS не изменился; журнал агента (регистрация: ждёт одобрения / ключ не
+         принят / помощник признан владельцем G:). Автовход здесь — только строка для сведения, не WARN: агент пишет его
+         вместе с шеллом в профиль player, а профиля нет, пока в киоск никто не входил (PC-01: ни до, ни после
+         одобрения), — профиль создаёт шаг 9;
       7. предлагает задать пароль Club (set-club-password.ps1) и PIN панели администратора киоска (set-shell-pin.ps1);
-      8. печатает, что сделать в кассе, и по желанию ждёт, пока владелец одобрит ПК.
+      8. печатает, что сделать в кассе, и по желанию ждёт, пока владелец одобрит ПК;
+      9. одобрен — kiosk-on.ps1 -NoReboot (Club — включённый администратор и с паролем, иначе киоск не включается;
+         AutoPlay выключен, шелл в шаблоне профиля Default, профиль player и автовход в него — enable-kiosk-autologon.ps1)
+         и в самом конце, когда журнал уже закрыт, спрашивает, перезагрузить ли ПК в киоск (есть FAIL — по умолчанию нет).
+         Не одобрен за время ожидания — WARN: после одобрения C:\ClubShellKit\kiosk-on-run-as-admin.cmd; до этого
+         автовход идёт в Club, и после нового пароля Club перезагрузка останавливается на экране входа.
     Ключ ПК, пароль и PIN не печатаются и не пишутся в файлы (ключ — только в agent.json до первого старта агента).
     Установка не удалась — заготовленный agent.json удаляется (ключ не остаётся на диске).
     Журнал этого скрипта — C:\ClubShellKit\logs\install-<ПК>-<время>.txt, установщика — setup-<время>*.log там же.
@@ -73,6 +88,7 @@ $DataDir = Join-Path $env:ProgramData 'ClubShell'
 $AgentJson = Join-Path $DataDir 'agent.json'
 $ClubKeyFile = Join-Path $DataDir 'secure\club.key'
 $WinlogonKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+$WebView2Key = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
 $PrivilegedGroupSids = @('S-1-5-32-544', 'S-1-5-32-548', 'S-1-5-32-549', 'S-1-5-32-550', 'S-1-5-32-551', 'S-1-5-32-547', 'S-1-5-32-556', 'S-1-5-32-578')
 $Count = @{ Fail = 0; Warn = 0 }
 
@@ -106,6 +122,15 @@ function Read-YesNo([string]$Question, [bool]$Default) {
         if ($answer -in @('n', 'no', $noRu)) { return $false }
         Write-Host '      type y or n'
     }
+}
+
+# Файлы набора — только наследуемые права от папки (старый лаунчер мог оставить их с пустым DACL). icacls — с
+# 'Continue': в 5.1 перенаправленный stderr внешней программы при 'Stop' стал бы исключением; пустую папку не трогаем
+# (свежая C:\ClubShellKit при запуске руками с флешки — icacls ответил бы ошибкой на «*»). Как в get-shell-kit.ps1.
+function Reset-KitFileAcl {
+    $ErrorActionPreference = 'Continue'
+    if (@(Get-ChildItem -LiteralPath $KitDir -Force -ErrorAction SilentlyContinue).Count -eq 0) { return }
+    & icacls.exe "$KitDir\*" /reset /T /C /Q 2>&1 | Out-Null
 }
 
 function Wait-Until([scriptblock]$Condition, [int]$Seconds) {
@@ -215,8 +240,8 @@ New-Item -ItemType Directory -Force -Path $KitDir | Out-Null
 $kitAcl = New-Object System.Security.AccessControl.DirectorySecurity
 $kitAcl.SetSecurityDescriptorSddlForm('D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
 Set-Acl -LiteralPath $KitDir -AclObject $kitAcl
-# Файлы внутри — только наследуемые права от папки (старый лаунчер мог оставить их с пустым DACL).
-& icacls.exe "$KitDir\*" /reset /T /C /Q 2>&1 | Out-Null
+# До копирования: файл с пустым DACL не перезаписался бы.
+Reset-KitFileAcl
 if ($here -and $here.TrimEnd('\') -ne $KitDir.TrimEnd('\')) {
     Get-ChildItem -LiteralPath $here -File | Where-Object { $_.Extension -in @('.ps1', '.cmd') -or $_.Name -eq $SetupName } |
         Copy-Item -Destination $KitDir -Force
@@ -229,6 +254,7 @@ try { Start-Transcript -LiteralPath (Join-Path $LogDir "install-$env:COMPUTERNAM
 $wroteAgentJson = $false
 $createdDataDir = $false
 $installed = $false
+$rebootIntoKiosk = $false
 try {
     Write-Host "ClubShell $Version install on $env:COMPUTERNAME (kiosk account '$KioskUser', server $ServerUrl)" -ForegroundColor Cyan
     if ($KioskUser -ieq $AdminUser) { throw "Kiosk account '$KioskUser' is the admin account '$AdminUser'. Nothing was changed." }
@@ -271,16 +297,37 @@ try {
     Unblock-File -LiteralPath $setup
     Write-Pass "installer verified: $setupLength bytes, SHA256 $SetupSha256 (release v$Version, unsigned)"
 
-    # --- 3. Снимок для сверки -------------------------------------------------------------------------------------------
+    # --- 3. WebView2 Runtime ------------------------------------------------------------------------------------------
+    # Та же проверка, что в install-webview2.ps1. Свой загрузчик WebView2 у бандла 1.0.18 устарел (0x80091007): ставим
+    # заранее, тогда бандл этот шаг пропускает.
+    Write-Title 'Step 3: WebView2 Runtime'
+    $webView = Get-RegValue $WebView2Key 'pv'
+    if ($webView -and $webView -ne '0.0.0.0') {
+        Write-Pass "WebView2 Runtime $webView is installed"
+    } else {
+        $webViewScript = Join-Path $KitDir 'install-webview2.ps1'
+        if (-not (Test-Path -LiteralPath $webViewScript)) { throw "$webViewScript is missing: copy the whole kit folder. Nothing was changed." }
+        Write-Info 'not installed: installing it first (install-webview2.ps1, needs internet)'
+        # -FromInstall: без подсказки «теперь запустите shell-install» — он уже идёт.
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $webViewScript -FromInstall
+        if ($LASTEXITCODE -ne 0) { throw "WebView2 Runtime install failed (exit code $LASTEXITCODE, see above; it needs internet). Nothing was changed." }
+        $webView = Get-RegValue $WebView2Key 'pv'
+        if (-not $webView -or $webView -eq '0.0.0.0') { throw 'WebView2 Runtime is still not registered. Nothing was changed.' }
+        Write-Pass "WebView2 Runtime $webView installed"
+    }
+
+    # --- 4. Снимок для сверки, agent.json с ключом ПК ---------------------------------------------------------------------
     $dnsBefore = Get-DnsSnapshot
     $helperBefore = Get-HelperState
     $dnsBefore.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name): $($_.Value)" } |
         Set-Content -LiteralPath (Join-Path $LogDir "dns-before-$stamp.txt") -Encoding UTF8
 
-    # --- 4. agent.json с ключом ПК ----------------------------------------------------------------------------------------
-    Write-Title 'Step 3: agent.json (before the installer runs)'
+    Write-Title 'Step 4: agent.json (before the installer runs)'
     if (Test-Path -LiteralPath $AgentJson) { throw "$AgentJson already exists (earlier install?): run shell-uninstall first. Nothing was changed." }
-    Write-Info 'The PC key: the same key the kassa page "Install on PC" asks for (from the ClubShell superadmin / Club__EnrollmentKey).'
+    # Ключ клуба Deagle, а не Club__EnrollmentKey с Railway: тот принадлежит первому клубу «ClubShell», и PC-01 с ним
+    # зарегистрировался там (в кассе Deagle ПК не было видно).
+    Write-Info 'The PC key of club Deagle: ClubShell superadmin -> "Novyi klyuch dlya PK" (New PC key).'
+    Write-Info 'NOT Club__EnrollmentKey from Railway: that is the key of the first club "ClubShell" (PC-01 landed there).'
     Write-Info 'Type or paste it (right click pastes); nothing is shown while you type.'
     $secureKey = Read-Host 'PC key' -AsSecureString
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
@@ -342,7 +389,7 @@ try {
     Write-Pass "$AgentJson written (SYSTEM + Administrators only): kiosk '$KioskUser', folder redirection off, library roots $($LibraryRoots -join ' '), Steam $SteamExe, updates off"
 
     # --- 5. Установка ---------------------------------------------------------------------------------------------------
-    Write-Title "Step 4: $SetupName /quiet"
+    Write-Title "Step 5: $SetupName /quiet"
     $setupLog = Join-Path $LogDir "setup-$stamp.log"
     $arguments = '/quiet /norestart /log "{0}" KIOSKUSER={1} INSTALLSHELL=1' -f $setupLog, $KioskUser
     Write-Info "running: $SetupName $arguments"
@@ -358,7 +405,7 @@ try {
     $installed = $true
 
     # --- 6. Проверки после установки ------------------------------------------------------------------------------------
-    Write-Title 'Step 5: checks after the install'
+    Write-Title 'Step 6: checks after the install'
     $running = Wait-Until { (Get-Service -Name ClubShellAgent -ErrorAction SilentlyContinue).Status -eq 'Running' } 60
     if (-not $running) {
         try { Start-Service -Name ClubShellAgent -ErrorAction Stop } catch { }
@@ -370,15 +417,18 @@ try {
     if (Wait-Until { Test-KeyMoved } 90) { Write-Pass 'PC key moved into secure\club.key (DPAPI); agent.json has no key now' }
     else { Write-Warn 'the PC key is still in agent.json (readable only by SYSTEM and Administrators)' "agent log $DataDir\logs; the agent moves it at its next start" }
 
-    $kioskReady = Wait-Until {
-        (Get-LocalUser -Name $KioskUser -ErrorAction SilentlyContinue) -and
-        (Get-RegValue $WinlogonKey 'DefaultUserName') -eq $KioskUser -and
-        (Get-RegValue $WinlogonKey 'AutoAdminLogon') -eq '1'
-    } 120
+    # Учётку киоска агент создаёт при старте, без кассы. Автовход — часть политики shellReplacement: она включена и в
+    # политике из MSI (Agent\config\policies.example.json — её агент применяет до одобрения), и в политике кассы, но
+    # агент сначала пишет шелл в профиль player и падает, пока профиля нет (в киоск никто не входил; PC-01 — и до, и
+    # после одобрения). Поэтому ждём только учётку, а автовход — строка для сведения: профиль создаёт шаг 9 (kiosk-on),
+    # и тогда автовход включает сам агент.
+    $null = Wait-Until { [bool](Get-LocalUser -Name $KioskUser -ErrorAction SilentlyContinue) } 120
     $kiosk = Get-LocalUser -Name $KioskUser -ErrorAction SilentlyContinue
     if ($kiosk) { Write-Pass "kiosk account '$KioskUser' exists" } else { Write-Fail "kiosk account '$KioskUser' was not created" "$DataDir\logs" }
-    if ($kioskReady) { Write-Pass "auto-logon now goes to '$KioskUser' (the kiosk starts at the next boot)" }
-    else { Write-Warn ("auto-logon is AutoAdminLogon={0}, DefaultUserName={1}: not switched to '{2}' yet" -f (Get-RegValue $WinlogonKey 'AutoAdminLogon'), (Get-RegValue $WinlogonKey 'DefaultUserName'), $KioskUser) "$DataDir\logs" }
+    $autoLogon = Get-RegValue $WinlogonKey 'AutoAdminLogon'
+    $autoLogonUser = Get-RegValue $WinlogonKey 'DefaultUserName'
+    if ($autoLogon -eq '1' -and $autoLogonUser -eq $KioskUser) { Write-Pass "auto-logon already goes to '$KioskUser'" }
+    else { Write-Info ("auto-logon is AutoAdminLogon={0}, DefaultUserName={1}: step 9 (kiosk on) switches it to '{2}' after the approval" -f $autoLogon, $autoLogonUser, $KioskUser) }
     if ($kiosk) {
         $groups = @(Get-PrivilegedGroupsOf $kiosk.SID.Value)
         if ($groups.Count -eq 0) { Write-Pass "'$KioskUser' is a standard user (no admin or operator groups)" }
@@ -423,7 +473,7 @@ try {
     Show-Registration $logState
 
     # --- 7. Пароль Club и PIN --------------------------------------------------------------------------------------------
-    Write-Title "Step 6: $AdminUser password and the kiosk admin PIN"
+    Write-Title "Step 7: $AdminUser password and the kiosk admin PIN"
     Write-Info "With the kiosk on, holding Shift at boot skips auto-logon and shows the sign-in screen: $AdminUser must have a password before players arrive."
     $passwordScript = Join-Path $KitDir 'set-club-password.ps1'
     if ((Test-Path -LiteralPath $passwordScript) -and (Read-YesNo "Set (or change) the $AdminUser password now?" $true)) {
@@ -442,15 +492,16 @@ try {
     }
 
     # --- 8. Касса ----------------------------------------------------------------------------------------------------
-    Write-Title 'Step 7: in the kassa (owner)'
+    Write-Title 'Step 8: in the kassa (owner)'
     $number = if ($env:COMPUTERNAME -match '^PC-(\d{2})$') { [int]$Matches[1] } else { '?' }
     Write-Host "  1. Open the kassa -> 'Zal i ustroystva' (Hall and devices): the new PC $env:COMPUTERNAME is there, maintenance ON."
     Write-Host "  2. Check its number is $number (taken from the Windows name). Do not add PCs by hand."
     Write-Host '  3. Choose its zone (spelled exactly as in the catalog game zones).'
     Write-Host "  4. Switch 'Obsluzhivanie' (maintenance) OFF: that approves the PC."
     Write-Host "  5. 'Politika PK' (PC policy): webFilter.dnsServers stays [] and blockResolvedIps false; usb.allowStorage as decided."
-    Write-Host '  6. Then reboot this PC: it signs in as the kiosk; check the games as a player (docs/shell-install.md, step 6).'
-    if ($logState.Registration -ne 'registered' -and (Read-YesNo 'Wait here until the PC is approved in the kassa (up to 10 minutes)?' $true)) {
+    Write-Host '  6. Then this script turns the kiosk on (step 9) and offers the reboot; check the games as a player (docs/shell-install.md).'
+    $approved = $logState.Registration -eq 'registered'
+    if (-not $approved -and (Read-YesNo 'Wait here until the PC is approved in the kassa (up to 10 minutes)?' $true)) {
         $approved = Wait-Until { (Get-AgentLogState).Registration -eq 'registered' } 600
         Show-Registration (Get-AgentLogState)
         if (-not $approved) { Write-Info 'not approved yet: the agent keeps retrying by itself after the approval' }
@@ -463,6 +514,30 @@ try {
             if ($lateChanged.Count -eq 0) { Write-Pass 'DNS servers unchanged after the kassa policy' }
             else { foreach ($name in $lateChanged) { Write-Fail "DNS of $name changed after the policy: '$($dnsBefore[$name])' -> '$($dnsLate[$name])'" 'kassa policy: webFilter.dnsServers must be []' } }
         }
+    }
+
+    # --- 9. Киоск ----------------------------------------------------------------------------------------------------
+    # kiosk-on.ps1 отдельным процессом, без перезагрузки: о ней спрашиваем в самом конце, когда журнал закрыт.
+    Write-Title 'Step 9: kiosk on'
+    $kioskOnCmd = Join-Path $KitDir 'kiosk-on-run-as-admin.cmd'
+    if ($approved) {
+        $kioskOnScript = Join-Path $KitDir 'kiosk-on.ps1'
+        if (-not (Test-Path -LiteralPath $kioskOnScript)) {
+            Write-Fail "$kioskOnScript is missing" "get the kit again, then $kioskOnCmd"
+        } else {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $kioskOnScript -KitDir $KitDir -KioskUser $KioskUser -NoReboot
+            $kioskOnCode = $LASTEXITCODE
+            if ($kioskOnCode -eq 0) {
+                Write-Pass "kiosk on: auto-logon to '$KioskUser' with the ClubShell shell from the next boot"
+                $rebootIntoKiosk = $true
+            } else {
+                Write-Fail "kiosk not turned on (kiosk-on exit code $kioskOnCode, see above)" $kioskOnCmd
+            }
+        }
+    } else {
+        Write-Warn 'kiosk not on yet: the PC is not approved in the kassa' "after the approval: $kioskOnCmd"
+        Write-Info "Until then auto-logon still goes to $AdminUser with its old password: after a new $AdminUser password a reboot stops"
+        Write-Info "at the sign-in screen (sign in as $AdminUser with the new password, then run $kioskOnCmd)."
     }
 } catch {
     Write-Host ''
@@ -483,5 +558,12 @@ try {
     Write-Host ("Install result for {0}: {1} FAIL, {2} WARN. Log: {3}" -f $env:COMPUTERNAME, $Count.Fail, $Count.Warn, $LogDir) -ForegroundColor $color
     if ($installed) { Write-Host 'Rollback: shell-uninstall-run-as-admin.cmd (from C:\ClubShellKit; USB sticks no longer work on this PC).' }
     try { Stop-Transcript | Out-Null } catch { }
+}
+# Киоск включён — перезагрузка в него. После журнала: Restart-Computer закрывает окно, итог уже записан. Есть FAIL — по
+# умолчанию нет: после перезагрузки в киоск исправлять их можно только через Shift -> Club.
+if ($rebootIntoKiosk) {
+    $clean = $Count.Fail -eq 0
+    if (-not $clean) { Write-Host 'There are FAIL lines above: take a photo of this window; reboot only once they are sorted out.' -ForegroundColor Red }
+    if (Read-YesNo 'Reboot now into the kiosk?' $clean) { Restart-Computer -Force }
 }
 if ($PSCommandPath) { if ($Count.Fail -gt 0) { exit 2 } else { exit 0 } }

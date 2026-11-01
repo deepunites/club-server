@@ -9,8 +9,9 @@
     Что делает (PowerShell от администратора, на гибриде):
       1. спрашивает новый пароль дважды (Read-Host -AsSecureString: не видно на экране, не попадает в журнал);
       2. ставит его Club (Set-LocalUser) и «срок действия пароля не ограничен» — у образов h1b/h1c срок 42 дня;
-      3. предупреждает, если автовход сейчас идёт в Club: со следующей загрузки он остановится на экране входа (с
-         ClubShell автовход и так идёт в киоск).
+      3. предупреждает, если автовход сейчас идёт в Club: со следующей загрузки он остановится на экране входа. С
+         ClubShell автовход в киоск переключает kiosk-on (последний шаг shell-install, после одобрения в кассе), не
+         агент сам: при установке этот скрипт всегда видит автовход ещё в Club.
     Пароль нигде не сохраняется и не печатается. Записать его туда, где игроки не увидят; один на все гибриды — решение
     владельца. Club из администраторов не убирать: это наша учётка обслуживания (update-helper-net.ps1, install-*.ps1).
     Задачи планировщика с сохранённым паролем Club (preflight их показывает) после смены пароля перестанут запускаться.
@@ -64,7 +65,8 @@ if (-not $account) {
         $autoOn = (Get-ItemProperty -LiteralPath $winlogon -Name AutoAdminLogon -ErrorAction SilentlyContinue).AutoAdminLogon
         if ($autoOn -eq '1' -and $autoUser -ieq $AdminUser) {
             Write-Host "Auto-logon still goes to '$AdminUser' with the old empty password: from the next boot this PC stops at the sign-in screen." -ForegroundColor Yellow
-            Write-Host 'With ClubShell installed the agent moves auto-logon to the kiosk account, so this is expected only without ClubShell.' -ForegroundColor Yellow
+            Write-Host 'With ClubShell: kiosk-on (the last install step, after the approval in the kassa) moves auto-logon to the kiosk account.' -ForegroundColor Yellow
+            Write-Host "Until then a reboot stops at the sign-in screen: sign in as '$AdminUser' with this password." -ForegroundColor Yellow
         }
         Write-Host "To reach the admin desktop: hold Shift at boot -> '$AdminUser' -> this password. Keep it away from players." -ForegroundColor Green
         $code = 0

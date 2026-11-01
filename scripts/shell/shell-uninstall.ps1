@@ -19,7 +19,11 @@
          MSI-установки не удаляет, SHELL_CHANGES 63), прочие — их QuietUninstallString;
       5. убирает то, что удаление ClubShell оставляет или может оставить (SHELL_CHANGES 67, 28): USBSTOR Start=3, запрет
          установки HID (если его ставила политика), LSA-секрет DefaultPassword (пароль киоска для автовхода), автовход в
-         киоск, задачи \ClubShell\ (старый пилот), правила брандмауэра ClubShell-*, блок ClubShell в hosts;
+         киоск, задачи \ClubShell\ (старый пилот), правила брандмауэра ClubShell-*, блок ClubShell в hosts; шелл в
+         шаблоне профиля C:\Users\Default (seal-default-profile.ps1 -Undo из набора) — при каждом запуске, который дошёл
+         до остатков: и если удаление MSI упало, и если ClubShell уже удалён раньше (через «Программы» или прошлым
+         запуском); не вышло — WARN с командой по сети. Автозапуск остаётся выключенным (disable-autoplay.ps1 из
+         kiosk-on): это безвредно, окно «Автозапуск» не нужно и администратору;
       6. по желанию удаляет киоск (профиль через Win32_UserProfile и учётку) — никогда не трогает Club и любого
          администратора; учётку, созданную не ClubShell (описание не «ClubShell kiosk account»), — только по отдельному
          «да»; и данные: C:\ProgramData\ClubShell (настройки, регистрация, журналы), остатки C:\Program Files\ClubShell,
@@ -45,6 +49,7 @@ $ErrorActionPreference = 'Continue'
 $SetupName = 'ClubShellSetup-1.0.18.exe'
 $HelperSha256 = '26635A5F7AAB4D77441D0B0138064B9C7F64BB1DAF4B0BCAF09052439DDD0148'   # ClubDisklessHelper 1.6.0+13609a5
 $UpdateHelperCmd = 'irm http://192.168.1.201:5080/pxe/v1/files/tools/update-helper-net.ps1 | iex'
+$SealUndoCmd = '& ([scriptblock]::Create((irm http://192.168.1.201:5080/pxe/v1/files/tools/seal-default-profile.ps1))) -Undo'
 $DataDir = Join-Path $env:ProgramData 'ClubShell'
 $InstallDir = Join-Path $env:ProgramFiles 'ClubShell'
 $WinlogonKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
@@ -374,6 +379,20 @@ try {
             Set-ItemProperty -LiteralPath $WinlogonKey -Name AutoAdminLogon -Value '0' -ErrorAction SilentlyContinue
             Remove-ItemProperty -LiteralPath $WinlogonKey -Name DefaultUserName -ErrorAction SilentlyContinue
         }
+    }
+    # Шелл ClubShell в шаблоне профиля (seal-default-profile.ps1, шаг kiosk-on): без -Undo каждая новая учётная запись
+    # стартовала бы с удалённой оболочкой вместо рабочего стола. Не только при $removeShell: сюда доходим, только если
+    # ClubShell удаляется сейчас или его уже нет (удалён раньше через «Программы» или прошлым запуском, у которого -Undo
+    # не вышел) — в обоих случаях значение в шаблоне лишнее, а -Undo убирает только своё. Среди остатков: выполняется и
+    # тогда, когда удаление MSI упало (его ошибки скрипт не прерывают). Отдельным процессом — у скрипта свой
+    # $ErrorActionPreference = 'Stop'.
+    $sealScript = Join-Path $KitDir 'seal-default-profile.ps1'
+    if (Test-Path -LiteralPath $sealScript) {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $sealScript -Undo
+        if ($LASTEXITCODE -eq 0) { Write-Pass 'default profile template: no ClubShell shell (new profiles start the Windows desktop)' }
+        else { Write-Warn "seal-default-profile.ps1 -Undo failed (exit code $LASTEXITCODE): new profiles may still try to start ClubShell" $SealUndoCmd }
+    } else {
+        Write-Warn "$sealScript is missing: new profiles may still try to start ClubShell" $SealUndoCmd
     }
 
     # --- 6. Киоск и данные -------------------------------------------------------------------------------------------------

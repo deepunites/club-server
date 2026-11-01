@@ -8,8 +8,10 @@
     PowerShell от администратора; по сети: irm http://192.168.1.201:5080/pxe/v1/files/tools/disable-autoplay.ps1 | iex
     Повторный запуск безопасен. Строки вывода — только ASCII.
 #>
+# irm | iex выполняет скрипт в области консоли: настройка ошибок возвращается в finally, чтобы не остаться в консоли.
+$savedErrorAction = $ErrorActionPreference
 $ErrorActionPreference = 'Stop'
-
+try {
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Run PowerShell as Administrator.'
 }
@@ -26,3 +28,6 @@ Set-Dword 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer' 'N
 Set-Dword 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer' 'NoAutorun' 1
 Set-Dword 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' 'NoAutoplayfornonVolume' 1
 Write-Host 'Done: no AutoPlay window from the next logon on (G:/H: and USB included).' -ForegroundColor Green
+} finally {
+    $ErrorActionPreference = $savedErrorAction
+}

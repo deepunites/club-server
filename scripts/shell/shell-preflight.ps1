@@ -6,9 +6,9 @@
     shell-preflight-run-as-admin.cmd — с флешки или из C:\ClubShellKit. shell-install.ps1 запускает эту проверку сам и
     не ставит шелл, пока есть FAIL. Порядок работ и что делать с каждым FAIL/WARN — docs/shell-install.md.
     Что проверяет:
-      1. ПК: имя PC-NN; системный диск локальный (бездисковый ПК — отказ: там шелл ставится в эталон в режиме мастера,
-         отдельно); место на C:; ожидание перезагрузки; Smart App Control (сборка 1.0.18 не подписана — он её
-         заблокирует);
+      1. ПК: имя PC-NN и переименование не ждёт перезагрузки; системный диск локальный (бездисковый ПК — отказ: там
+         шелл ставится в эталон в режиме мастера, отдельно); место на C:; ожидание перезагрузки; Smart App Control
+         (сборка 1.0.18 не подписана — он её заблокирует);
       2. помощник бездиска: служба ClubDisklessHelper 1.6.0+13609a5 (SHA256 exe); G: «Online Games» и H: «Offline
          Games» по iSCSI; номер личных дисков (таргеты games-seat-NN, solo-seat-NN) = номер в имени Windows (ClubShell
          берёт номер ПК из имени Windows при первой регистрации); G:\Steam\steam.exe; право записи группы Users в папки
@@ -202,6 +202,12 @@ if ($env:COMPUTERNAME -match '^PC-(\d{2})$') {
     Write-Pass "Windows name $env:COMPUTERNAME (ClubShell takes number $pcNumber from it at the first registration)"
 } else {
     Write-Fail "Windows name '$env:COMPUTERNAME' is not PC-NN" 'renumber first: number in the club-server panel, then Rename-Computer PC-NN, reboot (docs/shell-install.md)'
+}
+# Переименование без перезагрузки (Rename-Computer без -Restart): имя и личные диски ещё старого места, сверка номера
+# ниже прошла бы, а ClubShell взял бы старый номер — один раз и навсегда. Та же проверка, что в get-shell-kit.ps1.
+$pendingName = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' 'ComputerName'
+if ($pendingName -and $pendingName -ne $env:COMPUTERNAME) {
+    Write-Fail "this PC was renamed to '$pendingName' but not rebooted yet (the Windows name is still $env:COMPUTERNAME)" 'reboot first, then run this check again'
 }
 
 $systemDisk = $null
@@ -431,8 +437,12 @@ try {
 }
 
 $webView = Get-RegValue 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' 'pv'
+# Свой загрузчик WebView2 у бандла 1.0.18 падает (0x80091007): shell-install ставит WebView2 заранее install-webview2.ps1
+# из набора — тогда это не WARN.
+$webViewScripts = @($KitDir, $here) | Where-Object { $_ } | ForEach-Object { Join-Path $_ 'install-webview2.ps1' } | Where-Object { Test-Path -LiteralPath $_ }
 if ($webView -and $webView -ne '0.0.0.0') { Write-Pass "WebView2 runtime $webView" }
-else { Write-Warn 'WebView2 runtime not registered: the setup downloads it from Microsoft (needs internet)' }
+elseif ($webViewScripts) { Write-Info 'WebView2 runtime not registered: shell-install installs it first (install-webview2.ps1, needs internet)' }
+else { Write-Warn 'WebView2 runtime not registered and install-webview2.ps1 is not in the kit: the 1.0.18 setup fails with 0x80091007' 'put the whole kit into C:\ClubShellKit (get-shell-kit), shell-install installs WebView2 first' }
 
 # DNS: политика кассы с пустым dnsServers адаптеры не трогает; shell-install сверит этот список после установки.
 Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.ServerAddresses } | ForEach-Object {
