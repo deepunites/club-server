@@ -215,6 +215,8 @@ New-Item -ItemType Directory -Force -Path $KitDir | Out-Null
 $kitAcl = New-Object System.Security.AccessControl.DirectorySecurity
 $kitAcl.SetSecurityDescriptorSddlForm('D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
 Set-Acl -LiteralPath $KitDir -AclObject $kitAcl
+# Файлы внутри — только наследуемые права от папки (старый лаунчер мог оставить их с пустым DACL).
+& icacls.exe "$KitDir\*" /reset /T /C /Q 2>&1 | Out-Null
 if ($here -and $here.TrimEnd('\') -ne $KitDir.TrimEnd('\')) {
     Get-ChildItem -LiteralPath $here -File | Where-Object { $_.Extension -in @('.ps1', '.cmd') -or $_.Name -eq $SetupName } |
         Copy-Item -Destination $KitDir -Force
