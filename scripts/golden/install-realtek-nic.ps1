@@ -83,6 +83,16 @@ $ProgressPreference = 'SilentlyContinue'   # прогресс-бар Invoke-WebR
 $ServerUrl = 'http://192.168.1.201:5080'
 $ToolsUrl = "$ServerUrl/pxe/v1/files/tools"
 $SetUrl = "$ToolsUrl/realtek-nic"
+# Запуск файлом из копии набора (флешка: club\realtek-nic-run-as-admin.cmd) — набор берётся из этой папки, а не с сервера:
+# у ПК Mirage сеть как раз и пропадает. Сверка с SHA256SUMS та же. Под irm | iex пути нет — набор с сервера; сторож
+# запускается из $LocalDir и набор не перекачивает.
+$SourceDir = $null
+if ($PSCommandPath) {
+    $scriptDir = Split-Path -Parent $PSCommandPath
+    if ($scriptDir -and ($scriptDir.TrimEnd('\') -ne 'C:\ClubDrivers\realtek-nic') -and (Test-Path -LiteralPath (Join-Path $scriptDir 'SHA256SUMS'))) {
+        $SourceDir = $scriptDir
+    }
+}
 $HealthUrl = "$ServerUrl/health"
 $ClubDriversDir = 'C:\ClubDrivers'
 $LocalDir = 'C:\ClubDrivers\realtek-nic'
@@ -299,6 +309,12 @@ function Read-Sums([string]$Path, [string]$What) {
 # когда сверены ВСЕ, .part встают на место, SHA256SUMS — последним (его читает сторож). Ошибка до этого — удаляются
 # только .part: старый набор и его SHA256SUMS остаются согласованными, сторож по-прежнему может из них ставить драйвер.
 # Несовпадение — стоп до любой замены драйвера.
+# Один файл набора в $Destination: копия из $SourceDir (флешка) или загрузка с сервера.
+function Get-SetFile([string]$Name, [string]$Destination, [int]$TimeoutSec) {
+    if ($SourceDir) { Copy-Item -LiteralPath (Join-Path $SourceDir $Name) -Destination $Destination -Force }
+    else { Invoke-WebRequest -UseBasicParsing -TimeoutSec $TimeoutSec -Uri "$SetUrl/$Name" -OutFile $Destination }
+}
+
 function Save-ServedSet {
     $sumsPath = Join-Path $LocalDir 'SHA256SUMS'
     $sumsPart = "$sumsPath.part"
@@ -308,8 +324,9 @@ function Save-ServedSet {
     $moving = $false
     $done = $false
     try {
-        try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -Uri "$SetUrl/SHA256SUMS" -OutFile $sumsPart }
-        catch { throw ("Cannot get {0}/SHA256SUMS ({1}): is the driver set published on the club server (publish-realtek-nic.sh)? Nothing was changed." -f $SetUrl, $_.Exception.Message) }
+        if ($SourceDir) { Write-Info "driver set from $SourceDir (not from the server)" }
+        try { Get-SetFile 'SHA256SUMS' $sumsPart 60 }
+        catch { throw ("Cannot get {0}/SHA256SUMS ({1}): is the driver set published on the club server (publish-realtek-nic.sh)? Nothing was changed." -f $(if ($SourceDir) { $SourceDir } else { $SetUrl }), $_.Exception.Message) }
         $entries = @(Read-Sums $sumsPart 'SHA256SUMS on the server')
         foreach ($required in @($InfName, $ScriptName)) {
             if (-not ($entries | Where-Object { $_.Name -ieq $required })) {
@@ -321,8 +338,8 @@ function Save-ServedSet {
             if (Test-FileSha256 $target $entry.Sha256) { continue }
             $part = "$target.part"
             [void]$parts.Add($part)
-            Write-Info "downloading $($entry.Name)"
-            try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 120 -Uri "$SetUrl/$($entry.Name)" -OutFile $part }
+            Write-Info "getting $($entry.Name)"
+            try { Get-SetFile $entry.Name $part 120 }
             catch { throw ("Download of {0} failed: {1}. The local set in {2} was left as it was; nothing was changed." -f $entry.Name, $_.Exception.Message, $LocalDir) }
             if (-not (Test-FileSha256 $part $entry.Sha256)) {
                 $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $part).Hash
