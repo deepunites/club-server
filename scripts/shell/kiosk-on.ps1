@@ -36,6 +36,14 @@
     Шаги 3-5 — отдельные powershell -File; ошибка шага — стоп с подсказкой, следующие шаги не выполняются. Повторный
     запуск безопасен: все три скрипта повторяемы (enable-kiosk-autologon после включённого киоска только перезапускает
     агента).
+    -AdminUser — администратор (по умолчанию Club, как на гибридах). -Golden — эталон бездиска в режиме мастера (его
+    передают get-shell-kit и shell-install -Golden): администратор по умолчанию — тот, кто запустил скрипт; подсказка
+    одобрения — «как этот ПК Primer», а не «номер из имени Windows»; перезагрузки нет никогда (-NoReboot всегда:
+    перезагрузка мастера после киоска — вход в киоск player в самом эталоне), дальше seal-golden.ps1. Сеанс мастера
+    (таргет …:diskless-master) включает режим эталона и без -Golden — лаунчер .cmd флагов не передаёт. Обычное место
+    бездиска (…:seat-NN) — стоп: его C: сбрасывается при каждой загрузке. Эталон и метка C:\ClubShellKit\reboot-before-kiosk
+    (shell-install -Golden: установщик ответил 3010) — стоп, пока последняя загрузка старше метки: сначала одна
+    перезагрузка (3010 от MSI не виден в ключах RebootPending); киоск включён — метка удаляется.
     Журнал — C:\ClubShellKit\logs\kiosk-on-<ПК>-<время>.txt; вывод дочерних скриптов в журнал не попадает (идёт прямо в
     консоль) — при ошибке сфотографировать окно. Код выхода при запуске файлом: 0 — киоск включён, 2 — нет.
     Строки вывода — только ASCII, без BOM и без #Requires (как у остальных скриптов набора).
@@ -45,19 +53,30 @@
 param(
     [string]$KitDir = 'C:\ClubShellKit',
     [string]$KioskUser = 'player',
-    [switch]$NoReboot
+    [switch]$NoReboot,
+    [string]$AdminUser = 'Club',
+    [switch]$Golden
 )
 $ErrorActionPreference = 'Stop'
 
-$AdminUser = 'Club'
+# Бездиск: таргет загрузки …:diskless-master — мастер эталона, …:seat-NN — обычное место (как в get-shell-kit.ps1).
+$bootTargets = @(Get-IscsiSession -ErrorAction SilentlyContinue | ForEach-Object { "$($_.TargetNodeAddress)" } | Where-Object { $_ -match ':(diskless-master|seat-\d+)$' })
+$goldenAuto = $false
+if (-not $Golden -and @($bootTargets | Where-Object { $_ -match ':diskless-master$' }).Count -gt 0) { $Golden = $true; $goldenAuto = $true }
+# Эталон: администратор — тот, кто запустил (Club есть только в образах гибридов); перезагрузки нет никогда.
+if ($Golden -and -not $PSBoundParameters.ContainsKey('AdminUser')) { $AdminUser = $env:USERNAME }
+if ($Golden) { $NoReboot = $true }
 # Путь из политики кассы (shellReplacement.shellExe) — тот же, что в seal-default-profile.ps1.
 $ShellExe = 'C:\Program Files\ClubShell\Shell\clubshell-shell.exe'
 $DataDir = Join-Path $env:ProgramData 'ClubShell'
 $WinlogonKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
 $DiagCmd = Join-Path $KitDir 'shell-agent-diag-run-as-admin.cmd'
 $SelfCmd = Join-Path $KitDir 'kiosk-on-run-as-admin.cmd'
+if ($Golden) { $SelfCmd = "powershell -NoProfile -ExecutionPolicy Bypass -File $KitDir\kiosk-on.ps1 -Golden -AdminUser '$AdminUser'" }
 $GetKitCmd = 'irm http://192.168.1.201:5080/pxe/v1/files/tools/get-shell-kit.ps1 | iex'
 $StepScripts = @('disable-autoplay.ps1', 'seal-default-profile.ps1', 'enable-kiosk-autologon.ps1')
+# Пишет shell-install -Golden, когда установщик ответил 3010: до киоска — одна перезагрузка.
+$RebootMarker = Join-Path $KitDir 'reboot-before-kiosk'
 
 function Write-Title([string]$Text) { Write-Host ''; Write-Host "==> $Text" -ForegroundColor Cyan }
 function Write-Pass([string]$Text) { Write-Host "PASS  $Text" -ForegroundColor Green }
@@ -200,6 +219,11 @@ try { Start-Transcript -LiteralPath (Join-Path $LogDir "kiosk-on-$env:COMPUTERNA
 $kioskOn = $false
 try {
     Write-Host "ClubShell kiosk on $env:COMPUTERNAME (kiosk account '$KioskUser')" -ForegroundColor Cyan
+    if (@($bootTargets | Where-Object { $_ -match ':seat-\d+$' }).Count -gt 0) {
+        throw "This PC boots as a normal diskless seat ($($bootTargets -join ', ')): its C: resets at every boot. The kiosk goes into the golden in master mode. Nothing was changed."
+    }
+    if ($goldenAuto) { Write-Info 'diskless master session (:diskless-master): golden mode on by itself (no reboot)' }
+    if ($Golden) { Write-Host "GOLDEN MODE: the kiosk goes into the golden image (admin '$AdminUser'); no reboot" -ForegroundColor Cyan }
     if ($KioskUser -ieq $AdminUser) { throw "Kiosk account '$KioskUser' is the admin account '$AdminUser'. Nothing was changed." }
 
     # --- 0. ClubShell и набор ----------------------------------------------------------------------------------------
@@ -214,6 +238,21 @@ try {
         throw "Missing in ${KitDir}: $($missing -join ', '). Get the kit again ($GetKitCmd). Nothing was changed."
     }
     Write-Pass "kit scripts found in $KitDir"
+    # Эталон, установщик ответил 3010: перезагрузка — до киоска (после него мастер загрузился бы в киоск player), а
+    # seal-golden и проверка её не видят (MSI пишет PendingFileRenameOperations, не ключи RebootPending).
+    if ($Golden -and (Test-Path -LiteralPath $RebootMarker)) {
+        $markerTime = (Get-Item -LiteralPath $RebootMarker).LastWriteTime
+        $bootTime = $null
+        try { $bootTime = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime } catch { }
+        if (-not $bootTime -or $bootTime -lt $markerTime) {
+            $markerText = $markerTime.ToString('yyyy-MM-dd HH:mm')
+            $bootText = if ($bootTime) { $bootTime.ToString('yyyy-MM-dd HH:mm') } else { 'unknown' }
+            throw ("The ClubShell installer asked for a reboot (exit code 3010, $markerText) and the master has not rebooted since (last boot $bootText). " +
+                "Reboot it ONCE now (the kiosk is not on yet), sign in as $AdminUser, run $SelfCmd again. Nothing was changed. " +
+                "(Already rebooted and this is wrong: delete $RebootMarker.)")
+        }
+        Write-Pass "the reboot the installer asked for (exit code 3010) is done (last boot $($bootTime.ToString('yyyy-MM-dd HH:mm')))"
+    }
     # Club — единственный администратор гибрида (встроенный выключен): не включать киоск, если он им быть перестал.
     $adminAccount = Get-LocalUser -Name $AdminUser -ErrorAction SilentlyContinue
     if (-not $adminAccount -or -not $adminAccount.Enabled -or (Get-GroupMemberSids 'S-1-5-32-544') -notcontains $adminAccount.SID.Value) {
@@ -236,8 +275,14 @@ try {
         default { Write-Note "agent log: no registration yet ($DataDir\logs)" }
     }
     if ($registration.State -ne 'registered') {
+        if ($Golden) {
+            # Мастер — тот же физический ПК, что и место Primer (тот же HWID): его запись в кассе — это место.
+            Write-Info "Approve the master in the kassa as THIS Primer seat: 'Zal i ustroystva' -> the new PC USER -> the number of this seat, zone Primer,"
+            Write-Info "'Bez postoyannogo diska' (no persistent disk) ON, then 'Obsluzhivanie' (maintenance) OFF. Never delete that row."
+        } else {
         $number = if ($env:COMPUTERNAME -match '^PC-(\d{2})$') { [int]$Matches[1] } else { '?' }
         Write-Info "Approve it in the kassa: 'Zal i ustroystva' -> $env:COMPUTERNAME (number $number) -> its zone, then 'Obsluzhivanie' (maintenance) OFF."
+        }
         # До одобрения агент живёт на политике из MSI (замена оболочки в ней включена): киоск включился бы и без кассы.
         Write-Info 'Without the approval the kiosk would start on the default policy of the installer, and the kassa could not'
         Write-Info 'start a session on this PC (it still waits for approval there): approve it first.'
@@ -259,7 +304,10 @@ try {
             $passwordState = Get-PasswordState $AdminUser
         }
         if ($passwordState -eq 'blank') {
-            throw "$AdminUser still has an empty password: the kiosk was not turned on. Run $KitDir\set-club-password-run-as-admin.cmd, then $SelfCmd again."
+            # Лаунчер .cmd задаёт пароль только Club; у эталона администратор другой — скрипт с -AdminUser.
+            $passwordCmd = "$KitDir\set-club-password-run-as-admin.cmd"
+            if ($Golden) { $passwordCmd = "powershell -NoProfile -ExecutionPolicy Bypass -File $KitDir\set-club-password.ps1 -AdminUser '$AdminUser'" }
+            throw "$AdminUser still has an empty password: the kiosk was not turned on. Run $passwordCmd, then $SelfCmd again."
         }
     }
     if ($passwordState -eq 'set') { Write-Pass "$AdminUser has a password" }
@@ -285,19 +333,28 @@ try {
     Write-Title 'Step 6: auto-logon'
     $autoLogon = Get-RegValue $WinlogonKey 'AutoAdminLogon'
     $defaultUser = Get-RegValue $WinlogonKey 'DefaultUserName'
-    if ("$autoLogon" -eq '1' -and "$defaultUser" -ieq $KioskUser) {
+    if ("$autoLogon" -eq '1' -and "$defaultUser" -ieq $KioskUser -and $Golden) {
+        Write-Pass "auto-logon goes to '$KioskUser' (AutoAdminLogon=1): the seats start the kiosk at their next boot after the publish"
+        Write-Info 'Do NOT reboot the master: its next boot would log on to the kiosk in the golden. Next: seal-golden.ps1, then Publish.'
+    } elseif ("$autoLogon" -eq '1' -and "$defaultUser" -ieq $KioskUser) {
         Write-Pass "auto-logon goes to '$KioskUser' (AutoAdminLogon=1): the kiosk starts at the next boot"
     } else {
         throw "Auto-logon is AutoAdminLogon=$autoLogon, DefaultUserName=${defaultUser}: not '$KioskUser'. Take a photo of this window, run $DiagCmd and send both photos."
     }
     Write-Info "Admin desktop later: hold Shift while Windows starts, until the sign-in screen -> $AdminUser -> password."
     $kioskOn = $true
+    # Перезагрузка после 3010 была (иначе стоп в шаге 0): метка больше не нужна.
+    if (Test-Path -LiteralPath $RebootMarker) { Remove-Item -LiteralPath $RebootMarker -Force -ErrorAction SilentlyContinue }
 } catch {
     Write-Host ''
     Write-Host "STOPPED: $($_.Exception.Message)" -ForegroundColor Red
 } finally {
     Write-Host ''
-    if ($kioskOn) { Write-Host "${env:COMPUTERNAME}: the kiosk is ON. Log: $LogDir" -ForegroundColor Green }
+    if ($kioskOn -and $Golden) {
+        Write-Host "${env:COMPUTERNAME}: the kiosk is ON in the golden. Log: $LogDir" -ForegroundColor Green
+        Write-Host "Do NOT reboot. Next: powershell -NoProfile -ExecutionPolicy Bypass -File $KitDir\seal-golden.ps1, then panel 'Diskless' -> Publish." -ForegroundColor Yellow
+    }
+    elseif ($kioskOn) { Write-Host "${env:COMPUTERNAME}: the kiosk is ON. Log: $LogDir" -ForegroundColor Green }
     else { Write-Host "${env:COMPUTERNAME}: the kiosk is NOT on. Log: $LogDir" -ForegroundColor Red }
     try { Stop-Transcript | Out-Null } catch { }
 }

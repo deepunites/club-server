@@ -8,7 +8,12 @@
     Что делает (PowerShell от администратора, нужен интернет):
       1. если WebView2 Runtime уже зарегистрирован (HKLM ...\EdgeUpdate\Clients\{F3017226-...}, pv) — ничего;
       2. скачивает официальный загрузчик Evergreen с go.microsoft.com, проверяет подпись Microsoft;
-      3. ставит тихо (/silent /install) и проверяет, что версия зарегистрирована.
+      3. ставит тихо (/silent /install) и проверяет, что версия зарегистрирована. Эталон бездиска: fixes-v2.ps1
+         выключает службы обновления Edge (edgeupdate, edgeupdatem), а загрузчик ставит WebView2 через них — на время
+         установки выключенные из них становятся «Вручную», в конце (и при ошибке) снова «Отключена»; задания
+         MicrosoftEdgeUpdate* — тоже снова выключены, как в fixes-v2.ps1: загрузчик обновляет старый клиент EdgeUpdate
+         эталона, и тот заново регистрирует их включёнными (без служб они идут от SYSTEM), а места с C:, сброшенным при
+         каждой загрузке, качали бы обновления Edge/WebView2 при каждой загрузке и меняли WebView2 под работающим шеллом.
     -FromInstall — запуск из shell-install.ps1 (его шаг 3): без подсказки «теперь запустите shell-install», он уже идёт.
     Строки вывода — только ASCII.
 #>
@@ -40,8 +45,37 @@ if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Micr
     throw "The downloaded file is not signed by Microsoft (signature $($sig.Status), signer '$($sig.SignerCertificate.Subject)')."
 }
 Write-Host 'Microsoft signature OK; installing WebView2 Runtime (1-2 minutes, no windows)'
-$process = Start-Process -FilePath $exe -ArgumentList '/silent', '/install' -Wait -PassThru
-Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue
+# Только выключенные службы и только на время установки (эталон: fixes-v2.ps1); на гибриде они не выключены — не трогаем.
+$disabledUpdate = @(Get-Service -Name 'edgeupdate', 'edgeupdatem' -ErrorAction SilentlyContinue | Where-Object { "$($_.StartType)" -eq 'Disabled' } | ForEach-Object { $_.Name })
+try {
+    foreach ($name in $disabledUpdate) {
+        Set-Service -Name $name -StartupType Manual
+        Write-Host "  service ${name}: Disabled -> Manual for the install"
+    }
+    $process = Start-Process -FilePath $exe -ArgumentList '/silent', '/install' -Wait -PassThru
+} finally {
+    Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue
+    foreach ($name in $disabledUpdate) {
+        Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
+        Set-Service -Name $name -StartupType Disabled -ErrorAction SilentlyContinue
+        if ("$((Get-Service -Name $name -ErrorAction SilentlyContinue).StartType)" -eq 'Disabled') { Write-Host "  service ${name}: Disabled again" }
+        else { Write-Host "  service ${name}: could NOT be set back to Disabled (Set-Service $name -StartupType Disabled)" -ForegroundColor Yellow }
+    }
+    # Эталон (службы были выключены fixes-v2.ps1): задания MicrosoftEdgeUpdate* обновлённый клиент регистрирует заново
+    # включёнными — выключить их снова, как fixes-v2.ps1. На гибриде ($disabledUpdate пуст) не трогаем.
+    if ($disabledUpdate.Count -gt 0) {
+        try {
+            foreach ($task in @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like 'MicrosoftEdgeUpdate*' })) {
+                $task | Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
+                $taskState = "$((Get-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue).State)"
+                if ($taskState -eq 'Disabled') { Write-Host "  task $($task.TaskName): Disabled" }
+                else { Write-Host "  task $($task.TaskName): could NOT be disabled ($taskState): Get-ScheduledTask MicrosoftEdgeUpdate* | Disable-ScheduledTask" -ForegroundColor Yellow }
+            }
+        } catch {
+            Write-Host "  tasks MicrosoftEdgeUpdate*: not checked ($($_.Exception.Message)): Get-ScheduledTask MicrosoftEdgeUpdate* | Disable-ScheduledTask" -ForegroundColor Yellow
+        }
+    }
+}
 
 $version = Get-WebView2Version
 if ($version -and $version -ne '0.0.0.0') {

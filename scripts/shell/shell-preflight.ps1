@@ -28,6 +28,16 @@
     Пустой ли пароль, проверяется входом с пустым паролем (LogonUser, сетевой вход): «пустые пароли запрещены» —
     пароль пустой, «неверный пароль» — пароль есть. Неверная попытка идёт в счётчик блокировки Windows (порог — 10 за
     10 минут): проверку не гонять десятки раз подряд.
+    -Golden — эталон бездиска в режиме мастера (его передаёт shell-install.ps1 -Golden, тот — get-shell-kit, когда
+    видит сеанс …:diskless-master). Отличия: имя USER, а не PC-NN (FAIL иначе); системный диск — iSCSI с сеансом
+    мастера (место или локальный диск — FAIL); открытая правка библиотек — WARN; ожидание перезагрузки — FAIL
+    (перезагружаться — до установки: после kiosk-on мастер загрузится в киоск); номер личных дисков — только для
+    сведения (они того ПК, на котором сейчас мастер); G:/H: не подключены — WARN; администратор — -AdminUser
+    (администратор эталона; Club есть только в образах гибридов): встроенный Administrator — FAIL, учётка Microsoft —
+    FAIL (её вход и токены ушли бы в образ, снимки и резервные копии), пустой пароль — FAIL (места копируют эталон:
+    Shift при загрузке на любом месте дал бы рабочий стол администратора без пароля). Другие включённые учётки — на
+    экране входа всех мест: включённый встроенный Administrator, второй администратор и учётка с пустым паролем — FAIL
+    (seal-golden.ps1 перед каждой публикацией их тоже не пропустит; лучше до установки, чем после).
     Код выхода при запуске файлом: 0 — всё PASS, 1 — есть WARN, 2 — есть FAIL.
     По сети одной строкой — если файл выложен на сервер клуба (/srv/club/pxe/tools; пока не выложен):
       irm http://192.168.1.201:5080/pxe/v1/files/tools/shell-preflight.ps1 | iex
@@ -37,7 +47,8 @@ param(
     [string]$ServerUrl = 'https://clubshell-server-production.up.railway.app',
     [string]$KioskUser = 'player',
     [string]$AdminUser = 'Club',
-    [string]$KitDir = 'C:\ClubShellKit'
+    [string]$KitDir = 'C:\ClubShellKit',
+    [switch]$Golden
 )
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
@@ -197,7 +208,11 @@ $display = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' 'Di
 if ([int]$build -ge 22000) { Write-Pass "Windows 11 $display, build $build" }
 else { Write-Warn "Windows build $build ($display): the club PCs run Windows 11" }
 
-if ($env:COMPUTERNAME -match '^PC-(\d{2})$') {
+if ($Golden) {
+    Write-Info 'mode: golden (diskless master): ClubShell goes into the golden image, the seats get it with the publish'
+    if ($env:COMPUTERNAME -eq 'USER') { Write-Pass 'Windows name USER (golden: every seat boots with it; numbers are set by hand in the kassa)' }
+    else { Write-Fail "Windows name '$env:COMPUTERNAME' is not USER" 'the golden keeps the name USER: Rename-Computer USER, reboot, then run again' }
+} elseif ($env:COMPUTERNAME -match '^PC-(\d{2})$') {
     $pcNumber = [int]$Matches[1]
     Write-Pass "Windows name $env:COMPUTERNAME (ClubShell takes number $pcNumber from it at the first registration)"
 } else {
@@ -215,8 +230,22 @@ try { $systemDisk = Get-Partition -DriveLetter $env:SystemDrive.Substring(0, 1) 
 $bus = if ($systemDisk) { Get-BusName $systemDisk.BusType } else { '?' }
 # Таргет загрузки бездиска (мастер или место). У гибрида сессии только к дискам игр (games-…, solo-…) и правке библиотек.
 $bootSessions = @(Get-IscsiSession -ErrorAction SilentlyContinue | Where-Object { "$($_.TargetNodeAddress)" -match ':(diskless-master|seat-\d+)$' })
-if ($bus -eq 'iSCSI' -or $bootSessions.Count -gt 0) {
-    Write-Fail "system disk $env:SystemDrive is diskless (iSCSI): this kit is for hybrids only" 'diskless PCs get ClubShell in the golden image in master mode, later (docs/shell-install.md, "Diskless")'
+if ($Golden) {
+    # Эталон: только сеанс мастера. Обычное место (…:seat-NN) сбрасывает C: при каждой загрузке.
+    $masterSessions = @($bootSessions | Where-Object { "$($_.TargetNodeAddress)" -match ':diskless-master$' })
+    if (@($bootSessions | Where-Object { "$($_.TargetNodeAddress)" -match ':seat-\d+$' }).Count -gt 0) {
+        Write-Fail "this PC boots as a normal diskless seat: its C: resets at every boot" 'panel "Diskless": master mode for this PC, reboot, run again'
+    } elseif ($bus -eq 'iSCSI' -and $masterSessions.Count -gt 0) {
+        Write-Pass "system disk is the golden image in master mode ($($masterSessions[0].TargetNodeAddress))"
+    } else {
+        Write-Fail "golden mode, but the system disk is '$bus' without a ':diskless-master' session" 'run it on the diskless master (panel "Diskless" -> master mode)'
+    }
+    # Правка библиотеки G: (club-master) или H: (club-master-solo) — та же проверка, что в seal-golden.ps1.
+    if (@(Get-IscsiSession -ErrorAction SilentlyContinue | Where-Object { "$($_.TargetNodeAddress)" -match ':club-master(-[a-z0-9]+)?$' -and $_.IsConnected }).Count -gt 0) {
+        Write-Warn 'library editing is open (club-master / club-master-solo session)' 'panel: finish the library editing first (seal-golden refuses it too)'
+    }
+} elseif ($bus -eq 'iSCSI' -or $bootSessions.Count -gt 0) {
+    Write-Fail "system disk $env:SystemDrive is diskless (iSCSI): this kit is for hybrids only" 'diskless: master mode in the panel, then get-shell-kit on the master (golden mode, docs/shell-install.md "Diskless")'
 } elseif ($LocalBusTypes -contains $bus) {
     Write-Pass "system disk is local ($bus): hybrid"
 } else {
@@ -234,7 +263,9 @@ if ($cVolume) {
 # Ожидающая перезагрузка: MSI тогда может ответить 3010 или 1618 (идёт другая установка).
 $rebootPending = (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') -or
     (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')
-if ($rebootPending) { Write-Warn 'Windows waits for a reboot (updates/servicing)' 'reboot, then run this check again' }
+# Эталон — FAIL: перезагрузка после kiosk-on загрузила бы мастер в киоск player, поэтому только до установки.
+if ($rebootPending -and $Golden) { Write-Fail 'Windows waits for a reboot (updates/servicing)' 'reboot the master now (before the shell), sign in as the golden admin, run again' }
+elseif ($rebootPending) { Write-Warn 'Windows waits for a reboot (updates/servicing)' 'reboot, then run this check again' }
 else { Write-Pass 'no reboot pending' }
 if (Get-Process -Name msiexec -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 }) {
     Write-Warn 'an msiexec window is open (another install may be running)' 'finish or close it first (error 1618 otherwise)'
@@ -285,7 +316,10 @@ function Get-LibraryVolume([string]$Letter) {
 # G: — «Online Games» (раньше ClubGames), H: — «Offline Games» (помощник 1.6.0); оба — личные диски места по iSCSI.
 foreach ($lib in @(@{ Letter = 'G'; Labels = @('Online Games', 'ClubGames') }, @{ Letter = 'H'; Labels = @('Offline Games') })) {
     $volume = Get-LibraryVolume $lib.Letter
-    if (-not $volume) {
+    if (-not $volume -and $Golden) {
+        # Мастер: личные диски — того ПК, на котором он сейчас; шелл их не трогает, места подключают свои.
+        Write-Warn "$($lib.Letter): is not mounted in this master session" 'wait 1-2 minutes after boot (the helper mounts it); the seats mount their own disks'
+    } elseif (-not $volume) {
         Write-Fail "$($lib.Letter): is not mounted" 'wait 1-2 minutes after boot (the helper mounts it), check the panel "Diskless", run again'
     } elseif ($lib.Labels -contains $volume.Label -and $volume.Bus -eq 'iSCSI') {
         Write-Pass "$($lib.Letter): '$($volume.Label)' over iSCSI, $($volume.FreeGb) GB free"
@@ -297,17 +331,22 @@ foreach ($lib in @(@{ Letter = 'G'; Labels = @('Online Games', 'ClubGames') }, @
 # Номер личных дисков — по имени таргета (games-seat-NN для G:, solo-seat-NN для H:). Не совпал с PC-NN — ПК
 # перенумерован наполовину: касса взяла бы номер из имени Windows, а диски — другого места.
 $seatTargets = @(Get-IscsiSession -ErrorAction SilentlyContinue | ForEach-Object { "$($_.TargetNodeAddress)" } | Where-Object { $_ -match ':(games|solo)-seat-(\d+)$' })
-if ($seatTargets.Count -eq 0) {
+if ($seatTargets.Count -eq 0 -and $Golden) {
+    Write-Info 'no personal disk session (games-seat-NN / solo-seat-NN) in this master session'
+} elseif ($seatTargets.Count -eq 0) {
     Write-Warn 'no personal disk session (games-seat-NN / solo-seat-NN) found' 'check the panel "Diskless" for this PC'
 }
 foreach ($target in $seatTargets) {
     $null = $target -match ':(games|solo)-seat-(\d+)$'
     $seat = [int]$Matches[2]
-    if ($pcNumber -and $seat -eq $pcNumber) { Write-Pass "personal $($Matches[1]) disk is seat $seat ($target)" }
+    # Эталон: номер в имени Windows не нужен (USER), диски — того ПК, на котором сейчас мастер.
+    if ($Golden) { Write-Info "personal $($Matches[1]) disk of seat $seat ($target): the PC that runs the master now" }
+    elseif ($pcNumber -and $seat -eq $pcNumber) { Write-Pass "personal $($Matches[1]) disk is seat $seat ($target)" }
     else { Write-Fail "personal $($Matches[1]) disk is seat $seat, Windows name is $env:COMPUTERNAME" 'renumber in the panel and rename Windows to the same PC-NN first' }
 }
 
 if (Test-Path -LiteralPath 'G:\Steam\steam.exe') { Write-Pass 'Steam: G:\Steam\steam.exe' }
+elseif ($Golden) { Write-Warn 'G:\Steam\steam.exe not found in this master session (the kassa catalog and agent.json use it)' 'check G: on a seat after the publish' }
 else { Write-Fail 'G:\Steam\steam.exe not found (the kassa catalog and agent.json use it)' 'check G: (Online Games library)' }
 if (Get-Service -Name 'Steam Client Service' -ErrorAction SilentlyContinue) { Write-Pass 'service "Steam Client Service" exists (Steam for a standard user)' }
 else { Write-Warn 'service "Steam Client Service" is missing: Steam as a standard user cannot update games' 'start G:\Steam\steam.exe once as Club (it installs the service)' }
@@ -339,16 +378,30 @@ if ($me -like "*\$AdminUser") { Write-Pass "signed in as $me" }
 else { Write-Warn "signed in as $me, not $AdminUser" "sign in as $AdminUser (hold Shift at boot to skip auto-logon)" }
 
 $admin = Get-LocalUser -Name $AdminUser -ErrorAction SilentlyContinue
+# Пароль администратора эталона — из набора, -AdminUser с его именем (у лаунчера .cmd имя всегда Club).
+$goldenPasswordCmd = "powershell -NoProfile -ExecutionPolicy Bypass -File $KitDir\set-club-password.ps1 -AdminUser '$AdminUser'"
 if (-not $admin) {
-    Write-Fail "local account $AdminUser is missing" 'this kit expects the hybrid images h1d/h1e (admin "Club")'
+    if ($Golden) { Write-Fail "local account $AdminUser is missing" 'golden mode takes the signed-in admin: sign in as the golden admin and run get-shell-kit again' }
+    else { Write-Fail "local account $AdminUser is missing" 'this kit expects the hybrid images h1d/h1e (admin "Club")' }
 } else {
     if ($admin.Enabled -and ($adminSids -contains $admin.SID.Value)) { Write-Pass "$AdminUser is an enabled administrator (our maintenance account: keep it)" }
     else { Write-Fail "$AdminUser is not an enabled member of Administrators" }
+    if ($Golden -and $admin.SID.Value -match '-500$') {
+        Write-Fail "$AdminUser is the built-in Administrator" 'sign in as the golden''s own admin account (the built-in one stays disabled)'
+    }
+    # Учётка Microsoft: пароль — от аккаунта в интернете, на экране входа мест (Shift) нужен он; set-club-password ей не подходит.
+    # Эталон: её вход и токены ушли бы в образ, снимки и резервные копии; seal-golden такой эталон не закроет.
+    if ($Golden -and "$($admin.PrincipalSource)" -eq 'MicrosoftAccount') {
+        Write-Fail "$AdminUser is a Microsoft account: its sign-in and tokens would go into the image, snapshots and backups; Shift at every seat asks for its online password" ('create a local admin with its own password (Settings -> Accounts -> Other users), sign in as it, ' +
+            "delete $AdminUser with its data (same place -> Remove), run get-shell-kit again")
+    }
     $state = Get-PasswordState $AdminUser
     if ($state -eq 'set') { Write-Pass "$AdminUser has a password" }
+    elseif ($state -eq 'blank' -and $Golden) { Write-Fail "$AdminUser has an EMPTY password: every seat copies the golden, Shift at boot would give anyone an admin desktop" "set it first: $goldenPasswordCmd" }
     elseif ($state -eq 'blank') { Write-Warn "$AdminUser has an EMPTY password: with the kiosk, Shift at boot gives anyone an admin desktop" 'set it before players arrive: set-club-password-run-as-admin.cmd (shell-install offers it)' }
     else { Write-Warn "$AdminUser password state: $state" }
     if ($null -eq $admin.PasswordExpires) { Write-Pass "$AdminUser password never expires" }
+    elseif ($Golden) { Write-Warn ("{0} password expires {1:yyyy-MM-dd}: then Shift at the seats stops working" -f $AdminUser, $admin.PasswordExpires) "$goldenPasswordCmd (it also sets `"never expires`")" }
     else { Write-Warn ("{0} password expires {1:yyyy-MM-dd}: image older than h1d (h1b/h1c)?" -f $AdminUser, $admin.PasswordExpires) 'reimage to h1e BEFORE the shell (a reimage wipes the shell); set-club-password also sets "never expires"' }
 }
 
@@ -373,6 +426,20 @@ if ($KioskUser -ieq $AdminUser) {
 
 foreach ($user in @(Get-LocalUser -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -and $_.Name -ne $AdminUser -and $_.Name -ne $KioskUser })) {
     $isAdmin = $adminSids -contains $user.SID.Value
+    # Эталон: каждая включённая учётка — на экране входа всех мест (Shift при загрузке); seal-golden.ps1 перед каждой
+    # публикацией не пропустит встроенную, второго администратора и пустой пароль — исправить до установки.
+    if ($Golden) {
+        $userName = $user.Name
+        if ($user.SID.Value -match '-500$') { Write-Fail "built-in $userName is enabled: every seat would get it" "net user `"$userName`" /active:no" }
+        elseif ($isAdmin) { Write-Fail "second administrator '$userName': it and its password would be on every seat" "Disable-LocalUser -Name '$userName' (the golden has one admin: $AdminUser)" }
+        else {
+            $userState = Get-PasswordState $userName
+            if ($userState -eq 'blank') { Write-Fail "enabled account '$userName' has an EMPTY password: Shift at every seat would give a desktop outside the kiosk" "Disable-LocalUser -Name '$userName' (or give it a password)" }
+            elseif ($userState -eq 'set') { Write-Info "other account: $userName (standard user with a password; on the sign-in screen of every seat)" }
+            else { Write-Warn "enabled account '$userName': password state $userState" "Disable-LocalUser -Name '$userName' if it is not needed (seal-golden stops on it)" }
+        }
+        continue
+    }
     if ($user.SID.Value -match '-500$') { Write-Warn "built-in Administrator is enabled" 'net user Administrator /active:no (or give it a password)' }
     elseif ($isAdmin -and (Get-PasswordState $user.Name) -eq 'blank') { Write-Warn "administrator '$($user.Name)' has an EMPTY password" "set a password or disable '$($user.Name)'" }
     elseif ($isAdmin) { Write-Info "other administrator: $($user.Name)" }

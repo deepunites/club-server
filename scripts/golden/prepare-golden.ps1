@@ -9,7 +9,9 @@
     а не добавляет его; ошибка одного шага не останавливает остальные. В конце — проверка (строки PASS/WARN).
 
     Что делает:
-      - электропитание: гибернация и быстрый запуск выключены, сон — никогда, PCIe ASPM выключен (экран не трогаем);
+      - электропитание: гибернация и быстрый запуск выключены, сон — никогда, PCIe ASPM выключен (экран не трогаем) —
+        в текущей схеме и в схемах «Высокая» и «Максимальная производительность», если они есть: агент ClubShell включает
+        «Высокую» в начале каждого сеанса игрока;
       - дампы памяти выключены, восстановление при загрузке и WinRE выключены (BCD, reagentc);
       - Windows Update: без автообновлений, без драйверов, версия -TargetRelease (26H2); оптимизация доставки, контроль памяти,
         автоматическое обслуживание, дефрагментация по расписанию, индексатор (WSearch), точки восстановления — выключены;
@@ -62,6 +64,8 @@ $WuPolicy  = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
 $HoldTimeSec    = 120   # MaxRequestHoldTime: сколько iSCSI держит и повторяет запросы при обрыве (по умолчанию 60)
 $DiskTimeoutSec = 120   # disk\TimeOutValue: не меньше удержания, иначе диск отказывает раньше (0x7A)
 $ExclusionPaths = @('G:\', 'H:\')
+# Схемы питания, которые включает агент ClubShell в начале сеанса игрока (PowerControl.HighPerformancePlan / UltimatePerformancePlan).
+$HighPowerSchemes = [ordered]@{ '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c' = '«Высокая производительность»'; 'e9a42b02-d5df-448d-aa00-03f14749eb61' = '«Максимальная производительность»' }
 # Свойства энергосбережения сетевой карты: по отображаемому имени (англ. и рус.) и по ключевому слову реестра.
 $PowerSavingNames    = '(?i)\bEEE\b|Energy.?Efficient|Green.?Ethernet|Power Saving|Ultra Low Power|Энергосбер|Зелён|Зелен'
 $PowerSavingKeywords = '(?i)^\*?EEE$|^AdvancedEEE$|^EnableGreenEthernet$|^PowerSavingMode$|^ULPMode$'
@@ -170,8 +174,8 @@ function Get-NativeOutput([string]$File, [string[]]$Arguments) {
 }
 
 # Текущие индексы настройки схемы питания: последние два числа 0x… в выводе powercfg /query — от сети и от батареи.
-function Get-PowerIndex([string]$SubGroup, [string]$Setting) {
-    $text = Get-NativeOutput 'powercfg.exe' @('/query', 'SCHEME_CURRENT', $SubGroup, $Setting)
+function Get-PowerIndex([string]$SubGroup, [string]$Setting, [string]$Scheme = 'SCHEME_CURRENT') {
+    $text = Get-NativeOutput 'powercfg.exe' @('/query', $Scheme, $SubGroup, $Setting)
     $values = @([regex]::Matches($text, '0x([0-9a-fA-F]{8})') | ForEach-Object { [Convert]::ToInt32($_.Groups[1].Value, 16) })
     if ($values.Count -lt 2) { return $null }
     return @{ AC = $values[$values.Count - 2]; DC = $values[$values.Count - 1] }
@@ -355,6 +359,21 @@ Invoke-Step 'PCIe ASPM выключен (энергосбережение шин
     Invoke-Native 'powercfg.exe' @('/setacvalueindex', 'SCHEME_CURRENT', 'SUB_PCIEXPRESS', 'ASPM', '0')
     Invoke-Native 'powercfg.exe' @('/setdcvalueindex', 'SCHEME_CURRENT', 'SUB_PCIEXPRESS', 'ASPM', '0')
     Invoke-Native 'powercfg.exe' @('/setactive', 'SCHEME_CURRENT')
+}
+
+# Агент ClubShell в начале каждого сеанса включает «Высокую производительность» (если сейчас не она и не «Максимальная»):
+# сон и ASPM — и в них, иначе сеанс игрока шёл бы со сном и ASPM. Только схемы из powercfg /list (GUID не локализован);
+# /setactive не нужен — схема не текущая (текущую настроили шаги выше).
+Invoke-Step 'Схемы «Высокая» и «Максимальная производительность»: сон — никогда, PCIe ASPM выключен' {
+    $listed = Get-NativeOutput 'powercfg.exe' @('/list')
+    foreach ($scheme in $HighPowerSchemes.Keys) {
+        if ($listed -notmatch [regex]::Escape($scheme)) { Write-Line ('{0}: схемы нет — пропуск' -f $HighPowerSchemes[$scheme]); continue }
+        foreach ($setting in @('SUB_SLEEP STANDBYIDLE', 'SUB_PCIEXPRESS ASPM')) {
+            $parts = $setting -split ' '
+            Invoke-Native 'powercfg.exe' @('/setacvalueindex', $scheme, $parts[0], $parts[1], '0')
+            Invoke-Native 'powercfg.exe' @('/setdcvalueindex', $scheme, $parts[0], $parts[1], '0')
+        }
+    }
 }
 
 # ======================================================================================================================
@@ -563,6 +582,15 @@ $standby = Get-PowerIndex 'SUB_SLEEP' 'STANDBYIDLE'
 Test-Check ('сон: никогда (от сети {0} с)' -f $(if ($standby) { $standby.AC } else { '?' })) { $standby -and $standby.AC -eq 0 } 'powercfg /change standby-timeout-ac 0'
 $aspm = Get-PowerIndex 'SUB_PCIEXPRESS' 'ASPM'
 Test-Check ('PCIe ASPM: выкл. (от сети {0})' -f $(if ($aspm) { $aspm.AC } else { '?' })) { $aspm -and $aspm.AC -eq 0 } 'powercfg /setacvalueindex SCHEME_CURRENT SUB_PCIEXPRESS ASPM 0; ASPM выключить и в BIOS'
+$listedSchemes = Get-NativeOutput 'powercfg.exe' @('/list')
+foreach ($scheme in $HighPowerSchemes.Keys) {
+    if ($listedSchemes -notmatch [regex]::Escape($scheme)) { continue }
+    $standby = Get-PowerIndex 'SUB_SLEEP' 'STANDBYIDLE' $scheme
+    $aspm = Get-PowerIndex 'SUB_PCIEXPRESS' 'ASPM' $scheme
+    Test-Check ('{0}: сон — никогда, PCIe ASPM — выкл. (от сети {1} с, {2})' -f $HighPowerSchemes[$scheme], $(if ($standby) { $standby.AC } else { '?' }), $(if ($aspm) { $aspm.AC } else { '?' })) {
+        $standby -and $standby.AC -eq 0 -and $aspm -and $aspm.AC -eq 0
+    } ('powercfg /setacvalueindex {0} SUB_SLEEP STANDBYIDLE 0; powercfg /setacvalueindex {0} SUB_PCIEXPRESS ASPM 0' -f $scheme)
+}
 
 # Дампы и восстановление
 Test-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl' 'CrashDumpEnabled' 0

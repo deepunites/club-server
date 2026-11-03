@@ -56,6 +56,20 @@
          и в самом конце, когда журнал уже закрыт, спрашивает, перезагрузить ли ПК в киоск (есть FAIL — по умолчанию нет).
          Не одобрен за время ожидания — WARN: после одобрения C:\ClubShellKit\kiosk-on-run-as-admin.cmd; до этого
          автовход идёт в Club, и после нового пароля Club перезагрузка останавливается на экране входа.
+    -Golden — эталон бездиска в режиме мастера (передаёт get-shell-kit, когда видит сеанс …:diskless-master; вместе с
+    -AdminUser <администратор эталона>). Шелл ставится в эталон один раз, места получают его с публикацией. Отличия:
+    проверка — shell-preflight -Golden (имя USER, сеанс мастера, пароль администратора эталона уже задан); agent.json
+    и установщик — те же (paths.persistent не пишется: постоянного тома у мест нет); G:/H: после установки сверяются с
+    тем, что было до неё; пароль — по умолчанию не менять (задан до установки); шаг 8 — мастер одобряется как ЭТОТ
+    физический ПК Primer (тот же HWID, что у него как у места): его номер, зона Primer, «Без постоянного диска», и эту
+    запись в кассе не удалять; шаг 9 — kiosk-on -Golden; перезагрузки нет совсем (следующая загрузка мастера — уже
+    киоск player в эталоне): в конце — что дальше (seal-golden.ps1 из набора, потом «Опубликовать»), но только без
+    FAIL: есть FAIL — красным «seal-golden и публикацию не запускать» (seal-golden большую часть проверок шага 6 не
+    повторяет: DNS, помощник, перенаправление папок, G:/H:). Установщик ответил 3010 — киоск не включается:
+    перезагрузить мастер один раз сейчас (до киоска), войти администратором, снова команду get-shell-kit (предложит
+    kiosk-on); метка C:\ClubShellKit\reboot-before-kiosk — kiosk-on -Golden откажет, пока загрузка старше неё (3010 от
+    MSI не виден в ключах RebootPending, которые смотрит проверка). Код выхода при запуске файлом: 0 — без FAIL,
+    2 — есть FAIL, 3 — без FAIL, но эталону до киоска нужна перезагрузка (3010).
     Ключ ПК, пароль и PIN не печатаются и не пишутся в файлы (ключ — только в agent.json до первого старта агента).
     Установка не удалась — заготовленный agent.json удаляется (ключ не остаётся на диске).
     Журнал этого скрипта — C:\ClubShellKit\logs\install-<ПК>-<время>.txt, установщика — setup-<время>*.log там же.
@@ -67,7 +81,8 @@ param(
     [string]$KitDir = 'C:\ClubShellKit',
     [string]$ServerUrl = 'https://clubshell-server-production.up.railway.app',
     [string]$KioskUser = 'player',
-    [string]$AdminUser = 'Club'
+    [string]$AdminUser = 'Club',
+    [switch]$Golden
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # прогресс-бар Invoke-WebRequest в 5.1 замедляет скачивание в разы
@@ -255,15 +270,25 @@ $wroteAgentJson = $false
 $createdDataDir = $false
 $installed = $false
 $rebootIntoKiosk = $false
+$goldenKioskOn = $false
+$rebootBeforeKiosk = $false
+# Режим эталона — дальше в проверку и kiosk-on.
+$modeArgs = @()
+if ($Golden) { $modeArgs = @('-Golden') }
+$kioskOnCmd = Join-Path $KitDir 'kiosk-on-run-as-admin.cmd'
+# Эталон, установщик ответил 3010: метка для kiosk-on -Golden (он не включит киоск, пока загрузка старше неё).
+$RebootMarker = Join-Path $KitDir 'reboot-before-kiosk'
+if ($Golden) { $kioskOnCmd = "powershell -NoProfile -ExecutionPolicy Bypass -File $KitDir\kiosk-on.ps1 -Golden -AdminUser '$AdminUser' (or the get-shell-kit command again)" }
 try {
     Write-Host "ClubShell $Version install on $env:COMPUTERNAME (kiosk account '$KioskUser', server $ServerUrl)" -ForegroundColor Cyan
+    if ($Golden) { Write-Host "GOLDEN MODE: into the diskless golden image (master session), admin '$AdminUser'; no reboot at the end" -ForegroundColor Cyan }
     if ($KioskUser -ieq $AdminUser) { throw "Kiosk account '$KioskUser' is the admin account '$AdminUser'. Nothing was changed." }
 
     # --- 1. Проверка ----------------------------------------------------------------------------------------------
     Write-Title 'Step 1: preflight check'
     $preflight = Join-Path $KitDir 'shell-preflight.ps1'
     if (-not (Test-Path -LiteralPath $preflight)) { throw "$preflight is missing: copy the whole kit folder. Nothing was changed." }
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $preflight -ServerUrl $ServerUrl -KioskUser $KioskUser -AdminUser $AdminUser -KitDir $KitDir
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $preflight -ServerUrl $ServerUrl -KioskUser $KioskUser -AdminUser $AdminUser -KitDir $KitDir @modeArgs
     $preflightCode = $LASTEXITCODE
     if ($preflightCode -notin @(0, 1, 2)) { throw "The preflight check itself failed (exit code $preflightCode). Nothing was changed." }
     if ($preflightCode -ge 2) { throw 'The preflight check has FAIL lines (above). Fix them and run again. Nothing was changed.' }
@@ -319,6 +344,8 @@ try {
     # --- 4. Снимок для сверки, agent.json с ключом ПК ---------------------------------------------------------------------
     $dnsBefore = Get-DnsSnapshot
     $helperBefore = Get-HelperState
+    # Эталон: G:/H: в сеансе мастера бывают не подключены (WARN проверки) — после установки сверяем с этим.
+    $libsBefore = @(@('G', 'H') | Where-Object { Get-Volume -DriveLetter $_ -ErrorAction SilentlyContinue })
     $dnsBefore.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name): $($_.Value)" } |
         Set-Content -LiteralPath (Join-Path $LogDir "dns-before-$stamp.txt") -Encoding UTF8
 
@@ -397,6 +424,15 @@ try {
     $process = Start-Process -FilePath $setup -ArgumentList $arguments -Wait -PassThru
     $exitCode = $process.ExitCode
     if ($exitCode -eq 0) { Write-Pass 'setup finished (exit code 0)' }
+    elseif ($exitCode -eq 3010 -and $Golden) {
+        # Эталон: перезагрузка — только до kiosk-on (после него мастер загрузился бы в киоск player).
+        Write-Pass 'setup finished (exit code 3010: Windows wants a reboot; golden: once, before the kiosk)'
+        $rebootBeforeKiosk = $true
+        # MSI 3010 — обычно PendingFileRenameOperations, не ключи RebootPending: без метки второй запуск get-shell-kit
+        # предложил бы kiosk-on, и эталон ушёл бы в seal-golden с несделанной перезагрузкой.
+        try { Set-Content -LiteralPath $RebootMarker -Value "ClubShell setup exit code 3010 at $(Get-Date -Format s): reboot the master once before kiosk-on" -Encoding ASCII -ErrorAction Stop }
+        catch { Write-Warn "cannot write $RebootMarker ($($_.Exception.Message))" 'reboot the master once before kiosk-on anyway' }
+    }
     elseif ($exitCode -eq 3010) { Write-Pass 'setup finished (exit code 3010: Windows wants a reboot)' }
     else {
         $hint = switch ($exitCode) { 1602 { 'cancelled' } 1618 { 'another install is running: wait or reboot' } 1638 { 'another version is installed: run shell-uninstall' } default { 'see the setup log' } }
@@ -436,7 +472,7 @@ try {
     }
     $adminAccount = Get-LocalUser -Name $AdminUser -ErrorAction SilentlyContinue
     if ($adminAccount -and (Get-GroupMemberSids 'S-1-5-32-544') -contains $adminAccount.SID.Value) { Write-Pass "$AdminUser is still an administrator" }
-    else { Write-Fail "$AdminUser is no longer an administrator" 'Computer Management -> Local Users and Groups -> Administrators: add Club back' }
+    else { Write-Fail "$AdminUser is no longer an administrator" "Computer Management -> Local Users and Groups -> Administrators: add $AdminUser back" }
 
     # Перенаправление папок (выключено в agent.json) создало бы <диск>:\ClubShell\Users\<киоск>.
     $redirected = @('G:\ClubShell', 'H:\ClubShell') | Where-Object { Test-Path -LiteralPath $_ }
@@ -451,6 +487,7 @@ try {
     }
     foreach ($letter in @('G', 'H')) {
         if (Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue) { Write-Pass "${letter}: is still mounted" }
+        elseif ($Golden -and $libsBefore -notcontains $letter) { Write-Info "${letter}: was not mounted before the install either (master session)" }
         else { Write-Fail "${letter}: is gone" 'check the helper (panel "Diskless")' }
     }
 
@@ -476,9 +513,14 @@ try {
     Write-Title "Step 7: $AdminUser password and the kiosk admin PIN"
     Write-Info "With the kiosk on, holding Shift at boot skips auto-logon and shows the sign-in screen: $AdminUser must have a password before players arrive."
     $passwordScript = Join-Path $KitDir 'set-club-password.ps1'
-    if ((Test-Path -LiteralPath $passwordScript) -and (Read-YesNo "Set (or change) the $AdminUser password now?" $true)) {
+    # Эталон: пароль администратора уже задан (пустой — FAIL проверки), менять не по умолчанию; PIN — один на все места.
+    if ($Golden) { Write-Info 'Golden: the admin password and the PIN go to every seat with the publish (seal-golden keeps secure\admin-pin).' }
+    if ((Test-Path -LiteralPath $passwordScript) -and (Read-YesNo "Set (or change) the $AdminUser password now?" (-not $Golden))) {
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $passwordScript -AdminUser $AdminUser
-        if ($LASTEXITCODE) { Write-Warn "$AdminUser password not set" "run set-club-password-run-as-admin.cmd later, BEFORE players" }
+        if ($LASTEXITCODE -and $Golden) { Write-Info "$AdminUser password not changed (it was set before the install: the preflight checked it)" }
+        elseif ($LASTEXITCODE) { Write-Warn "$AdminUser password not set" "run set-club-password-run-as-admin.cmd later, BEFORE players" }
+    } elseif ($Golden) {
+        Write-Info "$AdminUser keeps its password (set before the install: the preflight checked it)"
     } else {
         Write-Warn "$AdminUser password not changed here" 'set-club-password-run-as-admin.cmd, BEFORE players'
     }
@@ -493,6 +535,21 @@ try {
 
     # --- 8. Касса ----------------------------------------------------------------------------------------------------
     Write-Title 'Step 8: in the kassa (owner)'
+    if ($Golden) {
+        # Мастер — тот же физический ПК, что и место (HWID без iSCSI-диска): его запись и есть это место. Номер по
+        # IP .1NN (план адресов клуба) — подсказка; сверить с панелью club-server (место по IP/MAC).
+        $seatHint = 'the number of this seat (club-server panel: seat by IP/MAC)'
+        foreach ($ip in @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { "$($_.IPAddress)" })) {
+            if ($ip -match '^192\.168\.1\.1(\d{2})$' -and [int]$Matches[1] -ge 1) { $seatHint = "{0} (IP {1}; check in the club-server panel)" -f [int]$Matches[1], $ip }
+        }
+        Write-Host "  1. Open the kassa -> 'Zal i ustroystva' (Hall and devices): a new pending PC named USER (number max+1), maintenance ON."
+        Write-Host '     It is the master = THIS physical Primer seat (same hardware, same HWID as when it boots as a seat).'
+        Write-Host "  2. Set its number to $seatHint; zone Primer (spelled as in the catalog game zones)."
+        Write-Host "  3. Turn 'Bez postoyannogo diska' (no persistent disk) ON: C: resets at every boot (owner only)."
+        Write-Host "  4. Switch 'Obsluzhivanie' (maintenance) OFF: that approves it. NEVER delete this row: it is that seat."
+        Write-Host "  5. 'Politika PK' (PC policy): webFilter.dnsServers stays [] and blockResolvedIps false; usb.allowStorage as decided."
+        Write-Host '  6. Then this script turns the kiosk on in the golden (step 9). No reboot: next seal-golden, then Publish.'
+    } else {
     $number = if ($env:COMPUTERNAME -match '^PC-(\d{2})$') { [int]$Matches[1] } else { '?' }
     Write-Host "  1. Open the kassa -> 'Zal i ustroystva' (Hall and devices): the new PC $env:COMPUTERNAME is there, maintenance ON."
     Write-Host "  2. Check its number is $number (taken from the Windows name). Do not add PCs by hand."
@@ -500,6 +557,7 @@ try {
     Write-Host "  4. Switch 'Obsluzhivanie' (maintenance) OFF: that approves the PC."
     Write-Host "  5. 'Politika PK' (PC policy): webFilter.dnsServers stays [] and blockResolvedIps false; usb.allowStorage as decided."
     Write-Host '  6. Then this script turns the kiosk on (step 9) and offers the reboot; check the games as a player (docs/shell-install.md).'
+    }
     $approved = $logState.Registration -eq 'registered'
     if (-not $approved -and (Read-YesNo 'Wait here until the PC is approved in the kassa (up to 10 minutes)?' $true)) {
         $approved = Wait-Until { (Get-AgentLogState).Registration -eq 'registered' } 600
@@ -519,21 +577,29 @@ try {
     # --- 9. Киоск ----------------------------------------------------------------------------------------------------
     # kiosk-on.ps1 отдельным процессом, без перезагрузки: о ней спрашиваем в самом конце, когда журнал закрыт.
     Write-Title 'Step 9: kiosk on'
-    $kioskOnCmd = Join-Path $KitDir 'kiosk-on-run-as-admin.cmd'
-    if ($approved) {
+    if ($rebootBeforeKiosk) {
+        # Эталон, установщик ответил 3010: до киоска — одна перезагрузка (автовход ещё не в player).
+        Write-Warn 'kiosk not on yet: the installer wants a reboot first (exit code 3010)' "reboot the master ONCE now (before the kiosk), sign in as $AdminUser, run the get-shell-kit command again: it offers kiosk-on"
+    } elseif ($approved) {
         $kioskOnScript = Join-Path $KitDir 'kiosk-on.ps1'
         if (-not (Test-Path -LiteralPath $kioskOnScript)) {
             Write-Fail "$kioskOnScript is missing" "get the kit again, then $kioskOnCmd"
         } else {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $kioskOnScript -KitDir $KitDir -KioskUser $KioskUser -NoReboot
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $kioskOnScript -KitDir $KitDir -KioskUser $KioskUser -AdminUser $AdminUser -NoReboot @modeArgs
             $kioskOnCode = $LASTEXITCODE
-            if ($kioskOnCode -eq 0) {
+            if ($kioskOnCode -eq 0 -and $Golden) {
+                Write-Pass "kiosk on in the golden: auto-logon to '$KioskUser' with the ClubShell shell; the seats start it at their next boot"
+                $goldenKioskOn = $true
+            } elseif ($kioskOnCode -eq 0) {
                 Write-Pass "kiosk on: auto-logon to '$KioskUser' with the ClubShell shell from the next boot"
                 $rebootIntoKiosk = $true
             } else {
                 Write-Fail "kiosk not turned on (kiosk-on exit code $kioskOnCode, see above)" $kioskOnCmd
             }
         }
+    } elseif ($Golden) {
+        Write-Warn 'kiosk not on yet: the master is not approved in the kassa' "after the approval: $kioskOnCmd"
+        Write-Info 'Do not publish the golden without the kiosk: the seats would boot to the admin auto-logon (or the sign-in screen).'
     } else {
         Write-Warn 'kiosk not on yet: the PC is not approved in the kassa' "after the approval: $kioskOnCmd"
         Write-Info "Until then auto-logon still goes to $AdminUser with its old password: after a new $AdminUser password a reboot stops"
@@ -556,9 +622,27 @@ try {
     Write-Host ''
     $color = if ($Count.Fail -gt 0) { 'Red' } elseif ($Count.Warn -gt 0) { 'Yellow' } else { 'Green' }
     Write-Host ("Install result for {0}: {1} FAIL, {2} WARN. Log: {3}" -f $env:COMPUTERNAME, $Count.Fail, $Count.Warn, $LogDir) -ForegroundColor $color
-    if ($installed) { Write-Host 'Rollback: shell-uninstall-run-as-admin.cmd (from C:\ClubShellKit; USB sticks no longer work on this PC).' }
+    if ($installed -and $Golden) { Write-Host 'Rollback before the publish: shell-uninstall-run-as-admin.cmd in this master session, or Claude rolls the golden zvol back to the pre-shell snapshot.' }
+    elseif ($installed) { Write-Host 'Rollback: shell-uninstall-run-as-admin.cmd (from C:\ClubShellKit; USB sticks no longer work on this PC).' }
+    # Эталон: перезагрузки нет — что дальше. Журнал закрывается после этих строк, набор (и журнал) удалит seal-golden.
+    # Только без FAIL: seal-golden большую часть проверок шага 6 не повторяет, и FAIL ушёл бы на все места.
+    if ($goldenKioskOn -and $Count.Fail -eq 0) {
+        Write-Host ''
+        Write-Host 'GOLDEN: ClubShell and the kiosk are in the master. Do NOT reboot it (the next boot logs on to the player kiosk).' -ForegroundColor Yellow
+        Write-Host '  1. In this admin window (current folder anything but C:\ClubShellKit):' -ForegroundColor Yellow
+        Write-Host "       powershell -NoProfile -ExecutionPolicy Bypass -File $KitDir\seal-golden.ps1" -ForegroundColor Yellow
+        Write-Host "     It stops and cleans ClubShell and the helper, checks the golden, deletes $KitDir and shuts the PC down." -ForegroundColor Yellow
+        Write-Host '     Any WARN: fix it and run it again, no reboot in between.' -ForegroundColor Yellow
+        Write-Host "  2. Panel 'Diskless' -> Publish (the PC is off), then one seat first (docs/shell-install.md, 'Diskless')." -ForegroundColor Yellow
+    } elseif ($goldenKioskOn) {
+        Write-Host ''
+        Write-Host 'GOLDEN: FAIL lines above - do NOT run seal-golden or publish; fix them or roll back first.' -ForegroundColor Red
+        Write-Host '  Do NOT reboot the master either (the next boot logs on to the player kiosk); take a photo of this window.' -ForegroundColor Red
+    }
     try { Stop-Transcript | Out-Null } catch { }
 }
+# Эталон, установщик ответил 3010: одна перезагрузка до киоска. После журнала: Restart-Computer закрывает окно.
+if ($rebootBeforeKiosk -and $installed -and (Read-YesNo 'Reboot the master now (once, before the kiosk)?' $true)) { Restart-Computer -Force }
 # Киоск включён — перезагрузка в него. После журнала: Restart-Computer закрывает окно, итог уже записан. Есть FAIL — по
 # умолчанию нет: после перезагрузки в киоск исправлять их можно только через Shift -> Club.
 if ($rebootIntoKiosk) {
@@ -566,4 +650,5 @@ if ($rebootIntoKiosk) {
     if (-not $clean) { Write-Host 'There are FAIL lines above: take a photo of this window; reboot only once they are sorted out.' -ForegroundColor Red }
     if (Read-YesNo 'Reboot now into the kiosk?' $clean) { Restart-Computer -Force }
 }
-if ($PSCommandPath) { if ($Count.Fail -gt 0) { exit 2 } else { exit 0 } }
+# 3 — эталону до киоска нужна перезагрузка (3010): get-shell-kit отличает это от «ещё не одобрен» (оба без FAIL).
+if ($PSCommandPath) { if ($Count.Fail -gt 0) { exit 2 } elseif ($rebootBeforeKiosk) { exit 3 } else { exit 0 } }
