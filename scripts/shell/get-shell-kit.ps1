@@ -80,11 +80,14 @@ function Read-YesNo([string]$Question, [bool]$Default) {
 }
 
 # Проверки — как в shell-preflight.ps1. Любая ошибка запроса — «нет»: установка повторяема, лишний запуск безвреден.
+$LanRuleNames = @('Club-LAN-Games-UDP', 'Club-LAN-WC3-UDP', 'Club-LAN-WC3-TCP')   # как $Rules в install-lan-firewall.ps1
 function Test-LanFirewall {
     try {
         $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction SilentlyContinue)
         $notifyOff = $profiles.Count -gt 0 -and @($profiles | Where-Object { "$($_.NotifyOnListen)" -ne 'False' }).Count -eq 0
-        $notifyOff -and @(Get-NetFirewallRule -Group 'Club LAN games' -ErrorAction SilentlyContinue).Count -gt 0
+        # Все правила текущего install-lan-firewall.ps1: ПК со старым набором (без Warcraft III) получает его заново.
+        $names = @(Get-NetFirewallRule -Group 'Club LAN games' -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+        $notifyOff -and @($LanRuleNames | Where-Object { $names -notcontains $_ }).Count -eq 0
     } catch { $false }
 }
 function Test-MaxRefresh {

@@ -521,8 +521,11 @@ Write-Info "USBSTOR Start=$usbStart now (3 = USB sticks work); right after the i
 
 $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction SilentlyContinue)
 $notifyOff = $profiles.Count -gt 0 -and @($profiles | Where-Object { "$($_.NotifyOnListen)" -ne 'False' }).Count -eq 0
-$lanRule = Get-NetFirewallRule -Group 'Club LAN games' -ErrorAction SilentlyContinue
-if ($notifyOff -and $lanRule) { Write-Pass 'firewall for LAN games is set (install-lan-firewall.ps1)' }
+$lanNames = @(Get-NetFirewallRule -Group 'Club LAN games' -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+# Правила текущего install-lan-firewall.ps1 ($Rules): без Warcraft III — набор старый, скрипт запускается снова.
+$lanMissing = @(@('Club-LAN-Games-UDP', 'Club-LAN-WC3-UDP', 'Club-LAN-WC3-TCP') | Where-Object { $lanNames -notcontains $_ })
+if ($notifyOff -and $lanMissing.Count -eq 0) { Write-Pass 'firewall for LAN games is set (install-lan-firewall.ps1)' }
+elseif ($notifyOff -and $lanNames.Count -gt 0) { Write-Warn "firewall for LAN games is old (missing $($lanMissing -join ', ')): Warcraft III LAN games are blocked" $LanFirewallCmd }
 else { Write-Warn 'firewall for LAN games is not set: as a standard user every "allow access" prompt becomes a block rule' $LanFirewallCmd }
 
 if (Get-ScheduledTask -TaskName 'ClubMaxRefresh' -ErrorAction SilentlyContinue) { Write-Pass 'ClubMaxRefresh task exists (monitor refresh rate at every logon, player too)' }

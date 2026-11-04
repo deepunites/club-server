@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-    Брандмауэр Windows для сетевой игры по локалке клуба (CS 1.6, CS2 и другие игры Valve): впускает игровой UDP от ПК
-    клуба и убирает правила-блокировки, которые Windows создала для игр.
+    Брандмауэр Windows для сетевой игры по локалке клуба (CS 1.6, CS2 и другие игры Valve, Warcraft III / DotA): впускает
+    игровой трафик от ПК клуба и убирает правила-блокировки, которые Windows создала для игр.
 .DESCRIPTION
     Почему не работает без него: входящие по умолчанию запрещены. Когда игра поднимает сервер, Windows показывает окно
     «Разрешить доступ»; оно прячется за полноэкранной игрой, а «Отмена» (у не-администратора — любой ответ) создаёт
@@ -9,10 +9,15 @@
     Что делает (PowerShell от администратора; на эталоне бездиска — в режиме мастера, до seal-golden.ps1):
       1. выключает это окно на всех профилях (NotifyOnListen = False): правила-блокировки больше не появляются;
       2. удаляет входящие правила Block, созданные этим окном («Query User», для любой программы — без них остаётся
-         обычный запрет по умолчанию), и любые входящие Block для игр hl.exe, cs2.exe, csgo.exe, hlds.exe, srcds.exe;
-      3. создаёт правило группы «Club LAN games»: входящий UDP 27000-27050 только с адресов ПК клуба
-         (192.168.1.101-199 — места, .201 — сервер клуба для проверки), на всех профилях (Public/Private не важен).
-         Игровой порт 27015, вкладка LAN ищет на 27015-27020, запас — второй сервер на одном ПК.
+         обычный запрет по умолчанию), и любые входящие Block для игр hl.exe, cs2.exe, csgo.exe, hlds.exe, srcds.exe,
+         war3.exe, Frozen Throne.exe, Warcraft III.exe;
+      3. создаёт правила группы «Club LAN games» только с адресов ПК клуба (192.168.1.101-199 — места, .201 — сервер
+         клуба для проверки), на всех профилях (Public/Private не важен):
+         - входящий UDP 27000-27050 — игры Valve: игровой порт 27015, вкладка LAN ищет на 27015-27020, запас — второй
+           сервер на одном ПК;
+         - Warcraft III (классический, war3.exe): входящий UDP 6112 — объявления игры и поиск в «Локальной сети» (их
+           слушают и хост, и игроки), входящий TCP 6112-6119 — вход в игру на хосте (порт по умолчанию 6112, запас —
+           другой порт в настройках игры).
     Окно больше не спрашивает ни про одну программу: сетевой игре не из Valve (другие порты) нужно своё правило —
     добавить строку в $Rules и запустить скрипт снова.
     Сеть остаётся Public (ПК не видят друг друга в «Сети», общих папок нет), брандмауэр остаётся включённым.
@@ -26,8 +31,11 @@ $Group = 'Club LAN games'
 $Remote = @('192.168.1.101-192.168.1.199', '192.168.1.201')
 $Rules = @(
     @{ Name = 'Club-LAN-Games-UDP'; DisplayName = 'Club LAN games UDP 27000-27050'; Protocol = 'UDP'; LocalPort = '27000-27050' }
+    @{ Name = 'Club-LAN-WC3-UDP'; DisplayName = 'Club LAN Warcraft III UDP 6112'; Protocol = 'UDP'; LocalPort = '6112' }
+    @{ Name = 'Club-LAN-WC3-TCP'; DisplayName = 'Club LAN Warcraft III TCP 6112-6119'; Protocol = 'TCP'; LocalPort = '6112-6119' }
 )
-$games = @('hl.exe', 'cs2.exe', 'csgo.exe', 'hlds.exe', 'srcds.exe')
+# Имена файлов — в нижнем регистре (сравнение с ToLowerInvariant() в Get-GameBlockRules).
+$games = @('hl.exe', 'cs2.exe', 'csgo.exe', 'hlds.exe', 'srcds.exe', 'war3.exe', 'frozen throne.exe', 'warcraft iii.exe')
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Run PowerShell as Administrator.'
