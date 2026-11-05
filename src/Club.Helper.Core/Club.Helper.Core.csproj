@@ -7,4 +7,8 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.12" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\Club.Saves\Club.Saves.csproj" />
+  </ItemGroup>
+
 </Project>

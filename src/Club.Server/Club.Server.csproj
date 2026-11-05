@@ -12,6 +12,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Club.Saves\Club.Saves.csproj" />
     <ProjectReference Include="..\Club.TrueNas\Club.TrueNas.csproj" />
   </ItemGroup>
 
