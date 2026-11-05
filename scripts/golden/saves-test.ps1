@@ -66,7 +66,9 @@ try {
     $line = $request | ConvertTo-Json -Compress
     Write-Host "Request: $line"
 
-    $pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', $PipeName, [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
+    # Identification only: whoever serves the pipe may learn who we are but cannot act as us (Administrator). Without
+    # it .NET connects with the Windows default, impersonation, and a fake pipe could run code with our token.
+    $pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', $PipeName, [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous, [System.Security.Principal.TokenImpersonationLevel]::Identification)
     try {
         try { $pipe.Connect($ConnectTimeoutMs) }
         catch {
@@ -75,6 +77,26 @@ try {
                 throw "No pipe \\.\pipe\$PipeName within $($ConnectTimeoutMs / 1000) s: is ClubDisklessHelper 1.7.0 or newer running? (Get-Service ClubDisklessHelper)"
             }
             throw "Pipe \\.\pipe\$PipeName not opened: $($base.GetType().Name): $($base.Message)"
+        }
+        # The pipe must be served by the helper service itself: any process may create a pipe with this name while the
+        # service is stopped or restarting.
+        if (-not ('ClubSavesPipeNative' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class ClubSavesPipeNative {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint serverProcessId);
+}
+'@
+        }
+        [uint32]$serverPid = 0
+        if (-not [ClubSavesPipeNative]::GetNamedPipeServerProcessId($pipe.SafePipeHandle, [ref]$serverPid)) {
+            throw "Cannot tell who serves \\.\pipe\$PipeName (error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+        }
+        $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='ClubDisklessHelper'"
+        if ($null -eq $service -or [uint32]$service.ProcessId -ne $serverPid) {
+            throw "\\.\pipe\$PipeName is served by process $serverPid, not by the ClubDisklessHelper service: nothing sent"
         }
         $watch = [Diagnostics.Stopwatch]::StartNew()
         $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($line + "`n")
