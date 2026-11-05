@@ -57,7 +57,7 @@ public sealed class SavesCommandHandlerTests(SavesCommandHandlerTests.Stand stan
     /// <summary>Один ПК: профиль игрока по <see cref="Sid"/>, папка состояния помощника и обработчик канала над ними.</summary>
     private sealed record Pc(SavesCommandHandler Handler, string Profile);
 
-    private Pc NewPc(string name, DelegatingHandler? transfers = null)
+    private Pc NewPc(string name, DelegatingHandler? transfers = null, IProfileLocator? locator = null)
     {
         var directory = Path.Combine(_work, name);
         var profile = Path.Combine(directory, "Users", "player");
@@ -66,7 +66,7 @@ public sealed class SavesCommandHandlerTests(SavesCommandHandlerTests.Stand stan
         profiles.Paths[Sid] = profile;
         var api = new DisklessApiClient(stand.Server.CreateClient(), new HelperOptions { ClubKey = ServerFixture.ClubKey }, new InMemoryCredentialStore(),
             new FakeIdentity($"hwid-{name}-{Guid.NewGuid():N}"), transfers is null ? null : stand.Server.CreateDefaultClient(transfers));
-        var saves = new SavesService(api, profiles, new FakeDrives(), () => false, Path.Combine(directory, "ProgramData", "ClubDiskless"), new ManualClock(),
+        var saves = new SavesService(api, locator ?? profiles, new FakeDrives(), () => false, Path.Combine(directory, "ProgramData", "ClubDiskless"), new ManualClock(),
             new ListLogger<SavesService>());
         return new Pc(new SavesCommandHandler(saves, Version), profile);
     }
@@ -216,6 +216,23 @@ public sealed class SavesCommandHandlerTests(SavesCommandHandlerTests.Stand stan
         await cancelled.CancelAsync();
         Assert.Equal((false, SavesErrors.Internal), Parse(await pc.Handler.HandleAsync(Detach(NewPlayer()), cancelled.Token)));
         Assert.Equal((false, SavesErrors.Internal), Parse(await pc.Handler.HandleAsync(Attach(NewPlayer()), cancelled.Token)));
+    }
+
+    [Fact]
+    public async Task Unexpected_exception_is_internal()
+    {
+        // Сбой кода Windows (реестр профилей) не выходит из HandleAsync: шелл получает internal с текстом для журнала.
+        var pc = NewPc("A", locator: new ThrowingProfiles());
+        var response = await pc.Handler.HandleAsync(Attach(NewPlayer()), CancellationToken.None);
+        Assert.Equal((false, SavesErrors.Internal), Parse(response));
+        using var document = JsonDocument.Parse(response);
+        Assert.Contains(nameof(InvalidOperationException), document.RootElement.GetProperty("message").GetString());
+    }
+
+    /// <summary>Профиль по SID не читается: исключение вместо <c>null</c>.</summary>
+    private sealed class ThrowingProfiles : IProfileLocator
+    {
+        public string? ProfilePath(string sid) => throw new InvalidOperationException("ProfileList is not readable");
     }
 
     /// <summary>Задерживает первый запрос выдачи (<c>POST …/attach</c>), пока тест не отпустит.</summary>

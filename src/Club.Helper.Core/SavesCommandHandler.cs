@@ -21,11 +21,13 @@ public sealed class SavesCommandHandler(SavesService saves, string helperVersion
     /// <summary>Наибольшая длина строки запроса в символах (без <c>\n</c>).</summary>
     public const int MaxRequestLength = 4096;
 
-    /// <summary>Имена команд в поле <c>op</c> (spec п. 4.1).</summary>
+    /// <summary>Команда в поле <c>op</c> (spec п. 4.1): проверка «помощник жив», ответ с версией помощника.</summary>
     public const string PingOp = "ping";
 
+    /// <summary>Команда в поле <c>op</c>: выдать сохранения игрока при входе (<c>playerId</c>, <c>windowsUserSid</c>).</summary>
     public const string AttachOp = "profile.attach";
 
+    /// <summary>Команда в поле <c>op</c>: забрать сохранения игрока в конце сеанса (<c>playerId</c>).</summary>
     public const string DetachOp = "profile.detach";
 
     private readonly SemaphoreSlim _gate = new(1, 1);
