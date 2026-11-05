@@ -47,9 +47,16 @@ public sealed class SaveStore(SavesOptions options, ILogger<SaveStore> logger)
     /// <summary>Новая пустая папка <c>.tmp/&lt;guid&gt;</c> для приёма (<c>.tmp</c> создаётся, если её нет).</summary>
     public string NewTempDirectory()
     {
-        var directory = Path.Combine(Temp, Guid.NewGuid().ToString("N"));
+        var directory = NewTempPath();
         Directory.CreateDirectory(directory);
         return directory;
+    }
+
+    /// <summary>Свободное имя <c>.tmp/&lt;guid&gt;</c> (сама папка не создаётся, <c>.tmp</c> — создаётся).</summary>
+    private string NewTempPath()
+    {
+        Directory.CreateDirectory(Temp);
+        return Path.Combine(Temp, Guid.NewGuid().ToString("N"));
     }
 
     /// <summary>
@@ -85,15 +92,35 @@ public sealed class SaveStore(SavesOptions options, ILogger<SaveStore> logger)
         Directory.Move(incoming, current);
     }
 
-    /// <summary>Удаляет текущую версию и <c>.prev</c> игрока (панель: «Удалить»). Нечего удалять — не ошибка.</summary>
+    /// <summary>
+    /// Удаляет текущую версию и <c>.prev</c> игрока (панель: «Удалить»). Нечего удалять — не ошибка. Обе папки сначала
+    /// переносятся в <c>.tmp/</c> (переименование атомарно; <c>.prev</c> первой — иначе при сбое между переносами она
+    /// выдавалась бы вместо текущей), потом удаляются: сбой посреди удаления не оставляет полупустую папку, которую
+    /// выдали бы как сохранение игрока. Что не удалилось — предупреждение в журнале, остаток убирает <see cref="CleanTemp"/>.
+    /// </summary>
     public void Delete(string playerId)
     {
         var current = PlayerDirectory(playerId);
-        foreach (var directory in new[] { current, current + PreviousSuffix })
+        var moved = new List<string>();
+        foreach (var directory in new[] { current + PreviousSuffix, current })
         {
             if (Directory.Exists(directory))
             {
-                Directory.Delete(directory, recursive: true);
+                var trash = NewTempPath();
+                Directory.Move(directory, trash);
+                moved.Add(trash);
+            }
+        }
+
+        foreach (var trash in moved)
+        {
+            try
+            {
+                Directory.Delete(trash, recursive: true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                logger.LogWarning(ex, "Saves of player {PlayerId} moved to {Path} but not removed", playerId, trash);
             }
         }
     }

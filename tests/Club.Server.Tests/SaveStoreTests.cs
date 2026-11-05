@@ -129,9 +129,47 @@ public sealed class SaveStoreTests : IDisposable
         Assert.False(Directory.Exists(Path.Combine(_root, PlayerId + ".prev")));
         Assert.Null(store.CurrentDirectory(PlayerId));
         Assert.Equal("x", Version(store.CurrentDirectory(other)!, entry));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(Path.Combine(_root, ".tmp")));
 
         // Удалять нечего — не ошибка.
         store.Delete(PlayerId);
+    }
+
+    [Fact]
+    public void Delete_hides_both_even_when_files_stick()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var store = Store();
+        var entry = Guid.NewGuid();
+        store.Promote(PlayerId, Upload(store, entry, "1"));
+        store.Promote(PlayerId, Upload(store, entry, "2"));
+        // Папка без права записи: файл в ней не удалить (сбой посреди рекурсивного удаления).
+        var stuck = Path.Combine(_root, PlayerId, entry.ToString("D"));
+        File.SetUnixFileMode(stuck, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+        try
+        {
+            store.Delete(PlayerId);
+
+            // Наполовину удалённая папка не выдаётся как сохранение игрока, и .prev не всплывает вместо неё.
+            Assert.False(Directory.Exists(Path.Combine(_root, PlayerId)));
+            Assert.False(Directory.Exists(Path.Combine(_root, PlayerId + ".prev")));
+            Assert.Null(store.CurrentDirectory(PlayerId));
+        }
+        finally
+        {
+            foreach (var directory in Directory.EnumerateDirectories(_root, "*", SearchOption.AllDirectories))
+            {
+                File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            }
+        }
+
+        // Остаток лежит в .tmp — его убирает очистка при старте.
+        store.CleanTemp();
+        Assert.Empty(Directory.EnumerateFileSystemEntries(Path.Combine(_root, ".tmp")));
     }
 
     [Fact]
