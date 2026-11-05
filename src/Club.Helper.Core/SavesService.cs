@@ -13,9 +13,12 @@ namespace Club.Helper.Core;
 /// исходное содержимое, поверх — файлы игрока (записи архива, которых нет в списке, пропускаются). Ошибка после ответа
 /// сервера — аренда снимается, <c>internal</c>.
 /// detach: только если этому игроку выдано здесь (иначе <c>notAttached</c> и ничего не отправляется: пустые или чужие
-/// папки не затирают прошлую версию на сервере); упаковка во временный файл без исключений из настроек, занятые файлы —
-/// повтор <see cref="BusyRetries"/> раза через <see cref="BusyRetryDelay"/>; больше лимита — аренда снимается с отметкой
-/// <c>overLimit</c> у игрока на сервере (для панели), <c>overLimit</c>; отправка.
+/// папки не затирают прошлую версию на сервере); профиль выдачи стёрт до detach или посреди упаковки (нет метки выдачи в
+/// корне профиля) — аренда снимается, <c>profileNotFound</c>, ничего не отправляется; упаковка во временный файл без
+/// исключений из настроек, занятые файлы — повтор <see cref="BusyRetries"/> раза через <see cref="BusyRetryDelay"/>;
+/// больше лимита — аренда снимается с отметкой <c>overLimit</c> у игрока на сервере (для панели), <c>overLimit</c>;
+/// отправка. Выдача кончилась (кроме режима мастера) — папки на G:/H: снова с исходным содержимым: гость после игрока
+/// его файлов не видит.
 /// «Выдано» — в памяти (spec п. 4.3): после перезапуска службы detach отвечает <c>notAttached</c>, на сервере остаётся
 /// прошлая версия. Папки записей, пропущенных на этом ПК (библиотека не подключена, нет исходного содержимого и т. п.),
 /// не трогаются, а их файлы из архива сервера ждут в <c>saves-carry</c> и уходят в detach как были: сервер заменяет папку
@@ -82,10 +85,12 @@ public sealed class SavesService(
     private sealed record Folder(Guid Id, string Directory, string Root);
 
     /// <summary>
-    /// Выдача: кому, какие папки разложены (<paramref name="Folders"/>) и где файлы игрока для записей, пропущенных на этом
-    /// ПК (<paramref name="Carried"/>, в <c>saves-carry</c>).
+    /// Выдача: кому, какие папки разложены (<paramref name="Folders"/>), где файлы игрока для записей, пропущенных на этом
+    /// ПК (<paramref name="Carried"/>, в <c>saves-carry</c>), метка выдачи в корне профиля (<paramref name="Marker"/>) и
+    /// исходное содержимое разложенных папок на буквах библиотек (<paramref name="Baselines"/>).
     /// </summary>
-    private sealed record Session(string PlayerId, IReadOnlyList<Folder> Folders, IReadOnlyList<Folder> Carried);
+    private sealed record Session(string PlayerId, IReadOnlyList<Folder> Folders, IReadOnlyList<Folder> Carried, string Marker,
+        IReadOnlyList<(Folder Folder, string Zip)> Baselines);
 
     /// <summary>
     /// Состояние исходного содержимого записи: для какой версии библиотеки и какого шаблона снято;
@@ -215,6 +220,7 @@ public sealed class SavesService(
             return (SavesResult.Fail(SavesErrors.ServerUnavailable, ex.Message), 0, 0);
         }
 
+        string? marker = null;
         await using (attach)
         {
             try
@@ -226,6 +232,7 @@ public sealed class SavesService(
                 }
 
                 DropCarry();
+                marker = CreateMarker(profile);
                 var baselines = new List<(Folder Folder, string Zip)>();
                 var skipped = new List<Guid>();
                 var folders = Folders(attach.Config, profile, _libraries, baselines, skipped);
@@ -248,12 +255,17 @@ public sealed class SavesService(
                         unknownIsError: false);
                 }
 
-                _attached = new Session(id, folders, carried);
+                _attached = new Session(id, folders, carried, marker, baselines);
                 return (SavesResult.Success, unpacked.Bytes, unpacked.Files);
             }
             catch (Exception ex)
             {
                 // Аренда взята, а файлы игрока не разложены: снимаем её, в конце сеанса ничего не отправится.
+                if (marker is not null)
+                {
+                    TryDelete(marker);
+                }
+
                 await ReleaseAsync(id);
                 if (ex is OperationCanceledException)
                 {
@@ -273,8 +285,14 @@ public sealed class SavesService(
             return (SavesResult.Fail(SavesErrors.NotAttached, "Saves of this player were not attached on this PC; nothing sent"), 0, 0);
         }
 
+        if (await ProfileGoneAsync(session) is { } gone)
+        {
+            return (gone, 0, 0);
+        }
+
         if (masterActive())
         {
+            // Тома библиотек — мастер: папки на G:/H: не трогаем (это правка опубликованного содержимого).
             Forget();
             await ReleaseAsync(id);
             return (SavesResult.Fail(SavesErrors.MasterMode, "A library on this PC is in master mode; nothing sent"), 0, 0);
@@ -320,7 +338,7 @@ public sealed class SavesService(
         }
         catch (SaveArchiveException ex) when (ex.Reason == SaveArchiveException.OverLimit)
         {
-            Forget();
+            End();
             await ReleaseAsync(id, overLimit: true);
             return (SavesResult.Fail(SavesErrors.OverLimit, ex.Message), 0, 0);
         }
@@ -330,9 +348,15 @@ public sealed class SavesService(
             return (SavesResult.Fail(SavesErrors.Internal, $"Saves folders not read (a game still running?): {ex.Message}"), 0, 0);
         }
 
+        // Профиль стирали, пока шла упаковка: собрано то, что ещё не удалили, — не отправляем.
+        if (await ProfileGoneAsync(session) is { } goneWhilePacking)
+        {
+            return (goneWhilePacking, packed.Bytes, packed.Files);
+        }
+
         if (packed.Bytes > LimitBytes(config.LimitMb))
         {
-            Forget();
+            End();
             await ReleaseAsync(id, overLimit: true, packed.Bytes);
             return (SavesResult.Fail(SavesErrors.OverLimit, $"Saves are {packed.Bytes} bytes, the limit is {config.LimitMb} MB; nothing sent"), packed.Bytes,
                 packed.Files);
@@ -348,7 +372,7 @@ public sealed class SavesService(
             // Отказ по существу — эта выдача кончилась; «выключено» (диск сохранений отвалился) — можно повторить.
             if (ex.Reason != "disabled")
             {
-                Forget();
+                End();
             }
 
             return (Rejected(ex), packed.Bytes, packed.Files);
@@ -358,7 +382,7 @@ public sealed class SavesService(
             return (SavesResult.Fail(SavesErrors.ServerUnavailable, ex.Message), packed.Bytes, packed.Files);
         }
 
-        Forget();
+        End();
         return (SavesResult.Success, packed.Bytes, packed.Files);
     }
 
@@ -558,9 +582,87 @@ public sealed class SavesService(
         return false;
     }
 
-    /// <summary>Выдача кончилась: забыть «выдано» и файлы пропущенных записей.</summary>
+    /// <summary>
+    /// Метка выдачи — пустой скрытый файл со случайным именем в корне профиля (<c>.club-saves-&lt;guid&gt;</c>, ни в одну
+    /// папку из списка не входит: шаблон не может быть корнем профиля). Пока она на месте, профиль тот же, что при attach;
+    /// пропала — профиль стёрт (и, может быть, создан заново пустым по тому же пути).
+    /// </summary>
+    private static string CreateMarker(string profile)
+    {
+        var marker = Path.Combine(profile, $".club-saves-{Guid.NewGuid():N}");
+        using (new FileStream(marker, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+        }
+
+        File.SetAttributes(marker, FileAttributes.Hidden);
+        return marker;
+    }
+
+    /// <summary>
+    /// Профиль выдачи стёрт (нет метки, <see cref="CreateMarker"/>): шелл сбросил профиль раньше, чем прислал detach, —
+    /// папки пустые или полуудалённые, отправить их значило бы заменить ими сохранения игрока на сервере. Выдача
+    /// кончилась: аренда снимается, <c>profileNotFound</c>, ничего не отправлено. Профиль на месте — <c>null</c>.
+    /// </summary>
+    private async Task<SavesResult?> ProfileGoneAsync(Session session)
+    {
+        if (File.Exists(session.Marker))
+        {
+            return null;
+        }
+
+        End();
+        await ReleaseAsync(session.PlayerId);
+        return SavesResult.Fail(SavesErrors.ProfileNotFound, "The Windows profile of this attach was removed or reset before detach; nothing sent");
+    }
+
+    /// <summary>
+    /// Конец выдачи по detach (сохранено или отказ): папки на буквах библиотек — снова исходное содержимое, чтобы
+    /// следующий за игроком без выдачи (гость) не видел его файлов и ника (spec п. 1); потом <see cref="Forget"/>. Папка,
+    /// которая стала ссылкой или не очистилась, — только предупреждение (attach следующего игрока очистит её снова).
+    /// </summary>
+    private void End()
+    {
+        if (_attached is { } session)
+        {
+            foreach (var (folder, zip) in session.Baselines)
+            {
+                try
+                {
+                    // Исходное содержимое — только для той версии библиотеки, что подключена сейчас.
+                    var mount = _libraries.FirstOrDefault(l => drives.RootOf(l.Letter) == folder.Root);
+                    if (mount is not { Mounted: true } || ReadBaseline(folder.Id)?.Version != mount.Version)
+                    {
+                        logger.LogWarning("Saves folder {EntryId} not reset: no original content for the library mounted now", folder.Id);
+                        continue;
+                    }
+
+                    if (ThroughLink(folder))
+                    {
+                        logger.LogWarning("Saves folder {EntryId} not reset: {Directory} is a link or under one", folder.Id, folder.Directory);
+                        continue;
+                    }
+
+                    Clear(folder.Directory);
+                    Restore(folder, zip);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SaveArchiveException)
+                {
+                    logger.LogWarning(ex, "Saves folder {EntryId} ({Directory}) not reset to its original content", folder.Id, folder.Directory);
+                }
+            }
+        }
+
+        Forget();
+    }
+
+    /// <summary>Выдача кончилась: забыть «выдано», метку в профиле и файлы пропущенных записей.</summary>
     private void Forget()
     {
+        if (_attached is { } session)
+        {
+            TryDelete(session.Marker);
+        }
+
         _attached = null;
         try
         {

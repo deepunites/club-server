@@ -399,6 +399,58 @@ public sealed class SavesServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Detach_returns_library_folders_to_original()
+    {
+        await EntryAsync(@"H:\Game\Saves");
+        var pc = new Pc(this, "A");
+        Write(pc.OnH(@"Game\Saves\default.cfg"), "published");
+        await pc.Service.OnTickAsync(H("v1"), CancellationToken.None);
+
+        Ok(await pc.Service.AttachAsync(PlayerId, Sid, CancellationToken.None));
+        Write(pc.OnH(@"Game\Saves\nick.txt"), "member nick");
+        Write(pc.OnH(@"Game\Saves\default.cfg"), "member settings");
+        Ok(await pc.Service.DetachAsync(PlayerId, CancellationToken.None));
+
+        // Гость (без attach) после игрока не видит его файлов на H: (spec п. 1); на сервере они есть.
+        Assert.Equal(["default.cfg"], Listing(pc.OnH(@"Game\Saves")));
+        Assert.Equal("published", File.ReadAllText(pc.OnH(@"Game\Saves\default.cfg")));
+        Ok(await pc.Service.AttachAsync(PlayerId, Sid, CancellationToken.None));
+        Assert.Equal("member nick", File.ReadAllText(pc.OnH(@"Game\Saves\nick.txt")));
+
+        // Отказ без отправки (больше лимита) — тоже конец выдачи.
+        await Repository.UpdateSettingsAsync(new ServerSaveSettings(1, []));
+        File.WriteAllBytes(pc.OnH(@"Game\Saves\huge.dat"), RandomNumberGenerator.GetBytes(2 * 1024 * 1024));
+        Assert.Equal(SavesErrors.OverLimit, (await pc.Service.DetachAsync(PlayerId, CancellationToken.None)).Error);
+        Assert.Equal(["default.cfg"], Listing(pc.OnH(@"Game\Saves")));
+    }
+
+    [Fact]
+    public async Task Detach_after_profile_reset_sends_nothing()
+    {
+        await EntryAsync(@"%APPDATA%\Game");
+        var a = new Pc(this, "A");
+        Ok(await a.Service.AttachAsync(PlayerId, Sid, CancellationToken.None));
+        Write(a.InProfile(@"AppData\Roaming\Game\save.dat"), "good progress");
+        Ok(await a.Service.DetachAsync(PlayerId, CancellationToken.None));
+        var before = await PlayerAsync(PlayerId);
+
+        // Шелл стёр профиль (и Windows создала его заново по тому же пути) раньше, чем прислал detach: папки пустые —
+        // их нельзя отправлять вместо сохранений игрока.
+        Ok(await a.Service.AttachAsync(PlayerId, Sid, CancellationToken.None));
+        Directory.Delete(a.Profile, recursive: true);
+        Directory.CreateDirectory(a.Profile);
+        var detach = await a.Service.DetachAsync(PlayerId, CancellationToken.None);
+        Assert.Equal((false, SavesErrors.ProfileNotFound), (detach.Ok, detach.Error));
+        Assert.Equal(before, await PlayerAsync(PlayerId));
+        Assert.Null(await Repository.LeaseHolderAsync(PlayerId));
+        Assert.Equal(SavesErrors.NotAttached, (await a.Service.DetachAsync(PlayerId, CancellationToken.None)).Error);
+
+        var b = new Pc(this, "B");
+        Ok(await b.Service.AttachAsync(PlayerId, Sid, CancellationToken.None));
+        Assert.Equal("good progress", File.ReadAllText(b.InProfile(@"AppData\Roaming\Game\save.dat")));
+    }
+
+    [Fact]
     public async Task Server_down_at_attach_then_detach_is_notAttached()
     {
         await EntryAsync(@"%APPDATA%\Game");
