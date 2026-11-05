@@ -108,6 +108,9 @@ public sealed class PendingApprovalException() : Exception("Machine is waiting f
 /// регистрируется заново по ключу клуба (номер места сохраняется — сервер узнаёт машину по HWID).
 /// Один экземпляр на все библиотеки (циклы G: и H: идут по очереди, <see cref="HelperLoops"/>): refresh-токен одноразовый,
 /// второй клиент с той же парой предъявил бы уже использованный — сервер принял бы это за кражу и отозвал бы токены машины.
+/// С 1.7.0 клиентом пользуются два потока (такт помощника и команды канала шелла, <see cref="SavesService"/>): загрузка,
+/// обновление и регистрация токенов — по одной (<see cref="_renewal"/>); запрос, получивший 401 со старым токеном, после
+/// чужого обновления берёт новый, а не обновляет снова.
 /// <paramref name="transfers"/> — отдельный HttpClient для архивов сохранений (attach и PUT: десятки и сотни мегабайт, свой
 /// тайм-аут); <c>null</c> — тот же <paramref name="http"/>.
 /// </summary>
@@ -125,7 +128,10 @@ public sealed class DisklessApiClient(HttpClient http, HelperOptions options, IC
 
     private readonly HttpClient _transfers = transfers ?? http;
 
-    private StoredCredentials? _credentials;
+    /// <summary>Загрузка, обновление и регистрация токенов — по одной на оба потока (такт и канал шелла).</summary>
+    private readonly SemaphoreSlim _renewal = new(1, 1);
+
+    private volatile StoredCredentials? _credentials;
 
     public Guid? MachineId => _credentials?.MachineId;
 
@@ -238,11 +244,11 @@ public sealed class DisklessApiClient(HttpClient http, HelperOptions options, IC
     private async Task<HttpResponseMessage> SendAuthorizedAsync(Func<Guid, HttpRequestMessage> build, HttpClient client, HttpCompletionOption completion,
         CancellationToken ct)
     {
-        await EnsureCredentialsAsync(ct);
+        var credentials = await EnsureCredentialsAsync(ct);
         for (var attempt = 0; ; attempt++)
         {
-            using var request = build(_credentials!.MachineId);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _credentials.AccessToken);
+            using var request = build(credentials.MachineId);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", credentials.AccessToken);
             var response = await SendAsync(request, ct, client, completion);
             if (response.StatusCode != HttpStatusCode.Unauthorized || attempt > 0)
             {
@@ -250,7 +256,7 @@ public sealed class DisklessApiClient(HttpClient http, HelperOptions options, IC
             }
 
             response.Dispose();
-            await RenewAsync(ct);
+            credentials = await RenewAsync(credentials, ct);
         }
     }
 
@@ -409,55 +415,91 @@ public sealed class DisklessApiClient(HttpClient http, HelperOptions options, IC
         }
     }
 
-    private async Task EnsureCredentialsAsync(CancellationToken ct)
+    /// <summary>Токены машины: сохранённые (этого ПК) или новые по регистрации; под <see cref="_renewal"/>.</summary>
+    private async Task<StoredCredentials> EnsureCredentialsAsync(CancellationToken ct)
     {
-        if (_credentials is null && await store.LoadAsync(ct) is { } stored)
+        if (_credentials is { } current)
         {
-            if (stored.Hwid == (await identity.ReadAsync(ct)).Hwid)
-            {
-                _credentials = stored;
-            }
-            else
-            {
-                // Токены другого ПК: файл приехал с диском (эталон бездиска снят с ПК мастера, клон диска). С ними этот ПК
-                // выдавал бы себя за чужую машину — регистрируемся сами (сервер узнает ПК по HWID).
-                await store.ClearAsync(ct);
-            }
+            return current;
         }
 
-        if (_credentials is null)
+        await _renewal.WaitAsync(ct);
+        try
         {
-            await RegisterAsync(ct);
+            if (_credentials is null && await store.LoadAsync(ct) is { } stored)
+            {
+                if (stored.Hwid == (await identity.ReadAsync(ct)).Hwid)
+                {
+                    _credentials = stored;
+                }
+                else
+                {
+                    // Токены другого ПК: файл приехал с диском (эталон бездиска снят с ПК мастера, клон диска). С ними этот ПК
+                    // выдавал бы себя за чужую машину — регистрируемся сами (сервер узнает ПК по HWID).
+                    await store.ClearAsync(ct);
+                }
+            }
+
+            return _credentials ?? await RegisterAsync(ct);
+        }
+        finally
+        {
+            _renewal.Release();
         }
     }
 
-    /// <summary>Refresh; если он отклонён (истёк, отозван, повтор) — регистрация заново.</summary>
-    private async Task RenewAsync(CancellationToken ct)
+    /// <summary>
+    /// Токены после 401 на запрос с <paramref name="stale"/>: другой поток их уже обновил (или зарегистрировался) — его
+    /// токены, без второго refresh; иначе refresh, а если он отклонён (истёк, отозван, повтор) — регистрация заново.
+    /// Под <see cref="_renewal"/>: одноразовый refresh-токен предъявляется один раз.
+    /// </summary>
+    private async Task<StoredCredentials> RenewAsync(StoredCredentials stale, CancellationToken ct)
     {
-        var facts = await identity.ReadAsync(ct);
-        using var response = await SendAsync(new HttpRequestMessage(HttpMethod.Post, "diskless/v1/machines/refresh")
+        await _renewal.WaitAsync(ct);
+        try
         {
-            Content = JsonContent.Create(new RefreshRequest(_credentials!.RefreshToken, facts.Hwid), options: Json),
-        }, ct);
-        if (response.IsSuccessStatusCode)
-        {
-            var refreshed = await ReadAsync<RefreshResponse>(response, ct);
-            _credentials = _credentials with { AccessToken = refreshed.AccessToken, RefreshToken = refreshed.RefreshToken, ExpiresAt = refreshed.ExpiresAt };
-            await store.SaveAsync(_credentials, ct);
-            return;
-        }
+            if (_credentials is not { } current)
+            {
+                // Предыдущий refresh отклонён, а регистрация не удалась: токенов нет — регистрируемся.
+                return await RegisterAsync(ct);
+            }
 
-        if (response.StatusCode != HttpStatusCode.Unauthorized)
-        {
-            throw new ServerUnavailableException($"refresh: {(int)response.StatusCode}");
-        }
+            if (!ReferenceEquals(current, stale))
+            {
+                return current;
+            }
 
-        await store.ClearAsync(ct);
-        _credentials = null;
-        await RegisterAsync(ct);
+            var facts = await identity.ReadAsync(ct);
+            using var response = await SendAsync(new HttpRequestMessage(HttpMethod.Post, "diskless/v1/machines/refresh")
+            {
+                Content = JsonContent.Create(new RefreshRequest(current.RefreshToken, facts.Hwid), options: Json),
+            }, ct);
+            if (response.IsSuccessStatusCode)
+            {
+                var refreshed = await ReadAsync<RefreshResponse>(response, ct);
+                var renewed = current with { AccessToken = refreshed.AccessToken, RefreshToken = refreshed.RefreshToken, ExpiresAt = refreshed.ExpiresAt };
+                _credentials = renewed;
+                await store.SaveAsync(renewed, ct);
+                return renewed;
+            }
+
+            if (response.StatusCode != HttpStatusCode.Unauthorized)
+            {
+                throw new ServerUnavailableException($"refresh: {(int)response.StatusCode}");
+            }
+
+            await store.ClearAsync(ct);
+            _credentials = null;
+            return await RegisterAsync(ct);
+        }
+        finally
+        {
+            _renewal.Release();
+        }
     }
 
-    private async Task RegisterAsync(CancellationToken ct)
+    /// <summary>Регистрация по ключу клуба; вызывается только под <see cref="_renewal"/>.</summary>
+    private async Task<StoredCredentials> RegisterAsync(CancellationToken ct)
     {
         if (string.IsNullOrEmpty(options.ClubKey))
         {
@@ -482,8 +524,10 @@ public sealed class DisklessApiClient(HttpClient http, HelperOptions options, IC
         }
 
         var registered = await ReadAsync<RegisterResponse>(response, ct);
-        _credentials = new StoredCredentials(registered.MachineId, registered.AccessToken, registered.RefreshToken, registered.ExpiresAt, facts.Hwid);
-        await store.SaveAsync(_credentials, ct);
+        var credentials = new StoredCredentials(registered.MachineId, registered.AccessToken, registered.RefreshToken, registered.ExpiresAt, facts.Hwid);
+        _credentials = credentials;
+        await store.SaveAsync(credentials, ct);
+        return credentials;
     }
 
     private async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct, HttpClient? client = null,

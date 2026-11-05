@@ -6,6 +6,7 @@ using Club.Helper.Core;
 // Помощник бездиска: служба Windows (LocalSystem). Настройки — %ProgramData%\ClubDiskless\helper.json:
 // { "Helper": { "ServerUrl": "https://club-server", "ClubKey": "...", "CaCertificatePath": "C:\\ProgramData\\ClubDiskless\\club-ca.pem" } }
 // Библиотеки кроме G: (1.6.0) — "Libraries": по умолчанию ["solo"] (H:), [] — только G: на этом ПК.
+// Сохранения игрока (1.7.0) — канал шелла \\.\pipe\club-diskless-helper (docs/helper.md, «Сохранения игр»).
 var builder = Host.CreateApplicationBuilder(args);
 builder.Configuration.AddJsonFile(Path.Combine(StateDirectory.Path, "helper.json"), optional: true, reloadOnChange: false);
 builder.Services.AddWindowsService(o => o.ServiceName = "ClubDisklessHelper");
@@ -27,7 +28,11 @@ builder.Services.AddSingleton(_ => new HttpClient(ServerHandler(options))
     BaseAddress = new Uri(options.ServerUrl.TrimEnd('/') + "/"),
     Timeout = TimeSpan.FromSeconds(20),
 });
-builder.Services.AddSingleton<DisklessApiClient>();
+// Архивы сохранений (1.7.0: attach и PUT, до сотен мегабайт) — свой HttpClient с долгим тайм-аутом; токены, отчёты и
+// остальное — через основной (20 с). Клиент API один на такт помощника и канал шелла.
+builder.Services.AddSingleton(services => new DisklessApiClient(
+    services.GetRequiredService<HttpClient>(), options, services.GetRequiredService<ICredentialStore>(), services.GetRequiredService<IMachineIdentity>(),
+    new HttpClient(ServerHandler(options)) { BaseAddress = new Uri(options.ServerUrl.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(130) }));
 // Цикл G: и по циклу на библиотеку (H: — solo) над одной Windows и одним клиентом API; у каждой библиотеки свой файл
 // назначения (assignment.json, assignment.json.solo) и свои категории журнала.
 builder.Services.AddSingleton(services => HelperLoops.Create(
@@ -35,7 +40,18 @@ builder.Services.AddSingleton(services => HelperLoops.Create(
     services.GetRequiredService<IMachineIdentity>(), options, services.GetRequiredService<TimeProvider>(), services.GetRequiredService<ILoggerFactory>(),
     library => new FileAssignmentCache(StateDirectory.Ensure(), FileAssignmentCache.FileFor(library)),
     services.GetRequiredService<ILogger<HelperService>>()));
+// Сохранения игрока (1.7.0, spec 2026-11-05): команды шелла по каналу \\.\pipe\club-diskless-helper; библиотека в режиме
+// мастера — любой мастер-том на ПК подключён или подключается.
+builder.Services.AddSingleton(services =>
+{
+    var loops = services.GetRequiredService<HelperLoops>();
+    return new SavesService(
+        services.GetRequiredService<DisklessApiClient>(), new WindowsProfileLocator(), new WindowsDriveRoots(), () => HelperService.MasterActive(loops),
+        StateDirectory.Ensure(), services.GetRequiredService<TimeProvider>(), services.GetRequiredService<ILogger<SavesService>>());
+});
+builder.Services.AddSingleton(services => new SavesCommandHandler(services.GetRequiredService<SavesService>(), options.HelperVersion));
 builder.Services.AddHostedService<HelperService>();
+builder.Services.AddHostedService<SavesPipeServer>();
 
 builder.Build().Run();
 
