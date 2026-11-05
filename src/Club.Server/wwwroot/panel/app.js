@@ -1,4 +1,4 @@
-// Экраны «Рабочие станции» (с зонами мест), «Библиотека игр», «Образы Windows», «Бездиск» и «Сеть». Без сборки и внешних зависимостей: панель работает в клубе без интернета.
+// Экраны «Рабочие станции» (с зонами мест), «Библиотека игр», «Образы Windows», «Бездиск», «Сеть» и «Сохранения». Без сборки и внешних зависимостей: панель работает в клубе без интернета.
 (() => {
   "use strict";
 
@@ -32,6 +32,17 @@
   let dlJson = "";
   let zonesKey = "";
   let renamingZone = null;
+  // «Сохранения»: состояние диска, папки и страница игроков (svPage, поиск svQuery) — из одного захода loadSaves.
+  let svStatus = null;
+  let svEntries = null;
+  let svPlayers = null;
+  let svJson = "";
+  let svSeq = 0;
+  let svPage = 1;
+  let svQuery = "";
+  let svQueryTimer = null;
+  let svSettingsDirty = false;
+  let svEditing = null;
   const openContents = new Set();
   const NET_FIELDS = ["subnet", "interface", "dhcpServer", "gateway", "dnsServers", "poolStart", "poolEnd", "reservedStart", "leaseTimeSec", "keaSubnetId"];
 
@@ -51,6 +62,7 @@
   function applyStaticTexts() {
     document.documentElement.lang = lang;
     document.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = t(el.dataset.i18n); });
+    document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => { el.placeholder = t(el.dataset.i18nPlaceholder); el.setAttribute("aria-label", el.placeholder); });
     $("lang").value = lang;
   }
 
@@ -1270,10 +1282,285 @@
     await loadDiskless();
   }
 
+  // ---------- Сохранения ----------
+
+  const SAVE_RESULT = { ok: "ok", overLimit: "warn", rejected: "warn", error: "bad" };
+
+  // Ноль байт — «0 KiB», а не «1 KiB», как у size() (там нулевых размеров не бывает): игрок без файлов, пустой диск.
+  const savesSize = (bytes) => (bytes === 0 ? "0 KiB" : size(bytes));
+
+  // Текст ошибки API сохранений: поле и причина из ответа — переводом (savesErr_<поле>_<причина>, у пути — код проверки
+  // шаблона, как у помощника), без поля — savesErr_<причина>; 404 — «папки уже нет».
+  function savesError(error) {
+    if (error.status === 404) return t("savesEntryGone");
+    const field = error.details?.field;
+    const key = field ? `savesErr_${field}_${error.reason}` : `savesErr_${error.reason}`;
+    return t(key) !== key ? t(key) : error.message;
+  }
+
+  function renderSavesStatus() {
+    const s = svStatus;
+    $("sv-disabled").hidden = s.enabled;
+    $("sv-unavailable").hidden = !s.enabled || s.available;
+    $("sv-unavailable").textContent = t("savesUnavailableNotice", { root: s.root });
+    const row = (key, value) => [el("dt", {}, t(key)), el("dd", {}, value)];
+    $("sv-status").replaceChildren(el("dl", { class: "sv-status" },
+      row("savesStatusEnabled", badge(s.enabled ? "ok" : "idle", t(s.enabled ? "savesOn" : "savesOff"))),
+      row("savesStatusDisk", badge(s.available ? "ok" : "bad", t(s.available ? "savesDiskOk" : "savesDiskMissing"))),
+      row("savesStatusRoot", el("span", { class: "mono" }, s.root)),
+      row("savesStatusUsed", s.available ? savesSize(s.usedBytes) : dash())));
+  }
+
+  // Сводка: папки (включено/всего, если выключенные есть) и игроки — с поиском это найденные по нему.
+  function renderSavesSummary() {
+    const chip = (key, value) => el("span", { class: "chip" }, `${t(key)}: `, el("b", {}, value));
+    const on = svEntries.filter((e) => e.enabled).length;
+    $("sv-summary").replaceChildren(
+      chip("savesSumEntries", on === svEntries.length ? on : `${on}/${svEntries.length}`),
+      chip(svQuery ? "savesSumFound" : "savesSumPlayers", svPlayers.total));
+  }
+
+  // Папки из списка: вкл/выкл — сразу на сервер; название и путь — в окне «Изменить»; удаление — с вопросом.
+  function renderSavesEntries() {
+    $("sv-entries-empty").hidden = svEntries.length > 0;
+    $("sv-entry-rows").replaceChildren(...svEntries.map((e) => {
+      const toggle = el("input", { type: "checkbox", "aria-label": t("savesEntryToggle"), title: t("savesEntryToggle") });
+      toggle.checked = e.enabled;
+      toggle.addEventListener("change", async () => {
+        toggle.disabled = true;
+        await savesAct(`/saves/entries/${encodeURIComponent(e.id)}`, "PUT", { enabled: toggle.checked });
+      });
+      return el("tr", {},
+        el("td", {}, e.name),
+        el("td", { class: "mono" }, e.path),
+        el("td", {}, toggle),
+        el("td", {}, el("div", { class: "row-actions" },
+          el("button", { class: "ghost small", onclick: () => openSaveEntry(e) }, t("savesEntryEdit")),
+          el("button", { class: "danger small", onclick: oneAtATime(async () => {
+            if (await confirmDialog(t("savesEntryDeleteConfirm", { name: e.name }), { okText: t("savesEntryDelete"), danger: true })) {
+              await savesAct(`/saves/entries/${encodeURIComponent(e.id)}`, "DELETE");
+            }
+          }) }, t("savesEntryDelete")))));
+    }));
+  }
+
+  // Игроки: страница из 50, поиск по части ID; последний результат — отметка, причина — во всплывающей подсказке.
+  function renderSavesPlayers() {
+    const p = svPlayers;
+    const pages = Math.max(1, Math.ceil(p.total / p.pageSize));
+    $("sv-players-empty").hidden = p.items.length > 0;
+    $("sv-players-empty").textContent = svQuery ? t("savesPlayersNotFound", { query: svQuery }) : t("savesPlayersEmpty");
+    $("sv-pages").hidden = pages < 2;
+    $("sv-page-text").textContent = t("savesPage", { page: svPage, pages, total: p.total });
+    $("sv-prev").disabled = svPage <= 1;
+    $("sv-next").disabled = svPage >= pages;
+    $("sv-player-rows").replaceChildren(...p.items.map((r) => {
+      let result = dash();
+      if (r.lastResult) {
+        const hintKey = `savesResultHint_${r.lastResult}`;
+        const hint = [t(hintKey) !== hintKey ? t(hintKey) : "", r.lastError ?? ""].filter(Boolean).join(" ");
+        const label = t(`savesResult_${r.lastResult}`);
+        result = el("div", { class: "badges" }, badge(SAVE_RESULT[r.lastResult] || "idle", label, hint), r.lastResultAt ? ago(r.lastResultAt) : null);
+      }
+      return el("tr", {},
+        el("td", { class: "mono" }, r.playerId),
+        el("td", {}, r.savedAt ? savesSize(r.sizeBytes) : dash()),
+        el("td", { class: "num" }, r.savedAt ? r.fileCount : dash()),
+        el("td", {}, ago(r.savedAt)),
+        el("td", {}, orDash(r.machineName)),
+        el("td", {}, result),
+        el("td", {}, el("button", { class: "danger small", onclick: oneAtATime(async () => {
+          if (await confirmDialog(t("savesPlayerDeleteConfirm", { id: r.playerId }), { okText: t("savesPlayerDelete"), danger: true })) {
+            await savesAct(`/saves/players/${encodeURIComponent(r.playerId)}`, "DELETE");
+          }
+        }) }, t("savesPlayerDelete"))));
+    }));
+  }
+
+  function renderSaves() {
+    if (!svStatus || !svEntries || !svPlayers || view !== "saves") return;
+    renderSavesStatus();
+    renderSavesSummary();
+    renderSavesEntries();
+    renderSavesPlayers();
+  }
+
+  // Состояние, папки и страница игроков — одним заходом; ответ на устаревший запрос (поиск сменился, пока он шёл)
+  // не рисуется. Удалили последних игроков страницы — на последнюю непустую.
+  async function loadSaves() {
+    const seq = ++svSeq;
+    try {
+      const [status, entries, players] = await Promise.all([
+        api("/saves/status"),
+        api("/saves/entries"),
+        api(`/saves/players?query=${encodeURIComponent(svQuery)}&page=${svPage}`),
+      ]);
+      if (seq !== svSeq) return;
+      if (players.items.length === 0 && players.total > 0 && svPage > 1) {
+        svPage = Math.ceil(players.total / players.pageSize);
+        await loadSaves();
+        return;
+      }
+      $("sv-error").hidden = true;
+      const json = JSON.stringify([status, entries, players, svPage, svQuery]);
+      if (json !== svJson) {
+        svStatus = status;
+        svEntries = entries;
+        svPlayers = players;
+        svJson = json;
+        renderSaves();
+      } else {
+        refreshAgo();
+      }
+    } catch (error) {
+      if (error.message === "unauthorized" || seq !== svSeq) return;
+      $("sv-error").textContent = t("loadFailed", { error: error.message });
+      $("sv-error").hidden = false;
+    }
+  }
+
+  async function savesAct(path, method, body) {
+    try {
+      await api(path, { method, ...(body ? { body: JSON.stringify(body) } : {}) });
+    } catch (error) {
+      await alertDialog(savesError(error));
+    }
+    svJson = "";
+    await loadSaves();
+  }
+
+  // Форма настроек не перезаписывается, пока в ней что-то набирают (как адресный план на «Сети»).
+  function fillSavesSettings(s) {
+    const form = $("sv-settings");
+    form.elements.limitMb.value = s.limitMb;
+    form.elements.excludes.value = s.excludes.join("\n");
+    form.querySelectorAll(".field-error").forEach((node) => node.remove());
+    form.querySelectorAll(".invalid").forEach((node) => node.classList.remove("invalid"));
+    svSettingsDirty = false;
+  }
+
+  async function loadSavesSettings(force) {
+    if (svSettingsDirty && !force) return;
+    try {
+      fillSavesSettings(await api("/saves/settings"));
+    } catch (error) {
+      if (error.message === "unauthorized") return;
+      $("sv-error").textContent = t("loadFailed", { error: error.message });
+      $("sv-error").hidden = false;
+    }
+  }
+
+  async function saveSavesSettings(event) {
+    event.preventDefault();
+    const form = $("sv-settings");
+    // Пустое или дробное число — 0: сервер ответит «вне диапазона» с подсказкой 1…2000 (null оставил бы лимит прежним).
+    const limit = Number(form.elements.limitMb.value.trim() || "0");
+    const body = {
+      limitMb: Number.isInteger(limit) ? limit : 0,
+      // По одному в строке; пустые строки — не исключения.
+      excludes: form.elements.excludes.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
+    };
+    form.querySelectorAll(".field-error").forEach((node) => node.remove());
+    form.querySelectorAll(".invalid").forEach((node) => node.classList.remove("invalid"));
+    $("sv-settings-error").hidden = true;
+    $("sv-settings-saved").hidden = true;
+    $("sv-settings-save").disabled = true;
+    try {
+      fillSavesSettings(await api("/saves/settings", { method: "PUT", body: JSON.stringify(body) }));
+      $("sv-settings-saved").hidden = false;
+    } catch (error) {
+      const input = form.elements[error.details?.field ?? ""];
+      if (input) {
+        input.classList.add("invalid");
+        input.after(el("span", { class: "field-error" }, savesError(error)));
+      } else {
+        $("sv-settings-error").textContent = savesError(error);
+        $("sv-settings-error").hidden = false;
+      }
+    } finally {
+      $("sv-settings-save").disabled = false;
+    }
+  }
+
+  async function addSaveEntry(event) {
+    event.preventDefault();
+    const result = $("sv-entry-add-result");
+    $("sv-entry-path").classList.remove("invalid");
+    $("sv-entry-name").classList.remove("invalid");
+    $("sv-entry-add-button").disabled = true;
+    try {
+      const created = await api("/saves/entries", { method: "POST", body: JSON.stringify({ name: $("sv-entry-name").value.trim(), path: $("sv-entry-path").value.trim() }) });
+      result.className = "small ok-text";
+      result.textContent = t("savesEntryAdded", { name: created.name });
+      $("sv-entry-name").value = "";
+      $("sv-entry-path").value = "";
+    } catch (error) {
+      result.className = "error small";
+      result.textContent = savesError(error);
+      const field = error.details?.field;
+      if (field === "path" || field === "name") $(`sv-entry-${field}`).classList.add("invalid");
+    } finally {
+      $("sv-entry-add-button").disabled = false;
+    }
+    result.hidden = false;
+    svJson = "";
+    await loadSaves();
+  }
+
+  function openSaveEntry(entry) {
+    svEditing = entry;
+    $("save-entry-name").value = entry.name;
+    $("save-entry-path").value = entry.path;
+    $("save-entry-name").classList.remove("invalid");
+    $("save-entry-path").classList.remove("invalid");
+    $("save-entry-error").hidden = true;
+    $("save-entry").showModal();
+  }
+
+  async function saveSaveEntry(event) {
+    event.preventDefault();
+    const body = { name: $("save-entry-name").value.trim(), path: $("save-entry-path").value.trim() };
+    $("save-entry-name").classList.remove("invalid");
+    $("save-entry-path").classList.remove("invalid");
+    $("save-entry-save").disabled = true;
+    try {
+      await api(`/saves/entries/${encodeURIComponent(svEditing.id)}`, { method: "PUT", body: JSON.stringify(body) });
+      $("save-entry").close();
+    } catch (error) {
+      $("save-entry-error").textContent = savesError(error);
+      $("save-entry-error").hidden = false;
+      const field = error.details?.field;
+      if (field === "path" || field === "name") $(`save-entry-${field}`).classList.add("invalid");
+    } finally {
+      $("save-entry-save").disabled = false;
+    }
+    svJson = "";
+    await loadSaves();
+  }
+
+  // Поиск — после паузы в наборе, с первой страницы.
+  function searchSavePlayers() {
+    clearTimeout(svQueryTimer);
+    svQueryTimer = setTimeout(() => {
+      const query = $("sv-query").value.trim();
+      if (query === svQuery) return;
+      svQuery = query;
+      svPage = 1;
+      svJson = "";
+      loadSaves();
+    }, 300);
+  }
+
+  function savePlayersPage(delta) {
+    svPage = Math.max(1, svPage + delta);
+    svJson = "";
+    loadSaves();
+  }
+
   // ---------- Навигация ----------
 
   function route() {
-    view = { "#network": "network", "#images": "images", "#library": "library", "#diskless": "diskless" }[location.hash] ?? "machines";
+    view = { "#network": "network", "#images": "images", "#library": "library", "#diskless": "diskless", "#saves": "saves" }[location.hash] ?? "machines";
     document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === view));
     if (!token) return;
     $("machines").hidden = view !== "machines";
@@ -1281,12 +1568,17 @@
     $("images").hidden = view !== "images";
     $("library").hidden = view !== "library";
     $("diskless").hidden = view !== "diskless";
+    $("saves").hidden = view !== "saves";
     if (view === "diskless") dlJson = "";
     if (view === "images") imgsJson = "";
     if (view === "library") libJson = "";
     if (view === "network") {
       netJson = "";
       loadSettings(false);
+    }
+    if (view === "saves") {
+      svJson = "";
+      loadSavesSettings(false);
     }
     refresh();
   }
@@ -1296,6 +1588,7 @@
     if (view === "images") loadImages();
     if (view === "library") loadLibrary();
     if (view === "diskless") loadDiskless();
+    if (view === "saves") loadSaves();
     loadNetwork();
   }
 
@@ -1407,7 +1700,7 @@
     route();
     clearInterval(timer);
     timer = setInterval(() => {
-      if (document.hidden || $("edit").open || $("reimage").open || $("ask").open || $("zone-rename").open) return;
+      if (document.hidden || $("edit").open || $("reimage").open || $("ask").open || $("zone-rename").open || $("save-entry").open) return;
       refresh();
       refreshAgo();
     }, REFRESH_MS);
@@ -1422,6 +1715,7 @@
     $("images").hidden = true;
     $("library").hidden = true;
     $("diskless").hidden = true;
+    $("saves").hidden = true;
     $("dhcp-alert").hidden = true;
     $("logout").hidden = true;
     $("login").hidden = false;
@@ -1458,6 +1752,8 @@
       if (view === "library") loadLibrary();
       dlJson = "";
       renderDiskless();
+      svJson = "";
+      renderSaves();
     });
     $("login-form").addEventListener("submit", login);
     $("logout").addEventListener("click", logout);
@@ -1491,6 +1787,14 @@
     }));
     $("reimage-cancel").addEventListener("click", () => $("reimage").close());
     $("ask-cancel").addEventListener("click", () => $("ask").close());
+    $("sv-settings").addEventListener("submit", saveSavesSettings);
+    $("sv-settings").addEventListener("input", () => { svSettingsDirty = true; $("sv-settings-saved").hidden = true; });
+    $("sv-entry-add").addEventListener("submit", addSaveEntry);
+    $("save-entry-form").addEventListener("submit", saveSaveEntry);
+    $("save-entry-cancel").addEventListener("click", () => $("save-entry").close());
+    $("sv-query").addEventListener("input", searchSavePlayers);
+    $("sv-prev").addEventListener("click", () => savePlayersPage(-1));
+    $("sv-next").addEventListener("click", () => savePlayersPage(1));
     window.addEventListener("hashchange", route);
     if (token) showApp(); else logout();
   });

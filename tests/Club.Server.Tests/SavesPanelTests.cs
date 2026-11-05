@@ -446,6 +446,16 @@ public sealed class SavesPanelTests : IAsyncLifetime
         Assert.Equal(200, (await Repository.SettingsAsync()).LimitMb);
         Assert.Empty(await Repository.EntriesAsync(enabledOnly: false));
     }
+
+    [Fact]
+    public async Task Panel_page_has_saves_view()
+    {
+        using var page = await _server.CreateClient().GetAsync("/panel/");
+        Assert.Equal(HttpStatusCode.OK, page.StatusCode);
+        var html = await page.Content.ReadAsStringAsync();
+        Assert.Contains("data-view=\"saves\"", html);
+        Assert.Contains("<section id=\"saves\"", html);
+    }
 }
 
 /// <summary>Буквы библиотек для шаблонов путей — из настроек всех библиотек сервера: H: (solo) рядом с G:.</summary>

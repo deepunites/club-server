@@ -19,6 +19,7 @@
       <a class="tab" href="#images" data-view="images" data-i18n="tabImages">Образы Windows</a>
       <a class="tab" href="#diskless" data-view="diskless" data-i18n="tabDiskless">Бездиск</a>
       <a class="tab" href="#network" data-view="network" data-i18n="tabNetwork">Сеть</a>
+      <a class="tab" href="#saves" data-view="saves" data-i18n="tabSaves">Сохранения</a>
     </nav>
     <div class="topbar-right">
       <select id="lang" aria-label="Language">
@@ -396,6 +397,92 @@
         </div>
       </div>
     </section>
+
+    <!-- Сохранения игр игроков (spec 2026-11-05, п. 3.5): папки, которые помощник на ПК выдаёт при входе игрока и забирает
+         в конце сеанса, лимит на игрока и игроки с сохранениями на диске сервера. -->
+    <section id="saves" hidden>
+      <div class="screen-head">
+        <h1 data-i18n="savesTitle">Сохранения игр</h1>
+        <div class="summary" id="sv-summary"></div>
+      </div>
+      <p id="sv-error" class="error" hidden></p>
+      <p id="sv-disabled" class="notice" data-i18n="savesDisabled" hidden></p>
+      <p id="sv-unavailable" class="notice" hidden></p>
+
+      <div class="lib-grid">
+        <div class="card lib-card">
+          <h2 data-i18n="savesStatusTitle">Состояние</h2>
+          <div id="sv-status"></div>
+        </div>
+        <form id="sv-settings" class="card lib-card" novalidate>
+          <h2 data-i18n="savesSettingsTitle">Настройки</h2>
+          <div class="fields">
+            <label><span data-i18n="savesLimit">Лимит на игрока, МБ</span><input name="limitMb" type="number" min="1" max="2000" required></label>
+            <label class="wide"><span data-i18n="savesExcludes">Не сохранять (по одному в строке)</span><textarea name="excludes" class="mono" rows="5" spellcheck="false"></textarea></label>
+          </div>
+          <p class="muted small" data-i18n="savesExcludesHint"></p>
+          <p id="sv-settings-error" class="error small" hidden></p>
+          <p id="sv-settings-saved" class="ok-text small" data-i18n="savesSettingsSaved" hidden></p>
+          <div class="form-actions sv-actions">
+            <button type="submit" id="sv-settings-save" data-i18n="save">Сохранить</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="card lib-card spaced-card">
+        <h2 data-i18n="savesEntriesTitle">Папки</h2>
+        <p class="muted small" data-i18n="savesEntriesHint"></p>
+        <p class="muted small mono" data-i18n="savesPathExamples"></p>
+        <p class="muted small" data-i18n="savesNestedHint"></p>
+        <form id="sv-entry-add" class="publish-row spaced-top">
+          <label><span data-i18n="savesEntryName">Название</span><input id="sv-entry-name" maxlength="60" required></label>
+          <label><span data-i18n="savesEntryPath">Путь</span><input id="sv-entry-path" class="mono sv-path" maxlength="260" placeholder="%LOCALAPPDATA%\GameName\Saved" spellcheck="false" required></label>
+          <button type="submit" id="sv-entry-add-button" data-i18n="savesEntryAdd">Добавить</button>
+        </form>
+        <p id="sv-entry-add-result" class="small" hidden></p>
+        <div class="table-wrap inner spaced-top">
+          <table>
+            <thead>
+              <tr>
+                <th data-i18n="savesEntryName">Название</th>
+                <th data-i18n="savesEntryPath">Путь</th>
+                <th data-i18n="savesEntryEnabled">Вкл.</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="sv-entry-rows"></tbody>
+          </table>
+          <p id="sv-entries-empty" class="muted empty" data-i18n="savesEntriesEmpty" hidden></p>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <div class="sv-players-head">
+          <h2 class="table-title" data-i18n="savesPlayersTitle">Игроки</h2>
+          <input id="sv-query" type="search" class="mono" maxlength="64" data-i18n-placeholder="savesSearch" spellcheck="false" autocomplete="off">
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th data-i18n="savesPlayerId">ID игрока</th>
+              <th data-i18n="savesPlayerSize">Размер</th>
+              <th data-i18n="savesPlayerFiles">Файлов</th>
+              <th data-i18n="savesPlayerSaved">Сохранено</th>
+              <th data-i18n="savesPlayerMachine">ПК</th>
+              <th data-i18n="savesPlayerResult">Последний результат</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="sv-player-rows"></tbody>
+        </table>
+        <p id="sv-players-empty" class="muted empty" hidden></p>
+        <div id="sv-pages" class="sv-pages" hidden>
+          <button type="button" class="ghost small" id="sv-prev" data-i18n="savesPrev">← Назад</button>
+          <span id="sv-page-text" class="muted small"></span>
+          <button type="button" class="ghost small" id="sv-next" data-i18n="savesNext">Вперёд →</button>
+        </div>
+      </div>
+    </section>
   </main>
 
   <dialog id="edit">
@@ -421,6 +508,19 @@
       <div class="dialog-actions">
         <button type="button" class="ghost" id="zone-rename-cancel" data-i18n="cancel">Отмена</button>
         <button type="submit" id="zone-rename-save" data-i18n="save">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="save-entry">
+    <form id="save-entry-form" method="dialog">
+      <h2 data-i18n="savesEntryEditTitle">Папка сохранений</h2>
+      <label><span data-i18n="savesEntryName">Название</span><input id="save-entry-name" maxlength="60" required></label>
+      <label><span data-i18n="savesEntryPath">Путь</span><input id="save-entry-path" class="mono" maxlength="260" spellcheck="false" required></label>
+      <p id="save-entry-error" class="error small" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="ghost" id="save-entry-cancel" data-i18n="cancel">Отмена</button>
+        <button type="submit" id="save-entry-save" data-i18n="save">Сохранить</button>
       </div>
     </form>
   </dialog>

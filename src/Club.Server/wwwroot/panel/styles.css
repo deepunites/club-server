@@ -256,3 +256,28 @@ td.wrap { white-space: normal; min-width: 300px; }
 .lib-line { display: flex; gap: 6px; align-items: center; }
 .lib-line + .lib-line { margin-top: 4px; }
 .lib-letter { color: var(--muted); min-width: 2.5ch; }
+
+/* Экран «Сохранения»: исключения — по одному в строке, путь папки — длинный шаблон, поиск и страницы игроков. */
+textarea {
+  font: inherit;
+  color: inherit;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  padding: 6px 10px;
+  width: 100%;
+  resize: vertical;
+}
+textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.fields textarea.invalid, .publish-row input.invalid, dialog input.invalid { border-color: var(--bad); }
+.sv-actions { justify-content: flex-end; }
+.publish-row input.sv-path { width: min(420px, 100%); }
+#save-entry { width: min(520px, calc(100vw - 32px)); }
+.sv-status { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; align-items: center; margin: 0; }
+.sv-status dt { color: var(--muted); }
+.sv-status dd { margin: 0; overflow-wrap: anywhere; }
+.sv-players-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; justify-content: space-between; padding-right: 10px; }
+.sv-players-head .table-title { margin: 0; }
+#sv-query { width: min(320px, 100%); margin-top: 10px; }
+.sv-pages { display: flex; gap: 10px; align-items: center; justify-content: center; padding: 10px; border-top: 1px solid var(--border); }
+.sv-pages[hidden] { display: none; }
