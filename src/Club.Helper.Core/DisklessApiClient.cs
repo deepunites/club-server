@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -66,6 +67,39 @@ public sealed class ServerUnavailableException(string message, Exception? inner 
     public HttpStatusCode? Status { get; } = status;
 }
 
+/// <summary>Папка из списка сохранений: ID записи (имя папки в архиве) и шаблон пути (<c>%APPDATA%\…</c>, <c>H:\…</c>).</summary>
+public sealed record SaveEntryConfig(Guid Id, string Path);
+
+/// <summary>
+/// Настройки сохранений (<c>GET …/saves/config</c> и заголовок attach, spec 2026-11-05, п. 3.3): <paramref name="Enabled"/> —
+/// сохранения включены на сервере и диск сохранений смонтирован; только включённые папки.
+/// </summary>
+public sealed record SavesConfig(bool Enabled, int LimitMb, IReadOnlyList<string> Excludes, IReadOnlyList<SaveEntryConfig> Entries);
+
+/// <summary>
+/// Ответ выдачи сохранений: настройки из заголовка и архив игрока (<c>null</c> — у игрока ничего нет, 204). Архив —
+/// zip во временном файле (с перемоткой: распаковка не копирует его в память), ответ сервера к этому времени уже закрыт;
+/// файл удаляется при <see cref="DisposeAsync"/>.
+/// </summary>
+public sealed class SavesAttach(SavesConfig config, Stream? archive) : IAsyncDisposable
+{
+    public SavesConfig Config { get; } = config;
+
+    public Stream? Archive { get; } = archive;
+
+    public ValueTask DisposeAsync() => Archive?.DisposeAsync() ?? ValueTask.CompletedTask;
+}
+
+/// <summary>
+/// Сервер ответил на команду сохранений отказом по существу (а не «недоступен»): <see cref="Reason"/> — <c>notAttached</c>
+/// (409: сохранения игрока выданы не этому ПК), <c>overLimit</c> (413), <c>badArchive</c> (400), <c>disabled</c> (503
+/// <c>savesUnavailable</c>: сохранения выключены или диск сохранений не смонтирован).
+/// </summary>
+public sealed class SavesRejectedException(string reason) : Exception($"Player saves rejected by the server: {reason}")
+{
+    public string Reason { get; } = reason;
+}
+
 /// <summary>Машина в реестре, но ждёт одобрения администратора.</summary>
 public sealed class PendingApprovalException() : Exception("Machine is waiting for administrator approval");
 
@@ -74,13 +108,22 @@ public sealed class PendingApprovalException() : Exception("Machine is waiting f
 /// регистрируется заново по ключу клуба (номер места сохраняется — сервер узнаёт машину по HWID).
 /// Один экземпляр на все библиотеки (циклы G: и H: идут по очереди, <see cref="HelperLoops"/>): refresh-токен одноразовый,
 /// второй клиент с той же парой предъявил бы уже использованный — сервер принял бы это за кражу и отозвал бы токены машины.
+/// <paramref name="transfers"/> — отдельный HttpClient для архивов сохранений (attach и PUT: десятки и сотни мегабайт, свой
+/// тайм-аут); <c>null</c> — тот же <paramref name="http"/>.
 /// </summary>
-public sealed class DisklessApiClient(HttpClient http, HelperOptions options, ICredentialStore store, IMachineIdentity identity)
+public sealed class DisklessApiClient(HttpClient http, HelperOptions options, ICredentialStore store, IMachineIdentity identity, HttpClient? transfers = null)
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
+
+    /// <summary>UTF-8 без замены битых байт: сломанный заголовок настроек — ошибка, а не «�» в пути.</summary>
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
+    private const int BufferSize = 81920;
+
+    private readonly HttpClient _transfers = transfers ?? http;
 
     private StoredCredentials? _credentials;
 
@@ -114,31 +157,255 @@ public sealed class DisklessApiClient(HttpClient http, HelperOptions options, IC
         return await ReadAsync<StatusAccepted>(response, ct);
     }
 
+    /// <summary>Заголовок ответа attach (200 и 204): <see cref="SavesConfig"/> — base64 от UTF-8 JSON (в путях бывает кириллица).</summary>
+    public const string SavesConfigHeader = "X-Club-Saves-Config";
+
+    /// <summary>
+    /// Список папок сохранений (при старте и раз в 5 минут). Сервер отвечает и когда сохранения недоступны — с
+    /// <c>enabled=false</c>; ошибки — <see cref="ServerUnavailableException"/>.
+    /// </summary>
+    public async Task<SavesConfig> GetSavesConfigAsync(CancellationToken ct)
+    {
+        using var response = await SendAuthorizedAsync(id => new HttpRequestMessage(HttpMethod.Get, $"{SavesPath(id)}/config"), ct);
+        return Checked(await ReadAsync<SavesConfig>(response, ct), "saves config");
+    }
+
+    /// <summary>
+    /// Выдача сохранений игрока этому ПК (сервер записывает аренду, забирая её у другого ПК): архив скачивается через
+    /// <c>transfers</c> во временный файл (<see cref="Path.GetTempPath"/>; у SYSTEM — <c>C:\Windows\SystemTemp</c>, доступ
+    /// только SYSTEM и администраторам), тело ответа читается не дольше тайм-аута этого HttpClient. Отказ —
+    /// <see cref="SavesRejectedException"/> (<c>disabled</c>); сеть, прочие коды, сломанный заголовок настроек —
+    /// <see cref="ServerUnavailableException"/> (аренда тогда, возможно, уже взята: следующая выдача её перезапишет).
+    /// </summary>
+    public async Task<SavesAttach> AttachSavesAsync(string playerId, CancellationToken ct)
+    {
+        using var response = await SendSavesAsync(_transfers, id => new HttpRequestMessage(HttpMethod.Post, $"{SavesPath(id, playerId)}/attach"),
+            HttpCompletionOption.ResponseHeadersRead, ct);
+        var config = DecodeConfig(response);
+        return new SavesAttach(config, response.StatusCode == HttpStatusCode.NoContent ? null : await DownloadAsync(response, ct));
+    }
+
+    /// <summary>
+    /// Новая версия сохранений игрока (zip, записи <c>&lt;entryId&gt;/&lt;путь&gt;</c>) через <c>transfers</c>.
+    /// <paramref name="archive"/> — поток с перемоткой (временный файл) с текущей позиции до конца; не закрывается. Нужна
+    /// перемотка: после 401 запрос повторяется с новым токеном с той же позиции. Отказ — <see cref="SavesRejectedException"/>
+    /// (<c>notAttached</c>, <c>overLimit</c>, <c>badArchive</c>, <c>disabled</c>).
+    /// </summary>
+    public async Task PutSavesAsync(string playerId, Stream archive, CancellationToken ct)
+    {
+        if (!archive.CanSeek)
+        {
+            throw new ArgumentException("Saves archive stream must be seekable (a temp file)", nameof(archive));
+        }
+
+        var start = archive.Position;
+        using var response = await SendSavesAsync(_transfers,
+            id => new HttpRequestMessage(HttpMethod.Put, SavesPath(id, playerId)) { Content = new ArchiveContent(archive, start) },
+            HttpCompletionOption.ResponseContentRead, ct);
+    }
+
+    /// <summary>Снять аренду без сохранения (выдача на ПК не удалась после ответа сервера). Отказ — как у <see cref="PutSavesAsync"/>.</summary>
+    public async Task ReleaseSavesLeaseAsync(string playerId, CancellationToken ct)
+    {
+        using var response = await SendSavesAsync(http, id => new HttpRequestMessage(HttpMethod.Delete, $"{SavesPath(id, playerId)}/lease"),
+            HttpCompletionOption.ResponseContentRead, ct);
+    }
+
     private static string MachinePath(Guid id, string? library) =>
         library is null ? $"diskless/v1/machines/{id}" : $"diskless/v1/machines/{id}/libraries/{library}";
 
+    private static string SavesPath(Guid id) => $"diskless/v1/machines/{id}/saves";
+
+    private static string SavesPath(Guid id, string playerId) => $"{SavesPath(id)}/{Uri.EscapeDataString(playerId)}";
+
     private async Task<HttpResponseMessage> SendAuthorizedAsync(Func<Guid, HttpRequestMessage> build, CancellationToken ct)
+    {
+        var response = await SendAuthorizedAsync(build, http, HttpCompletionOption.ResponseContentRead, ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            var text = await response.Content.ReadAsStringAsync(ct);
+            response.Dispose();
+            throw new ServerUnavailableException($"{Describe(response)}: {(int)response.StatusCode} {text}", status: response.StatusCode);
+        }
+
+        return response;
+    }
+
+    /// <summary>
+    /// Запрос с токеном машины через <paramref name="client"/>: при 401 — обновление токенов и один повтор. Ответ отдаётся
+    /// с любым кодом (кроме первого 401) — разбирает вызывающий.
+    /// </summary>
+    private async Task<HttpResponseMessage> SendAuthorizedAsync(Func<Guid, HttpRequestMessage> build, HttpClient client, HttpCompletionOption completion,
+        CancellationToken ct)
     {
         await EnsureCredentialsAsync(ct);
         for (var attempt = 0; ; attempt++)
         {
             using var request = build(_credentials!.MachineId);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _credentials.AccessToken);
-            var response = await SendAsync(request, ct);
+            var response = await SendAsync(request, ct, client, completion);
             if (response.StatusCode != HttpStatusCode.Unauthorized || attempt > 0)
             {
-                if (!response.IsSuccessStatusCode)
-                {
-                    var text = await response.Content.ReadAsStringAsync(ct);
-                    response.Dispose();
-                    throw new ServerUnavailableException($"{request.Method} {request.RequestUri}: {(int)response.StatusCode} {text}", status: response.StatusCode);
-                }
-
                 return response;
             }
 
             response.Dispose();
             await RenewAsync(ct);
+        }
+    }
+
+    /// <summary>
+    /// Команда сохранений: 2xx — ответ; отказы сервера по существу — <see cref="SavesRejectedException"/> (409 —
+    /// <c>notAttached</c>, 413 — <c>overLimit</c>, 400 с <c>reason=badArchive</c> — <c>badArchive</c>, 503 с
+    /// <c>reason=savesUnavailable</c> — <c>disabled</c>); прочие коды — <see cref="ServerUnavailableException"/>.
+    /// </summary>
+    private async Task<HttpResponseMessage> SendSavesAsync(HttpClient client, Func<Guid, HttpRequestMessage> build, HttpCompletionOption completion,
+        CancellationToken ct)
+    {
+        var response = await SendAuthorizedAsync(build, client, completion, ct);
+        if (response.IsSuccessStatusCode)
+        {
+            return response;
+        }
+
+        using (response)
+        {
+            string text;
+            try
+            {
+                text = await response.Content.ReadAsStringAsync(ct);
+            }
+            catch (Exception ex) when (ex is IOException or HttpRequestException)
+            {
+                text = "";
+            }
+
+            Exception error = (response.StatusCode, ErrorReason(text)) switch
+            {
+                (HttpStatusCode.Conflict, _) => new SavesRejectedException("notAttached"),
+                (HttpStatusCode.RequestEntityTooLarge, _) => new SavesRejectedException("overLimit"),
+                (HttpStatusCode.BadRequest, "badArchive") => new SavesRejectedException("badArchive"),
+                (HttpStatusCode.ServiceUnavailable, "savesUnavailable") => new SavesRejectedException("disabled"),
+                _ => new ServerUnavailableException($"{Describe(response)}: {(int)response.StatusCode} {text}", status: response.StatusCode),
+            };
+            throw error;
+        }
+    }
+
+    private static string Describe(HttpResponseMessage response) =>
+        response.RequestMessage is { } request ? $"{request.Method} {request.RequestUri}" : "request";
+
+    /// <summary><c>error.details.reason</c> из конверта ошибки сервера; <c>null</c> — нет или тело не JSON.</summary>
+    private static string? ErrorReason(string body)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            return document.RootElement is { ValueKind: JsonValueKind.Object } root
+                && root.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object
+                && error.TryGetProperty("details", out var details) && details.ValueKind == JsonValueKind.Object
+                && details.TryGetProperty("reason", out var reason) && reason.ValueKind == JsonValueKind.String
+                ? reason.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Настройки из заголовка attach: строго base64 → UTF-8 → JSON; иначе — <see cref="ServerUnavailableException"/>.</summary>
+    private static SavesConfig DecodeConfig(HttpResponseMessage response)
+    {
+        if (!response.Headers.TryGetValues(SavesConfigHeader, out var values) || values.ToList() is not [var value])
+        {
+            throw new ServerUnavailableException($"saves attach: no single {SavesConfigHeader} header");
+        }
+
+        SavesConfig? config;
+        try
+        {
+            config = JsonSerializer.Deserialize<SavesConfig>(StrictUtf8.GetString(Convert.FromBase64String(value)), Json);
+        }
+        catch (Exception ex) when (ex is FormatException or DecoderFallbackException or JsonException)
+        {
+            throw new ServerUnavailableException($"saves attach: malformed {SavesConfigHeader} header: {ex.Message}", ex);
+        }
+
+        return Checked(config, $"{SavesConfigHeader} header");
+    }
+
+    /// <summary>Настройки без списков или с папкой без пути — ответ не того сервера: <see cref="ServerUnavailableException"/>.</summary>
+    private static SavesConfig Checked(SavesConfig? config, string source) =>
+        config is { Excludes: not null, Entries: not null } && config.Excludes.All(e => e is not null) && config.Entries.All(e => e is { Path: not null })
+            ? config
+            : throw new ServerUnavailableException($"{source}: incomplete saves config");
+
+    /// <summary>
+    /// Тело ответа attach — во временный файл (удаляется при закрытии); сеть оборвалась или тело шло дольше тайм-аута
+    /// <c>transfers</c> — <see cref="ServerUnavailableException"/>, файл удаляется.
+    /// </summary>
+    private async Task<Stream> DownloadAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        var file = new FileStream(Path.Combine(Path.GetTempPath(), $"club-saves-{Guid.NewGuid():N}.zip"), FileMode.CreateNew, FileAccess.ReadWrite,
+            FileShare.None, BufferSize, FileOptions.Asynchronous | FileOptions.DeleteOnClose);
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            if (_transfers.Timeout != Timeout.InfiniteTimeSpan)
+            {
+                timeout.CancelAfter(_transfers.Timeout);
+            }
+
+            await using (var body = await response.Content.ReadAsStreamAsync(timeout.Token))
+            {
+                await body.CopyToAsync(file, BufferSize, timeout.Token);
+            }
+
+            file.Position = 0;
+            return file;
+        }
+        catch (Exception ex)
+        {
+            await file.DisposeAsync();
+            if (ex is IOException or HttpRequestException or OperationCanceledException && !ct.IsCancellationRequested)
+            {
+                throw new ServerUnavailableException($"saves attach: archive download failed: {ex.Message}", ex);
+            }
+
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Тело PUT: архив с позиции <c>start</c> до конца, с Content-Length (сервер сразу отвечает 413 на слишком большое).
+    /// Поток вызывающего не закрывает; каждая отправка (повтор после 401) — снова с <c>start</c>.
+    /// </summary>
+    private sealed class ArchiveContent : HttpContent
+    {
+        private readonly Stream _archive;
+        private readonly long _start;
+
+        public ArchiveContent(Stream archive, long start)
+        {
+            _archive = archive;
+            _start = start;
+            Headers.ContentType = new MediaTypeHeaderValue("application/zip");
+        }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            SerializeToStreamAsync(stream, context, CancellationToken.None);
+
+        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context, CancellationToken cancellationToken)
+        {
+            _archive.Position = _start;
+            await _archive.CopyToAsync(stream, BufferSize, cancellationToken);
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = Math.Max(0, _archive.Length - _start);
+            return true;
         }
     }
 
@@ -219,11 +486,12 @@ public sealed class DisklessApiClient(HttpClient http, HelperOptions options, IC
         await store.SaveAsync(_credentials, ct);
     }
 
-    private async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    private async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct, HttpClient? client = null,
+        HttpCompletionOption completion = HttpCompletionOption.ResponseContentRead)
     {
         try
         {
-            return await http.SendAsync(request, ct);
+            return await (client ?? http).SendAsync(request, completion, ct);
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested)
         {
