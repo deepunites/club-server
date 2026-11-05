@@ -88,6 +88,7 @@ builder.Services.AddSingleton<DisklessImages>();
 builder.Services.AddSingleton<SeatDisks>();
 builder.Services.AddSingleton(savesOptions);
 builder.Services.AddSingleton<SavesRepository>();
+builder.Services.AddSingleton<SaveStore>();
 if (libraryOptions.Enabled && libraryOptions.RunWorker)
 {
     builder.Services.AddHostedService<StorageWorker>();
@@ -102,6 +103,17 @@ if (builder.Configuration.GetValue("Database:MigrateOnStart", true))
 
 // Схема каждой следующей библиотеки на месте — иначе она выключается, G: работает.
 await app.Services.GetRequiredService<LibrarySet>().CheckSchemasAsync();
+
+// Остатки приёмов сохранений, прерванных падением сервера. Диск сохранений не смонтирован — API сохранений отвечает 503.
+var saveStore = app.Services.GetRequiredService<SaveStore>();
+if (saveStore.Available)
+{
+    saveStore.CleanTemp();
+}
+else if (savesOptions.Enabled)
+{
+    app.Logger.LogWarning("Saves root {Root} has no {Marker}: saves disk not mounted, saves API answers 503", savesOptions.Root, SavesOptions.MarkerFile);
+}
 
 app.UseMiddleware<ApiErrorMiddleware>();
 app.UseDefaultFiles();
