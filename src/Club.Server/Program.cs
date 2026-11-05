@@ -134,6 +134,7 @@ app.MapZonesPanelEndpoints();
 app.MapNetworkPanelEndpoints();
 app.MapImagesPanelEndpoints();
 app.MapDisklessPanelEndpoints();
+app.MapSavesPanelEndpoints();
 app.MapPxeEndpoints();
 app.MapDeployEndpoints();
 app.MapGet("/", () => Results.Redirect("/panel/"));

@@ -280,3 +280,32 @@ pxeArmed, attempts, updatedAt, allowNotGeneralized }`, статус `reimaging`,
 
 Версии доходят до мест при их следующей загрузке; у работающего места (свежий отчёт помощника и сессия к его диску)
 диск не сбрасывается. В строке машины на «Рабочих станциях» — `bootMode`.
+
+## Сохранения игр
+
+Экран «Сохранения» (`/panel/#saves`). Устройство — `docs/superpowers/specs/2026-11-05-player-saves-design.md`;
+помощник на ПК берёт те же папки через `GET /diskless/v1/machines/{id}/saves/config` (`docs/diskless-api.yaml`).
+
+| Метод и путь | Что делает | Ответы |
+|---|---|---|
+| `GET /saves/settings` | `limitMb, excludes` — лимит на игрока (МБ) и исключения (имена папок или файлов, маски `*.dmp`) | 200 |
+| `PUT /saves/settings` `{ limitMb?, excludes? }` | Сохранить (поле без значения не меняется) | 200 (настройки); 400 |
+| `GET /saves/entries` | Папки: `[{ id, name, path, enabled }]`, все, по названию | 200 |
+| `POST /saves/entries` `{ name, path, enabled? }` | Добавить папку (`enabled` по умолчанию `true`) | 201 (папка); 400 |
+| `PUT /saves/entries/{id}` `{ name?, path?, enabled? }` | Изменить (поле без значения не меняется) | 200 (папка); 400; 404 |
+| `DELETE /saves/entries/{id}` | Удалить папку из списка (её файлы в уже сохранённых версиях помощник при выдаче пропускает; сервер в новых архивах её не принимает) | 204; 404 |
+| `GET /saves/players?query=&page=` | `{ items: [{ playerId, sizeBytes, fileCount, savedAt, machineId, machineName, lastResult, lastResultAt, lastError }], total, pageSize: 50 }`; `query` — часть ID без учёта регистра, `page` с 1 | 200 |
+| `DELETE /saves/players/{playerId}` | Удалить сохранения игрока: папку, `.prev`, аренду и строку | 204; 400 (`playerId`); 503 (`savesUnavailable`) |
+| `GET /saves/status` | `enabled` (`Saves:Enabled`), `available` (диск смонтирован: есть `<root>/.club-saves`), `root`, `usedBytes` (файлы в корне, с `.prev`; без диска — 0) | 200 |
+
+400: `details = { field, reason }`. `limitMb` — `range` (1…2000); `excludes` — `tooMany` (больше 50), `length`
+(пустое или длиннее 100 символов после обрезки пробелов); `name` — `length` (1…60); `path` — код проверки шаблона
+(как у помощника): `empty`, `tooLong` (длиннее 260), `badVariable` (переменная не из `%USERPROFILE%`, `%APPDATA%`,
+`%LOCALAPPDATA%`, `%LOCALAPPDATA_LOW%`, `%DOCUMENTS%`, `%SAVEDGAMES%`), `dotDot`, `drive` (не буква библиотеки
+сервера — `Library:DriveLetter` и `Libraries:*:DriveLetter`; относительный или сетевой путь), `root` (корень профиля
+или диска), `invalidChars`. Вложенные папки (`%APPDATA%\Game` и `%APPDATA%\Game\Saves`) допустимы, но их файлы
+пакуются дважды и дважды идут в лимит.
+
+`lastResult`: `ok`, `overLimit` (больше лимита, осталась прошлая версия), `rejected` (сохранение с ПК без аренды),
+`error` (плохой архив). `machineName` — null, если машину удалили из реестра. Удаление игрока ждёт идущую выдачу или
+приём его сохранений (блокировка игрока); ID в любом регистре — тот же игрок.
