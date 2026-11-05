@@ -7,6 +7,7 @@ using Club.Server.Integration;
 using Club.Server.Library;
 using Club.Server.Network;
 using Club.Server.Panel;
+using Club.Server.Saves;
 using Club.TrueNas;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -26,6 +27,7 @@ var machineFeedOptions = builder.Configuration.GetSection("MachineFeed").Get<Mac
 machineFeedOptions.Validate();
 var disklessOptions = builder.Configuration.GetSection("Diskless").Get<DisklessOptions>() ?? new DisklessOptions();
 disklessOptions.Validate();
+var savesOptions = builder.Configuration.GetSection("Saves").Get<SavesOptions>() ?? new SavesOptions();
 
 builder.Services.ConfigureHttpJsonOptions(o => ApiJson.Configure(o.SerializerOptions));
 builder.Services.AddSingleton(TimeProvider.System);
@@ -84,6 +86,8 @@ builder.Services.AddSingleton(disklessOptions);
 builder.Services.AddSingleton<DisklessRepository>();
 builder.Services.AddSingleton<DisklessImages>();
 builder.Services.AddSingleton<SeatDisks>();
+builder.Services.AddSingleton(savesOptions);
+builder.Services.AddSingleton<SavesRepository>();
 if (libraryOptions.Enabled && libraryOptions.RunWorker)
 {
     builder.Services.AddHostedService<StorageWorker>();
