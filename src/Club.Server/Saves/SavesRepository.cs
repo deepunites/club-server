@@ -108,16 +108,23 @@ public sealed class SavesRepository(NpgsqlDataSource db)
         {
             await connection.ExecuteAsync(new CommandDefinition(
                 "SELECT pg_advisory_lock(hashtext('save:' || @playerId))", new { playerId }, commandTimeout: 0, cancellationToken: cancellationToken));
-            return new PlayerLock(connection, playerId);
+            return new PlayerLock(db, connection, playerId);
         }
         catch
         {
             // Отмена могла прийти, когда блокировка уже взята: соединение закрывается, а не уходит в пул с ней.
-            NpgsqlConnection.ClearPool(connection);
+            DiscardOnReturn(db);
             await connection.DisposeAsync();
             throw;
         }
     }
+
+    /// <summary>
+    /// Соединения пула, занятые сейчас, при возврате закрываются, свободные — сразу. <c>NpgsqlConnection.ClearPool</c>
+    /// соединения из <see cref="NpgsqlDataSource"/> не трогает (проверено на Npgsql 10): блокировка сеанса осталась бы на
+    /// соединении в пуле. Редкий путь ошибки — пул наберётся заново.
+    /// </summary>
+    private static void DiscardOnReturn(NpgsqlDataSource dataSource) => dataSource.Clear();
 
     /// <summary>Аренда «игрок на этой машине»: забирается у другой машины, если была (тот ПК пропал, не сохранив).</summary>
     public async Task TakeLeaseAsync(string playerId, Guid machineId)
@@ -230,7 +237,7 @@ public sealed class SavesRepository(NpgsqlDataSource db)
     }
 
     /// <summary>Блокировка игрока: освобождение снимает advisory-блокировку и возвращает соединение в пул.</summary>
-    private sealed class PlayerLock(NpgsqlConnection connection, string playerId) : IAsyncDisposable
+    private sealed class PlayerLock(NpgsqlDataSource dataSource, NpgsqlConnection connection, string playerId) : IAsyncDisposable
     {
         private int _disposed;
 
@@ -248,7 +255,7 @@ public sealed class SavesRepository(NpgsqlDataSource db)
             catch
             {
                 // Не сняли — соединение закрывается, а не уходит в пул: блокировка сеанса снимается вместе с ним.
-                NpgsqlConnection.ClearPool(connection);
+                DiscardOnReturn(dataSource);
                 throw;
             }
             finally

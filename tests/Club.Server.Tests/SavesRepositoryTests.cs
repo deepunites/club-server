@@ -18,9 +18,9 @@ public sealed class SavesRepositoryTests : IAsyncLifetime
 
     private SavesRepository Repository => _server.Services.GetRequiredService<SavesRepository>();
 
-    private async Task<MachineRow> MachineAsync() =>
+    private async Task<MachineRow> MachineAsync(string name = "PC-TEST") =>
         await _server.Services.GetRequiredService<MachineRepository>().CreateAsync(
-            new MachineRegistration(Guid.NewGuid().ToString("N"), "PC-TEST", ["aa:bb:cc:dd:ee:ff"], "10.0.0.2", "1.7.0", null), approved: true);
+            new MachineRegistration(Guid.NewGuid().ToString("N"), name, ["aa:bb:cc:dd:ee:ff"], "10.0.0.2", "1.7.0", null), approved: true);
 
     [Fact]
     public async Task Defaults_after_migration()
@@ -125,10 +125,37 @@ public sealed class SavesRepositoryTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Lock_wait_can_be_cancelled()
+    {
+        const string player = "player-3";
+        var first = await Repository.LockPlayerAsync(player);
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Repository.LockPlayerAsync(player, cts.Token).WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.True(await HeldElsewhereAsync(player));
+
+        // Отменённое ожидание блокировку не оставляет: после освобождения первой её никто не держит.
+        await first.DisposeAsync();
+        Assert.False(await HeldElsewhereAsync(player));
+    }
+
+    /// <summary>Держит ли блокировку игрока другое соединение (проверка с отдельного соединения).</summary>
+    private async Task<bool> HeldElsewhereAsync(string playerId)
+    {
+        await using var c = await _server.Services.GetRequiredService<NpgsqlDataSource>().OpenConnectionAsync();
+        if (!await c.ExecuteScalarAsync<bool>("SELECT pg_try_advisory_lock(hashtext('save:' || @playerId))", new { playerId }))
+        {
+            return true;
+        }
+
+        await c.ExecuteAsync("SELECT pg_advisory_unlock(hashtext('save:' || @playerId))", new { playerId });
+        return false;
+    }
+
+    [Fact]
     public async Task Players_paging_and_search()
     {
-        var a = await MachineAsync();
-        var b = await MachineAsync();
+        var a = await MachineAsync("PC-A");
+        var b = await MachineAsync("PC-B");
         var ids = Enumerable.Range(1, 7).Select(i => $"abc-{i:D2}").Append("zzz-01").ToList();
         foreach (var id in ids)
         {
