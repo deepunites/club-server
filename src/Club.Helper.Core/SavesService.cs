@@ -17,8 +17,11 @@ namespace Club.Helper.Core;
 /// повтор <see cref="BusyRetries"/> раза через <see cref="BusyRetryDelay"/>; больше лимита — аренда снимается,
 /// <c>overLimit</c>; отправка.
 /// «Выдано» — в памяти (spec п. 4.3): после перезапуска службы detach отвечает <c>notAttached</c>, на сервере остаётся
-/// прошлая версия. Удаляется только содержимое папок записей списка; ссылки (symlink, junction) внутри удаляются сами, не
-/// то, куда ведут, а папка записи, которая сама ссылка, на этом ПК пропускается. Команды и такт — по одной
+/// прошлая версия. Папки записей, пропущенных на этом ПК (библиотека не подключена, нет исходного содержимого и т. п.),
+/// не трогаются, а их файлы из архива сервера ждут в <c>saves-carry</c> и уходят в detach как были: сервер заменяет папку
+/// игрока целиком и иначе потерял бы их. Удаляется только содержимое папок записей списка; ссылки (symlink, junction)
+/// внутри удаляются сами, не то, куда ведут, а папка записи, которая сама ссылка или лежит под ссылкой (до корня профиля
+/// или буквы), пропускается — и при выдаче, и при сохранении. Команды и такт — по одной
 /// (<see cref="SemaphoreSlim"/>): такт, пока идёт команда, пропускается и цикл помощника не ждёт.
 /// </summary>
 public sealed class SavesService(
@@ -58,6 +61,9 @@ public sealed class SavesService(
     /// <summary>Временные архивы detach (удаляются при закрытии).</summary>
     private readonly string _temp = Path.Combine(stateDirectory, "saves-tmp");
 
+    /// <summary>Файлы игрока из архива сервера для записей, пропущенных на этом ПК: <c>&lt;entryId&gt;\…</c>, до конца выдачи.</summary>
+    private readonly string _carry = Path.Combine(stateDirectory, "saves-carry");
+
     /// <summary>Библиотеки ПК из последнего такта (attach берёт их отсюда).</summary>
     private volatile IReadOnlyList<LibraryMount> _libraries = [];
 
@@ -72,10 +78,14 @@ public sealed class SavesService(
     /// <summary>Кому выдано на этом ПК и какие папки разложены; <c>null</c> — никому.</summary>
     private Session? _attached;
 
-    /// <summary>Папка записи списка на этом ПК: ID записи и путь.</summary>
-    private sealed record Folder(Guid Id, string Directory);
+    /// <summary>Папка записи списка на этом ПК: ID записи, путь и корень, под которым он (профиль, буква библиотеки).</summary>
+    private sealed record Folder(Guid Id, string Directory, string Root);
 
-    private sealed record Session(string PlayerId, IReadOnlyList<Folder> Folders);
+    /// <summary>
+    /// Выдача: кому, какие папки разложены (<paramref name="Folders"/>) и где файлы игрока для записей, пропущенных на этом
+    /// ПК (<paramref name="Carried"/>, в <c>saves-carry</c>).
+    /// </summary>
+    private sealed record Session(string PlayerId, IReadOnlyList<Folder> Folders, IReadOnlyList<Folder> Carried);
 
     /// <summary>
     /// Состояние исходного содержимого записи: для какой версии библиотеки и какого шаблона снято;
@@ -179,7 +189,7 @@ public sealed class SavesService(
     private async Task<(SavesResult Result, long Bytes, int Files)> AttachLockedAsync(string id, string sid, CancellationToken ct)
     {
         // Новая выдача: прежний игрок закончил (или detach не пришёл) — его «выдано» больше не действует.
-        _attached = null;
+        Forget();
         if (masterActive())
         {
             return (SavesResult.Fail(SavesErrors.MasterMode, "A library on this PC is in master mode"), 0, 0);
@@ -215,8 +225,11 @@ public sealed class SavesService(
                     return (SavesResult.Fail(SavesErrors.Disabled, "Player saves are disabled on the club server"), 0, 0);
                 }
 
+                DropCarry();
                 var baselines = new List<(Folder Folder, string Zip)>();
-                var folders = Folders(attach.Config, profile, _libraries, baselines);
+                var skipped = new List<Guid>();
+                var folders = Folders(attach.Config, profile, _libraries, baselines, skipped);
+                var carried = skipped.Select(e => new Folder(e, Path.Combine(_carry, e.ToString("D")), _carry)).ToList();
                 foreach (var folder in folders)
                 {
                     Clear(folder.Directory);
@@ -230,12 +243,12 @@ public sealed class SavesService(
                 var unpacked = new SaveUnpackResult(0, 0);
                 if (attach.Archive is { } archive)
                 {
-                    var targets = folders.ToDictionary(f => f.Id, f => f.Directory);
+                    var targets = folders.Concat(carried).ToDictionary(f => f.Id, f => f.Directory);
                     unpacked = SaveArchive.Unpack(archive, entryId => targets.GetValueOrDefault(entryId), LimitBytes(attach.Config.LimitMb),
                         unknownIsError: false);
                 }
 
-                _attached = new Session(id, folders);
+                _attached = new Session(id, folders, carried);
                 return (SavesResult.Success, unpacked.Bytes, unpacked.Files);
             }
             catch (Exception ex)
@@ -262,7 +275,7 @@ public sealed class SavesService(
 
         if (masterActive())
         {
-            _attached = null;
+            Forget();
             await ReleaseAsync(id);
             return (SavesResult.Fail(SavesErrors.MasterMode, "A library on this PC is in master mode; nothing sent"), 0, 0);
         }
@@ -284,7 +297,19 @@ public sealed class SavesService(
         }
 
         var listed = config.Entries.Select(e => e.Id).ToHashSet();
-        var folders = session.Folders.Where(f => listed.Contains(f.Id)).Select(f => (f.Id, f.Directory)).ToList();
+        var folders = new List<(Guid, string)>();
+        foreach (var folder in session.Folders.Concat(session.Carried).Where(f => listed.Contains(f.Id)))
+        {
+            // Ссылку сделали посреди сеанса — не забираем то, куда она ведёт (у службы прав больше, чем у игрока).
+            if (ThroughLink(folder))
+            {
+                logger.LogWarning("Saves folder {EntryId} not sent: {Directory} is a link or under one", folder.Id, folder.Directory);
+                continue;
+            }
+
+            folders.Add((folder.Id, folder.Directory));
+        }
+
         Directory.CreateDirectory(_temp);
         await using var archive = new FileStream(Path.Combine(_temp, $"{Guid.NewGuid():N}.zip"), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None,
             BufferSize, FileOptions.DeleteOnClose);
@@ -295,7 +320,7 @@ public sealed class SavesService(
         }
         catch (SaveArchiveException ex) when (ex.Reason == SaveArchiveException.OverLimit)
         {
-            _attached = null;
+            Forget();
             await ReleaseAsync(id);
             return (SavesResult.Fail(SavesErrors.OverLimit, ex.Message), 0, 0);
         }
@@ -307,7 +332,7 @@ public sealed class SavesService(
 
         if (packed.Bytes > LimitBytes(config.LimitMb))
         {
-            _attached = null;
+            Forget();
             await ReleaseAsync(id);
             return (SavesResult.Fail(SavesErrors.OverLimit, $"Saves are {packed.Bytes} bytes, the limit is {config.LimitMb} MB; nothing sent"), packed.Bytes,
                 packed.Files);
@@ -323,7 +348,7 @@ public sealed class SavesService(
             // Отказ по существу — эта выдача кончилась; «выключено» (диск сохранений отвалился) — можно повторить.
             if (ex.Reason != "disabled")
             {
-                _attached = null;
+                Forget();
             }
 
             return (Rejected(ex), packed.Bytes, packed.Files);
@@ -333,7 +358,7 @@ public sealed class SavesService(
             return (SavesResult.Fail(SavesErrors.ServerUnavailable, ex.Message), packed.Bytes, packed.Files);
         }
 
-        _attached = null;
+        Forget();
         return (SavesResult.Success, packed.Bytes, packed.Files);
     }
 
@@ -359,9 +384,11 @@ public sealed class SavesService(
     /// <summary>
     /// Папки записей на этом ПК. Пропускаются (с предупреждением): шаблон, который помощник не принял бы (буква не
     /// библиотеки ПК), библиотека не подключена, нет исходного содержимого для её версии (или оно больше лимита), папка —
-    /// ссылка. В <paramref name="baselines"/> — исходное содержимое для папок на буквах библиотек.
+    /// ссылка или под ссылкой. В <paramref name="baselines"/> — исходное содержимое для папок на буквах библиотек, в
+    /// <paramref name="skipped"/> — ID пропущенных записей.
     /// </summary>
-    private List<Folder> Folders(SavesConfig config, string profile, IReadOnlyList<LibraryMount> libraries, List<(Folder, string)> baselines)
+    private List<Folder> Folders(SavesConfig config, string profile, IReadOnlyList<LibraryMount> libraries, List<(Folder, string)> baselines,
+        List<Guid> skipped)
     {
         var letters = libraries.Select(l => char.ToUpperInvariant(l.Letter)).ToList();
         var folders = new List<Folder>();
@@ -371,6 +398,7 @@ public sealed class SavesService(
             {
                 logger.LogWarning("Saves folder {EntryId} ({Path}) skipped on this PC: {Problem} (libraries here: {Letters})",
                     entry.Id, entry.Path, problem, string.Join(", ", letters));
+                skipped.Add(entry.Id);
                 continue;
             }
 
@@ -379,7 +407,7 @@ public sealed class SavesService(
             string? baseline = null;
             if (target.Kind == SaveTargetKind.Profile)
             {
-                folder = new Folder(entry.Id, Under(Under(profile, SavePathTemplate.ProfileSubpath(target.Anchor)), target.RelativePath));
+                folder = new Folder(entry.Id, Under(Under(profile, SavePathTemplate.ProfileSubpath(target.Anchor)), target.RelativePath), profile);
             }
             else
             {
@@ -392,16 +420,19 @@ public sealed class SavesService(
                         !mount.Mounted ? "library not mounted"
                         : state is { OverLimit: true } && state.Version == mount.Version && state.Path == entry.Path ? "its original content is over the limit"
                         : "no original content for this library version yet");
+                    skipped.Add(entry.Id);
                     continue;
                 }
 
-                folder = new Folder(entry.Id, Under(drives.RootOf(mount.Letter), target.RelativePath));
+                var root = drives.RootOf(mount.Letter);
+                folder = new Folder(entry.Id, Under(root, target.RelativePath), root);
                 baseline = ZipOf(entry.Id);
             }
 
-            if (new DirectoryInfo(folder.Directory).LinkTarget is not null)
+            if (ThroughLink(folder))
             {
-                logger.LogWarning("Saves folder {EntryId} ({Path}) skipped on this PC: {Directory} is a link", entry.Id, entry.Path, folder.Directory);
+                logger.LogWarning("Saves folder {EntryId} ({Path}) skipped on this PC: {Directory} is a link or under one", entry.Id, entry.Path, folder.Directory);
+                skipped.Add(entry.Id);
                 continue;
             }
 
@@ -432,10 +463,11 @@ public sealed class SavesService(
                 continue;
             }
 
-            var directory = Under(drives.RootOf(mount.Letter), target.RelativePath);
-            if (new DirectoryInfo(directory).LinkTarget is null)
+            var root = drives.RootOf(mount.Letter);
+            var folder = new Folder(entry.Id, Under(root, target.RelativePath), root);
+            if (!ThroughLink(folder))
             {
-                TakeBaseline(entry, version, directory, LimitBytes(config.LimitMb));
+                TakeBaseline(entry, version, folder.Directory, LimitBytes(config.LimitMb));
             }
         }
     }
@@ -506,6 +538,48 @@ public sealed class SavesService(
         var temp = StateOf(entryId) + ".tmp";
         File.WriteAllText(temp, JsonSerializer.Serialize(state, Json));
         File.Move(temp, StateOf(entryId), overwrite: true);
+    }
+
+    /// <summary>
+    /// Папка записи — ссылка или под ссылкой (symlink, junction) ниже корня профиля или буквы: служба туда не заходит (её
+    /// мог сделать игрок, чтобы служба удалила или забрала чужие файлы).
+    /// </summary>
+    private static bool ThroughLink(Folder folder)
+    {
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder.Root));
+        for (var d = Path.GetFullPath(folder.Directory); d is not null && d.Length > root.Length; d = Path.GetDirectoryName(d))
+        {
+            if (new DirectoryInfo(d).LinkTarget is not null)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Выдача кончилась: забыть «выдано» и файлы пропущенных записей.</summary>
+    private void Forget()
+    {
+        _attached = null;
+        try
+        {
+            DropCarry();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(ex, "Saves carry folder not removed; removed at the next attach");
+        }
+    }
+
+    /// <summary>Удаляет <c>saves-carry</c> (папка помощника, ссылок там нет).</summary>
+    private void DropCarry()
+    {
+        if (Directory.Exists(_carry))
+        {
+            Clear(_carry);
+            Directory.Delete(_carry);
+        }
     }
 
     /// <summary>Исходное содержимое — в очищенную папку записи.</summary>

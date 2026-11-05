@@ -225,6 +225,59 @@ public sealed class SavesServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Link_above_folder_is_not_followed()
+    {
+        await EntryAsync(@"%LOCALAPPDATA%\Game\Saved");
+        var pc = new Pc(this, "A");
+
+        // Папка выше папки записи — ссылка наружу (её сделал игрок): выдача там ничего не удаляет.
+        var outside = Path.Combine(pc.Profile, "..", "Outside");
+        Write(Path.Combine(outside, "Saved", "keep.txt"), "keep");
+        Directory.CreateDirectory(pc.InProfile(@"AppData\Local"));
+        Directory.CreateSymbolicLink(pc.InProfile(@"AppData\Local\Game"), outside);
+        Ok(await pc.Service.AttachAsync(PlayerId, Sid, CancellationToken.None));
+        Assert.Equal("keep", File.ReadAllText(Path.Combine(outside, "Saved", "keep.txt")));
+        Directory.Delete(pc.InProfile(@"AppData\Local\Game"));
+
+        // Ссылку сделали посреди сеанса: сохранение не забирает то, куда она ведёт.
+        Ok(await pc.Service.AttachAsync(PlayerId, Sid, CancellationToken.None));
+        Write(pc.InProfile(@"AppData\Local\Game\Saved\save.dat"), "mine");
+        Directory.Delete(pc.InProfile(@"AppData\Local\Game"), recursive: true);
+        Write(Path.Combine(outside, "Saved", "secret.txt"), "not the player's");
+        Directory.CreateSymbolicLink(pc.InProfile(@"AppData\Local\Game"), outside);
+        await pc.Service.DetachAsync(PlayerId, CancellationToken.None);
+        var stored = Path.Combine(_root, PlayerId);
+        Assert.DoesNotContain(Directory.Exists(stored) ? Directory.EnumerateFiles(stored, "*", SearchOption.AllDirectories) : [],
+            f => Path.GetFileName(f) is "secret.txt" or "keep.txt");
+    }
+
+    [Fact]
+    public async Task Skipped_library_folder_keeps_server_copy()
+    {
+        await EntryAsync(@"%APPDATA%\Game");
+        await EntryAsync(@"H:\Game\Saves");
+        var a = new Pc(this, "A");
+        await a.Service.OnTickAsync(H("v1"), CancellationToken.None);
+        Ok(await a.Service.AttachAsync(PlayerId, Sid, CancellationToken.None));
+        Write(a.OnH(@"Game\Saves\slot1.sav"), "library progress");
+        Write(a.InProfile(@"AppData\Roaming\Game\save.dat"), "profile progress");
+        Ok(await a.Service.DetachAsync(PlayerId, CancellationToken.None));
+
+        // На ПК B библиотека H: не подключена: папку на H: не трогаем, а её копию на сервере не теряем.
+        var b = new Pc(this, "B");
+        await b.Service.OnTickAsync([new('H', "v1", false)], CancellationToken.None);
+        Ok(await b.Service.AttachAsync(PlayerId, Sid, CancellationToken.None));
+        Assert.Empty(Listing(b.OnH("Game")));
+        Write(b.InProfile(@"AppData\Roaming\Game\save.dat"), "profile progress 2");
+        Ok(await b.Service.DetachAsync(PlayerId, CancellationToken.None));
+        Assert.False(Directory.Exists(Path.Combine(b.State, "saves-carry")));
+
+        Ok(await a.Service.AttachAsync(PlayerId, Sid, CancellationToken.None));
+        Assert.Equal("library progress", File.ReadAllText(a.OnH(@"Game\Saves\slot1.sav")));
+        Assert.Equal("profile progress 2", File.ReadAllText(a.InProfile(@"AppData\Roaming\Game\save.dat")));
+    }
+
+    [Fact]
     public async Task Missing_folder_saves_fine()
     {
         await EntryAsync(@"%APPDATA%\Played");
