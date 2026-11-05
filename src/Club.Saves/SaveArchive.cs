@@ -97,7 +97,7 @@ public static class SaveArchive
     /// Распаковывает архив: каждая запись — в папку <paramref name="targetForEntry"/>(<c>entryId</c>), существующие файлы
     /// перезаписываются. <c>null</c> — записи нет в списке (её удалили в панели): при <paramref name="unknownIsError"/>
     /// весь архив — <c>badArchive</c> (сервер), иначе запись пропускается (помощник). Сначала проверяются все имена (плохое
-    /// имя — ничего не записано), потом файлы пишутся с подсчётом байт: сумма больше <paramref name="limitBytes"/> —
+    /// имя или файл и папка с одним именем без учёта регистра — ничего не записано), потом файлы пишутся с подсчётом байт: сумма больше <paramref name="limitBytes"/> —
     /// <c>overLimit</c>. При любой ошибке созданные распаковкой файлы и папки удаляются; перезаписанные файлы остаются как
     /// есть. Поток <paramref name="zip"/> лучше давать с перемоткой (файл): иначе zip копируется в память.
     /// </summary>
@@ -175,6 +175,12 @@ public static class SaveArchive
     {
         var plan = new List<(ZipArchiveEntry, string)>();
         var targets = new Dictionary<Guid, string?>();
+
+        // Файл и папка с одним именем (a и a/b) не создаются ни на одной ФС; без учёта регистра — как на Windows, чтобы
+        // сервер не принял архив, на котором споткнётся помощник. Один и тот же файл дважды (вложенные записи списка) —
+        // можно.
+        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var folders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         IReadOnlyCollection<ZipArchiveEntry> entries;
         try
         {
@@ -223,9 +229,24 @@ public static class SaveArchive
             }
 
             var path = Path.GetFullPath(Path.Combine([target, .. segments.Skip(1)]));
-            if (!path.StartsWith(Path.TrimEndingDirectorySeparator(target) + Path.DirectorySeparatorChar, PathComparison))
+            var root = Path.TrimEndingDirectorySeparator(target);
+            if (!path.StartsWith(root + Path.DirectorySeparatorChar, PathComparison) || folders.Contains(path))
             {
                 throw Bad(name);
+            }
+
+            files.Add(path);
+            for (var d = Path.GetDirectoryName(path); d is not null && d.Length > root.Length; d = Path.GetDirectoryName(d))
+            {
+                if (files.Contains(d))
+                {
+                    throw Bad(name);
+                }
+
+                if (!folders.Add(d))
+                {
+                    break;
+                }
             }
 
             plan.Add((entry, path));

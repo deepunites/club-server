@@ -174,6 +174,36 @@ public sealed class SavesLibraryTests : IDisposable
         Assert.Empty(Directory.EnumerateFileSystemEntries(_root));
     }
 
+    [Theory]
+    [InlineData("a", "a/b")]
+    [InlineData("a/b", "a")]
+    [InlineData("A", "a/b")]
+    [InlineData("x/Saves/1.sav", "x/saves")]
+    public void Unpack_rejects_file_and_folder_with_same_name(string first, string second)
+    {
+        var entryId = Guid.NewGuid();
+        var target = Path.Combine(_root, "dst");
+        using var zip = Zip(($"{entryId:D}/{first}", [1]), ($"{entryId:D}/{second}", [2]));
+
+        var error = Assert.Throws<SaveArchiveException>(() => SaveArchive.Unpack(zip, _ => target, 1024, unknownIsError: true));
+
+        Assert.Equal("badArchive", error.Reason);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(_root));
+    }
+
+    [Fact]
+    public void Unpack_allows_same_file_from_nested_entries()
+    {
+        var outer = Guid.NewGuid();
+        var inner = Guid.NewGuid();
+        var target = Path.Combine(_root, "dst");
+        using var zip = Zip(($"{outer:D}/Saves/1.sav", [1]), ($"{inner:D}/1.sav", [1]));
+
+        SaveArchive.Unpack(zip, id => id == outer ? target : Path.Combine(target, "Saves"), 1024, unknownIsError: true);
+
+        Assert.Equal(new byte[] { 1 }, File.ReadAllBytes(Path.Combine(target, "Saves", "1.sav")));
+    }
+
     [Fact]
     public void Unpack_not_a_zip_is_badArchive()
     {
