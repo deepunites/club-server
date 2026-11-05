@@ -533,7 +533,7 @@
     ],
     "responses": {
      "204": {
-      "description": "Аренды этой машины нет."
+      "description": "Аренды у этой машины больше нет (снята или её и не было)."
      },
      "400": {
       "$ref": "#/components/responses/Error"

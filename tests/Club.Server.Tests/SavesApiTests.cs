@@ -51,13 +51,17 @@ public sealed class SavesApiTests : IAsyncLifetime
         machine.SendAsync(HttpMethod.Post, SavesPath(machine, playerId) + "/attach");
 
     /// <summary>PUT архива; <paramref name="chunked"/> — тело без Content-Length (потоком), как при упаковке на лету.</summary>
-    private Task<HttpResponseMessage> PutAsync(TestMachine machine, byte[] zip, string playerId = PlayerId, TestMachine? token = null, bool chunked = false)
+    private Task<HttpResponseMessage> PutAsync(TestMachine machine, byte[] zip, string playerId = PlayerId, TestMachine? token = null, bool chunked = false) =>
+        PutAsync(_http, machine, zip, playerId, token, chunked);
+
+    private static Task<HttpResponseMessage> PutAsync(HttpClient http, TestMachine machine, byte[] zip, string playerId = PlayerId, TestMachine? token = null,
+        bool chunked = false)
     {
         HttpContent content = chunked ? new StreamContent(new Unseekable(zip)) : new ByteArrayContent(zip);
         var request = new HttpRequestMessage(HttpMethod.Put, SavesPath(machine, playerId)) { Content = content };
         request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/zip");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", (token ?? machine).AccessToken);
-        return _http.SendAsync(request);
+        return http.SendAsync(request);
     }
 
     /// <summary>Zip из пар «имя записи — содержимое» (имена как есть: и плохие, для проверки приёма).</summary>
@@ -379,6 +383,69 @@ public sealed class SavesApiTests : IAsyncLifetime
         }
 
         Assert.Null(await Repository.LeaseHolderAsync(PlayerId));
+    }
+
+    /// <summary>
+    /// Настоящий Kestrel (TestServer лимита тела не знает): его лимит по умолчанию — 30 МБ, на PUT он поднимается до
+    /// лимита сохранений + 10 %. Тело в 31 МБ принимается — с Content-Length и потоком; тело больше лимита + 10 % потоком —
+    /// 413 <c>overLimit</c> (Kestrel обрывает чтение сам).
+    /// </summary>
+    [Fact]
+    public async Task Put_on_kestrel_raises_body_limit_to_saves_limit()
+    {
+        var kestrel = new ServerFixture();
+        using var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        kestrel.Settings["Saves:Enabled"] = "true";
+        kestrel.Settings["Saves:Root"] = _root;
+        kestrel.UseKestrel(port);
+        await kestrel.InitializeAsync();
+        try
+        {
+            kestrel.StartServer();
+            using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+            var repository = kestrel.Services.GetRequiredService<SavesRepository>();
+            var entry = await repository.CreateEntryAsync("Game", @"%APPDATA%\Game", enabled: true);
+            var (machine, _) = await TestMachine.RegisterAsync(http, null, "02:00:00:00:40:c1");
+
+            const int Size = 31 * 1000 * 1000;
+            byte[] large;
+            using (var buffer = new MemoryStream())
+            {
+                using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, leaveOpen: true, Encoding.UTF8))
+                using (var stream = archive.CreateEntry($"{entry.Id:D}/big.bin", CompressionLevel.NoCompression).Open())
+                {
+                    stream.Write(new byte[Size]);
+                }
+
+                large = buffer.ToArray();
+            }
+
+            Assert.True(large.Length > 30_000_000);
+            foreach (var chunked in new[] { false, true })
+            {
+                (await machine.SendAsync(HttpMethod.Post, SavesPath(machine) + "/attach")).Dispose();
+                using var put = await PutAsync(http, machine, large, chunked: chunked);
+                Assert.Equal(HttpStatusCode.NoContent, put.StatusCode);
+            }
+
+            var row = (await repository.PlayersAsync(PlayerId, 1, 50)).Items.Single();
+            Assert.Equal(Size, row.SizeBytes);
+
+            await repository.UpdateSettingsAsync(new SaveSettings(1, []));
+            (await machine.SendAsync(HttpMethod.Post, SavesPath(machine) + "/attach")).Dispose();
+            using var over = await PutAsync(http, machine, Zip(($"{entry.Id:D}/random.bin", RandomNumberGenerator.GetBytes(2 * 1024 * 1024))), chunked: true);
+            Assert.Equal(HttpStatusCode.RequestEntityTooLarge, over.StatusCode);
+            Contract.AssertError(await over.Content.ReadFromJsonAsync<JsonElement>(), "validation", "overLimit");
+            Assert.Null(await repository.LeaseHolderAsync(PlayerId));
+            Assert.Equal(Size, (await repository.PlayersAsync(PlayerId, 1, 50)).Items.Single().SizeBytes);
+        }
+        finally
+        {
+            await ((IAsyncLifetime)kestrel).DisposeAsync();
+        }
     }
 
     [Fact]

@@ -65,37 +65,42 @@ public static class SavesEndpoints
     {
         var id = RequirePlayer(context, machineId, playerId, options, store, logs);
         string? zipPath = null;
-        await using (await saves.LockPlayerAsync(id, context.RequestAborted))
+        try
         {
-            var config = await BuildConfigAsync(options, store, saves);
-            if (store.CurrentDirectory(id) is { } directory)
+            await using (await saves.LockPlayerAsync(id, context.RequestAborted))
             {
-                zipPath = store.NewTempZipPath();
-                try
+                var config = await BuildConfigAsync(options, store, saves);
+                if (store.CurrentDirectory(id) is { } directory)
                 {
+                    zipPath = store.NewTempZipPath();
                     using var file = new FileStream(zipPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, BufferSize);
                     store.WriteZip(directory, file);
                 }
-                catch
-                {
-                    TryDeleteFile(zipPath);
-                    throw;
-                }
+
+                await saves.TakeLeaseAsync(id, machineId);
+                context.Response.Headers[ConfigHeader] = EncodeConfig(config);
             }
 
-            await saves.TakeLeaseAsync(id, machineId);
-            context.Response.Headers[ConfigHeader] = EncodeConfig(config);
-        }
+            if (zipPath is null)
+            {
+                return Results.NoContent();
+            }
 
-        if (zipPath is null)
+            // Дальше файл — у потока: удаляется, когда ответ отправлен (или оборван).
+            var stream = new FileStream(zipPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, BufferSize,
+                FileOptions.Asynchronous | FileOptions.DeleteOnClose);
+            return Results.Stream(stream, "application/zip");
+        }
+        catch
         {
-            return Results.NoContent();
-        }
+            // Архив собран, а аренда или снятие блокировки упали: в .tmp он не остаётся до перезапуска.
+            if (zipPath is not null)
+            {
+                TryDeleteFile(zipPath);
+            }
 
-        // Файл удаляется, когда ответ отправлен (или оборван).
-        var stream = new FileStream(zipPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, BufferSize,
-            FileOptions.Asynchronous | FileOptions.DeleteOnClose);
-        return Results.Stream(stream, "application/zip");
+            throw;
+        }
     }
 
     /// <summary>
