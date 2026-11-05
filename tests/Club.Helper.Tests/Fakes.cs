@@ -432,3 +432,19 @@ public sealed class ListLogger<T> : ILogger<T>
     public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
         Entries.Add((logLevel, formatter(state, exception)));
 }
+
+/// <summary>Профили Windows по SID — временные каталоги теста (на ПК — <c>ProfileList</c> в реестре).</summary>
+public sealed class FakeProfiles : IProfileLocator
+{
+    public Dictionary<string, string> Paths { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public string? ProfilePath(string sid) => Paths.GetValueOrDefault(sid);
+}
+
+/// <summary>Корни букв библиотек — временные каталоги теста (на ПК — <c>G:\</c>, <c>H:\</c>).</summary>
+public sealed class FakeDrives : IDriveRoots
+{
+    public Dictionary<char, string> Roots { get; } = [];
+
+    public string RootOf(char letter) => Roots[char.ToUpperInvariant(letter)];
+}
