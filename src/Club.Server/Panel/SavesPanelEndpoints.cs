@@ -129,17 +129,23 @@ public static class SavesPanelEndpoints
         panel.MapGet("/status", (SavesOptions options, SaveStore store) =>
         {
             var available = store.Available;
-            return Results.Json(new SavesStatusView(options.Enabled, available, options.Root, available ? store.Measure(options.Root).Bytes : 0), ApiJson.Options);
+            return Results.Json(new SavesStatusView(options.Enabled, available, options.Root, available ? store.UsedBytes() : 0), ApiJson.Options);
         });
     }
 
     /// <summary>
     /// Буквы библиотек сервера для шаблонов на диске игры: G: (<c>Library:DriveLetter</c>) и буквы всех библиотек из
     /// <c>Libraries:*</c>, в том числе выключенных — запись в списке не должна становиться негодной от выключения
-    /// библиотеки. Буквы уже проверены при старте (одна буква D…Z).
+    /// библиотеки. Буквы работающих библиотек проверены при старте (одна буква D…Z); выключенная не проверяется — у неё
+    /// буквы может не быть или она записана как попало: берётся только одна латинская буква (пробелы по краям — не в счёт).
     /// </summary>
     public static IReadOnlyCollection<char> LibraryLetters(LibrarySet libraries) =>
-        libraries.Extras.Prepend(libraries.Main).Select(s => s.Options.DriveLetter[0]).Distinct().ToList();
+        libraries.Extras.Prepend(libraries.Main)
+            .Select(s => s.Options.DriveLetter?.Trim() ?? "")
+            .Where(l => l.Length == 1 && char.IsAsciiLetter(l[0]))
+            .Select(l => char.ToUpperInvariant(l[0]))
+            .Distinct()
+            .ToList();
 
     /// <summary>Название: по краям обрезается, 1…<see cref="MaxEntryNameLength"/> символов.</summary>
     private static string ValidName(string? raw)

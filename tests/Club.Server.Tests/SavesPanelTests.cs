@@ -391,6 +391,31 @@ public sealed class SavesPanelTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Status_skips_unreadable_folders()
+    {
+        // ext4 создаёт в корне раздела lost+found (root, 0700): служба сервера его не читает, а состояние всё равно считается.
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lostFound = Path.Combine(_root, "lost+found");
+        Directory.CreateDirectory(lostFound);
+        File.WriteAllText(Path.Combine(_root, "file.bin"), "12345");
+        File.SetUnixFileMode(lostFound, UnixFileMode.None);
+        try
+        {
+            using var status = await Panel().GetAsync("/panel/api/v1/saves/status");
+            var body = await OkAsync(status);
+            Assert.Equal(5, body.GetProperty("usedBytes").GetInt64());
+        }
+        finally
+        {
+            File.SetUnixFileMode(lostFound, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    [Fact]
     public async Task Requires_panel_token()
     {
         var anonymous = _server.CreateClient();
@@ -441,5 +466,32 @@ public sealed class SavesPanelLibraryLettersTests
         using var other = await http.PostAsJsonAsync("/panel/api/v1/saves/entries", new { name = "Игра", path = @"K:\Games" });
         Assert.Equal(HttpStatusCode.BadRequest, other.StatusCode);
         Contract.AssertError(await other.Content.ReadFromJsonAsync<JsonElement>(), "validation", "drive");
+    }
+
+    [Fact]
+    public async Task Disabled_library_without_letter_is_skipped()
+    {
+        // Выключенная библиотека не проверяется при старте: буквы у неё может не быть — она просто не даёт букву.
+        var server = new ServerFixture();
+        server.Settings["Panel:AdminToken"] = "panel-test-token";
+        server.Settings["Libraries:solo:Enabled"] = "false";
+        await server.InitializeAsync();
+        try
+        {
+            var http = server.CreateClient();
+            http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "panel-test-token");
+            using (var library = await http.PostAsJsonAsync("/panel/api/v1/saves/entries", new { name = "Игра", path = @"G:\Games\Saves" }))
+            {
+                Assert.Equal(HttpStatusCode.Created, library.StatusCode);
+            }
+
+            using var other = await http.PostAsJsonAsync("/panel/api/v1/saves/entries", new { name = "Игра", path = @"H:\Games" });
+            Assert.Equal(HttpStatusCode.BadRequest, other.StatusCode);
+            Contract.AssertError(await other.Content.ReadFromJsonAsync<JsonElement>(), "validation", "drive");
+        }
+        finally
+        {
+            await ((IAsyncLifetime)server).DisposeAsync();
+        }
     }
 }

@@ -24,6 +24,18 @@ public sealed class SaveStore(SavesOptions options, ILogger<SaveStore> logger)
         MatchType = MatchType.Simple,
     };
 
+    /// <summary>
+    /// Для подсчёта занятого в панели: как <see cref="AllFiles"/>, но папки, которые служба не читает, пропускаются —
+    /// в корне раздела ext4 лежит <c>lost+found</c> (root, 0700).
+    /// </summary>
+    private static readonly EnumerationOptions ReadableFiles = new()
+    {
+        RecurseSubdirectories = true,
+        AttributesToSkip = FileAttributes.ReparsePoint,
+        IgnoreInaccessible = true,
+        MatchType = MatchType.Simple,
+    };
+
     private string Root => Path.GetFullPath(options.Root);
 
     private string Temp => Path.Combine(Root, TempFolder);
@@ -188,6 +200,12 @@ public sealed class SaveStore(SavesOptions options, ILogger<SaveStore> logger)
 
         return (bytes, files);
     }
+
+    /// <summary>
+    /// Сколько занимают файлы под корнем — текущие версии, <c>.prev</c>, временные (состояние в панели); корня нет — 0.
+    /// Нечитаемые службой папки не считаются (<see cref="ReadableFiles"/>).
+    /// </summary>
+    public long UsedBytes() => Directory.Exists(Root) ? new DirectoryInfo(Root).EnumerateFiles("*", ReadableFiles).Sum(f => f.Length) : 0;
 
     /// <summary>
     /// Пишет папку игрока в <paramref name="output"/> архивом выдачи (поток остаётся открытым): каждая подпапка
