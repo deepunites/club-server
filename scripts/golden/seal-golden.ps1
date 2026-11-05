@@ -13,8 +13,9 @@
     (credentials.bin, DPAPI машины — его расшифрует любое место с этим образом) и назначения с CHAP-секретами личных
     дисков (assignment.json, у H: — assignment.json.solo). В опубликованном образе они достались бы всем местам, а сам ПК
     мастера при каждой загрузке предъявлял бы уже использованный токен и терял регистрацию. Места с другим HWID эти файлы
-    не используют, но читать их могут. Настройки (helper.json, club-ca.pem) остаются: по ним каждое место регистрируется
-    само.
+    не используют, но читать их могут. Также удаляются папки сохранений игрока (1.7.0: saves-baseline, saves-tmp,
+    saves-carry) — исходное содержимое папок G:/H: и файлы игроков этого ПК.
+    Настройки (helper.json, club-ca.pem) остаются: по ним каждое место регистрируется само.
 
     ClubShell — только если есть служба ClubShellAgent (без неё раздел пропускается, как раньше). Агент мастера тоже
     зарегистрирован, и места унаследовали бы: agent-identity.json, secure\agent.tokens (токены и секрет подписи), hwid.fallback,
@@ -79,6 +80,9 @@ $ErrorActionPreference = 'Continue'
 $ServiceName = 'ClubDisklessHelper'
 $StateDir = "$env:ProgramData\ClubDiskless"
 $StateFiles = 'credentials.bin', 'credentials.bin.tmp', 'assignment.json', 'assignment.json.tmp', 'assignment.json.solo', 'assignment.json.solo.tmp'
+# Сохранения игрока (помощник 1.7.0): исходное содержимое папок G:/H:, архив detach, файлы игрока для пропущенных
+# папок — у каждого места свои.
+$StateDirs = 'saves-baseline', 'saves-tmp', 'saves-carry'
 
 # ClubShell. Адрес сервера и поля agent.json — те же, что пишет shell-install.ps1 (менять вместе).
 $ShellService = 'ClubShellAgent'
@@ -482,6 +486,13 @@ foreach ($f in $StateFiles) {
     if (Test-Path -LiteralPath $p) {
         Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $p) { Write-Warn "не удалён $p" } else { Write-Pass "удалён $f" }
+    }
+}
+foreach ($d in $StateDirs) {
+    $p = Join-Path $StateDir $d
+    if (Test-Path -LiteralPath $p) {
+        Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $p) { Write-Warn "не удалена $p" } else { Write-Pass "удалена папка $d" }
     }
 }
 

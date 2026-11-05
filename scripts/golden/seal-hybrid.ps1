@@ -24,7 +24,8 @@
         журналы и дампы (logs, log, crash dumps); вход в FACEIT скрипт не видит — выйти из аккаунта клуба вручную.
         Не удалилось — WARN;
       - помощник: служба остановлена, удалены токены этого ПК и назначения личных дисков (credentials.bin,
-        assignment.json, assignment.json.solo и их .tmp) — как seal-golden.ps1: иначе они достались бы всем гибридам;
+        assignment.json, assignment.json.solo и их .tmp) и папки сохранений игрока (saves-baseline, saves-tmp,
+        saves-carry) — как seal-golden.ps1: иначе они достались бы всем гибридам;
       - образы NGEN (.NET Framework) — достройка;
       - приложения Store (Appx): пакет установлен пользователю, но не в образе (provisioned) или в другой версии —
         sysprep /generalize с ним падает («was installed for a user, but not provisioned for all users»). Копия
@@ -50,6 +51,9 @@ $ErrorActionPreference = 'Continue'
 $ServiceName = 'ClubDisklessHelper'
 $StateDir = "$env:ProgramData\ClubDiskless"
 $StateFiles = 'credentials.bin', 'credentials.bin.tmp', 'assignment.json', 'assignment.json.tmp', 'assignment.json.solo', 'assignment.json.solo.tmp'
+# Сохранения игрока (помощник 1.7.0): исходное содержимое папок G:/H:, архив detach, файлы игрока для пропущенных
+# папок — у каждого места свои.
+$StateDirs = 'saves-baseline', 'saves-tmp', 'saves-carry'
 $UnattendNs = 'urn:schemas-microsoft-com:unattend'
 $SysprepDir = Join-Path $env:SystemRoot 'System32\Sysprep'
 $SysprepExe = Join-Path $SysprepDir 'sysprep.exe'
@@ -276,6 +280,13 @@ foreach ($f in $StateFiles) {
     if (Test-Path -LiteralPath $p) {
         Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $p) { Write-Warn "не удалён $p" } else { Write-Pass "удалён $f" }
+    }
+}
+foreach ($d in $StateDirs) {
+    $p = Join-Path $StateDir $d
+    if (Test-Path -LiteralPath $p) {
+        Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $p) { Write-Warn "не удалена $p" } else { Write-Pass "удалена папка $d" }
     }
 }
 foreach ($f in 'helper.json', 'club-ca.pem') {

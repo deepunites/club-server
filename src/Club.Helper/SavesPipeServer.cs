@@ -169,22 +169,45 @@ public sealed class SavesPipeServer(SavesCommandHandler handler, ILogger<SavesPi
         {
             await pipe.WriteAsync(Encoding.UTF8.GetBytes(answer + "\n"), timeout.Token);
             await pipe.FlushAsync(timeout.Token);
-            var drained = Task.Run(pipe.WaitForPipeDrain, CancellationToken.None);
-            if (await Task.WhenAny(drained, Task.Delay(AnswerTimeout, stoppingToken)) != drained)
-            {
-                // Канал закрывается и без этого; ожидание отпустит само (клиент прочитает или уйдёт), его ошибка не нужна.
-                _ = drained.ContinueWith(t => t.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
-                logger.LogWarning("Saves pipe client did not read the answer within {Timeout}: {Answer}", AnswerTimeout, answer);
-            }
-            else
-            {
-                await drained;
-            }
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException or OperationCanceledException && !stoppingToken.IsCancellationRequested)
         {
             // Шелл ушёл, не дождавшись ответа: команда уже выполнена, итог остаётся только в журнале.
             logger.LogWarning("Saves pipe client gone before the answer ({Reason}): {Answer}", ex.Message, answer);
+            return;
+        }
+
+        await WaitForReadAsync(pipe, answer, stoppingToken);
+    }
+
+    /// <summary>
+    /// Ждёт, пока клиент прочитает ответ (<see cref="NamedPipeServerStream.WaitForPipeDrain"/>, не дольше
+    /// <see cref="AnswerTimeout"/>). Ответ уже в канале: клиент, который прочитал его и сразу закрыл канал (обычный случай),
+    /// обрывает ожидание ошибкой «канал закрыт» — это не сбой и не «клиент ушёл без ответа».
+    /// </summary>
+    private async Task WaitForReadAsync(NamedPipeServerStream pipe, string answer, CancellationToken stoppingToken)
+    {
+        var drained = Task.Run(pipe.WaitForPipeDrain, CancellationToken.None);
+        if (await Task.WhenAny(drained, Task.Delay(AnswerTimeout, stoppingToken)) != drained)
+        {
+            // Ожидание отпустит само, когда клиент прочитает или уйдёт (до тех пор Windows держит этот экземпляр канала);
+            // его ошибка не нужна.
+            _ = drained.ContinueWith(t => t.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+            if (!stoppingToken.IsCancellationRequested)
+            {
+                logger.LogWarning("Saves pipe client did not read the answer within {Timeout}: {Answer}", AnswerTimeout, answer);
+            }
+
+            return;
+        }
+
+        try
+        {
+            await drained;
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+        {
+            logger.LogDebug("Saves pipe client closed the pipe right after the answer: {Reason}", ex.Message);
         }
     }
 

@@ -134,7 +134,8 @@ tests/Club.Helper.Tests  тесты логики и сквозной тест п
 (последнее назначение H:, 1.6.0). Перед захватом эталона их стирают скрипты эталона: список `$StateFiles` в
 `seal-golden.ps1` и `seal-hybrid.ps1` (с `assignment.json.solo` и `.tmp`), `capture-hybrid.ps1` и `make-hybrid-ref.py`
 стирают `assignment.json*`. С 1.7.0 там же папки сохранений игрока: `saves-baseline`, `saves-tmp`, `saves-carry`
-(«Сохранения игр» ниже).
+(«Сохранения игр» ниже); их удаляют `seal-golden.ps1` и `seal-hybrid.ps1` (список `$StateDirs`), а `capture-hybrid.ps1`
+и `make-hybrid-ref.py` пока не проверяют.
 
 ## Вторая библиотека — H: (1.6.0)
 
