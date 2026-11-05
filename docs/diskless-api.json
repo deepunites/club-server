@@ -525,10 +525,34 @@
    "delete": {
     "operationId": "releaseSavesLease",
     "summary": "Снять аренду без сохранения (выдача на ПК не удалась после ответа сервера)",
-    "description": "Аренду другой машины не трогает; ответ тот же.",
+    "description": "Аренду другой машины не трогает; ответ тот же. `reason=overLimit` — помощник сам увидел, что сохранения больше лимита, и не отправил их: у игрока отметка `overLimit` (в панели), прошлая версия остаётся.",
     "security": [
      {
       "machineBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "reason",
+      "in": "query",
+      "required": false,
+      "description": "Только `overLimit`; другое значение — 400 `validation` (`details.field = reason`).",
+      "schema": {
+       "type": "string",
+       "enum": [
+        "overLimit"
+       ]
+      }
+     },
+     {
+      "name": "bytes",
+      "in": "query",
+      "required": false,
+      "description": "С `reason=overLimit` — сколько байт набралось (в текст отметки); не число — 400 (`details.field = bytes`).",
+      "schema": {
+       "type": "integer",
+       "minimum": 0
+      }
      }
     ],
     "responses": {

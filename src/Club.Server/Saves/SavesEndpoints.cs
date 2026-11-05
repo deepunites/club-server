@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using Club.Saves;
@@ -171,12 +172,44 @@ public static class SavesEndpoints
         }
     }
 
-    /// <summary>Снять аренду без сохранения (выдача на ПК не удалась после ответа сервера). Аренду другой машины не трогает.</summary>
+    /// <summary>
+    /// Снять аренду без сохранения (выдача на ПК не удалась после ответа сервера). Аренду другой машины не трогает.
+    /// <c>reason=overLimit</c> (и необязательный <c>bytes</c> — сколько набралось): помощник сам увидел, что сохранения
+    /// больше лимита, и не отправил их (п. 4.3) — у игрока отметка <c>overLimit</c> (п. 6), прошлая версия не тронута.
+    /// </summary>
     private static async Task<IResult> ReleaseAsync(Guid machineId, string playerId, HttpContext context, SavesOptions options, SaveStore store,
         SavesRepository saves, ILoggerFactory logs)
     {
         var id = RequirePlayer(context, machineId, playerId, options, store, logs);
-        await saves.ReleaseLeaseAsync(id, machineId);
+        var query = context.Request.Query;
+        if (!query.ContainsKey("reason"))
+        {
+            await saves.ReleaseLeaseAsync(id, machineId);
+            return Results.NoContent();
+        }
+
+        if (query["reason"].ToString() != SaveArchiveException.OverLimit)
+        {
+            throw ApiException.Validation("reason", "format");
+        }
+
+        long? bytes = null;
+        if (query.ContainsKey("bytes"))
+        {
+            bytes = long.TryParse(query["bytes"].ToString(), NumberStyles.None, CultureInfo.InvariantCulture, out var value)
+                ? value
+                : throw ApiException.Validation("bytes", "format");
+        }
+
+        await using var playerLock = await saves.LockPlayerAsync(id, context.RequestAborted);
+        if (await saves.LeaseHolderAsync(id) == machineId)
+        {
+            var settings = await saves.SettingsAsync();
+            var size = bytes is { } b ? $"{b} bytes" : "size unknown";
+            await RecordOverLimitAsync(saves, id, machineId, $"Saves over the limit ({size}, limit {settings.LimitMb} MB) on the PC; not sent",
+                logs.CreateLogger("Club.Server.Saves"));
+        }
+
         return Results.NoContent();
     }
 
@@ -252,10 +285,16 @@ public static class SavesEndpoints
     /// <summary>Больше лимита: отметка <c>overLimit</c> у игрока, аренда снимается (spec п. 3.3), прошлая версия не тронута.</summary>
     private static async Task<ApiException> OverLimitAsync(SavesRepository saves, string playerId, Guid machineId, string message, ILogger log)
     {
+        await RecordOverLimitAsync(saves, playerId, machineId, message, log);
+        return new ApiException(StatusCodes.Status413PayloadTooLarge, ErrorCodes.Validation, message, new { reason = SaveArchiveException.OverLimit });
+    }
+
+    /// <summary>Отметка <c>overLimit</c> у игрока и снятие аренды этой машины (и при 413, и когда помощник не отправил сам).</summary>
+    private static async Task RecordOverLimitAsync(SavesRepository saves, string playerId, Guid machineId, string message, ILogger log)
+    {
         await saves.RecordResultAsync(playerId, SavesRepository.Results.OverLimit, message);
         await saves.ReleaseLeaseAsync(playerId, machineId);
         log.LogWarning("Saves of player {PlayerId} from machine {MachineId} over the limit: {Reason}", playerId, machineId, message);
-        return new ApiException(StatusCodes.Status413PayloadTooLarge, ErrorCodes.Validation, message, new { reason = SaveArchiveException.OverLimit });
     }
 
     private static void TryDeleteFile(string path)

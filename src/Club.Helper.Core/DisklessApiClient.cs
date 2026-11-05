@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -211,9 +212,19 @@ public sealed class DisklessApiClient(HttpClient http, HelperOptions options, IC
     }
 
     /// <summary>Снять аренду без сохранения (выдача на ПК не удалась после ответа сервера). Отказ — как у <see cref="PutSavesAsync"/>.</summary>
-    public async Task ReleaseSavesLeaseAsync(string playerId, CancellationToken ct)
+    public Task ReleaseSavesLeaseAsync(string playerId, CancellationToken ct) => ReleaseLeaseAsync(playerId, "", ct);
+
+    /// <summary>
+    /// Снять аренду, не отправив сохранения больше лимита (spec п. 4.3): сервер ставит игроку отметку <c>overLimit</c>
+    /// (п. 6), прошлая версия остаётся. <paramref name="bytes"/> — сколько набралось (<c>null</c> — неизвестно, например
+    /// больше 50 000 файлов). Отказ — как у <see cref="PutSavesAsync"/>.
+    /// </summary>
+    public Task ReleaseSavesLeaseOverLimitAsync(string playerId, long? bytes, CancellationToken ct) =>
+        ReleaseLeaseAsync(playerId, bytes is { } size ? $"?reason=overLimit&bytes={size.ToString(CultureInfo.InvariantCulture)}" : "?reason=overLimit", ct);
+
+    private async Task ReleaseLeaseAsync(string playerId, string query, CancellationToken ct)
     {
-        using var response = await SendSavesAsync(http, id => new HttpRequestMessage(HttpMethod.Delete, $"{SavesPath(id, playerId)}/lease"),
+        using var response = await SendSavesAsync(http, id => new HttpRequestMessage(HttpMethod.Delete, $"{SavesPath(id, playerId)}/lease{query}"),
             HttpCompletionOption.ResponseContentRead, ct);
     }
 

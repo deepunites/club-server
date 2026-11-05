@@ -435,7 +435,12 @@ public sealed class SavesServiceTests : IAsyncLifetime
         var detach = await a.Service.DetachAsync(PlayerId, CancellationToken.None);
         Assert.Equal((false, SavesErrors.OverLimit), (detach.Ok, detach.Error));
         Assert.Null(await Repository.LeaseHolderAsync(PlayerId));
-        Assert.Equal(before, await PlayerAsync(PlayerId));
+
+        // Не отправлено, но в панели у игрока отметка overLimit (spec п. 6); прошлая версия и её размер те же.
+        var after = await PlayerAsync(PlayerId);
+        Assert.NotNull(after);
+        Assert.Equal("overLimit", after.LastResult);
+        Assert.Equal(before! with { LastResult = after.LastResult, LastResultAt = after.LastResultAt, LastError = after.LastError }, after);
         Assert.Equal(SavesErrors.NotAttached, (await a.Service.DetachAsync(PlayerId, CancellationToken.None)).Error);
 
         // Прошлая версия на сервере цела: другой ПК получает её.

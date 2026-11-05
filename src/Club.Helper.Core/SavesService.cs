@@ -14,8 +14,8 @@ namespace Club.Helper.Core;
 /// сервера — аренда снимается, <c>internal</c>.
 /// detach: только если этому игроку выдано здесь (иначе <c>notAttached</c> и ничего не отправляется: пустые или чужие
 /// папки не затирают прошлую версию на сервере); упаковка во временный файл без исключений из настроек, занятые файлы —
-/// повтор <see cref="BusyRetries"/> раза через <see cref="BusyRetryDelay"/>; больше лимита — аренда снимается,
-/// <c>overLimit</c>; отправка.
+/// повтор <see cref="BusyRetries"/> раза через <see cref="BusyRetryDelay"/>; больше лимита — аренда снимается с отметкой
+/// <c>overLimit</c> у игрока на сервере (для панели), <c>overLimit</c>; отправка.
 /// «Выдано» — в памяти (spec п. 4.3): после перезапуска службы detach отвечает <c>notAttached</c>, на сервере остаётся
 /// прошлая версия. Папки записей, пропущенных на этом ПК (библиотека не подключена, нет исходного содержимого и т. п.),
 /// не трогаются, а их файлы из архива сервера ждут в <c>saves-carry</c> и уходят в detach как были: сервер заменяет папку
@@ -321,7 +321,7 @@ public sealed class SavesService(
         catch (SaveArchiveException ex) when (ex.Reason == SaveArchiveException.OverLimit)
         {
             Forget();
-            await ReleaseAsync(id);
+            await ReleaseAsync(id, overLimit: true);
             return (SavesResult.Fail(SavesErrors.OverLimit, ex.Message), 0, 0);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -333,7 +333,7 @@ public sealed class SavesService(
         if (packed.Bytes > LimitBytes(config.LimitMb))
         {
             Forget();
-            await ReleaseAsync(id);
+            await ReleaseAsync(id, overLimit: true, packed.Bytes);
             return (SavesResult.Fail(SavesErrors.OverLimit, $"Saves are {packed.Bytes} bytes, the limit is {config.LimitMb} MB; nothing sent"), packed.Bytes,
                 packed.Files);
         }
@@ -633,12 +633,23 @@ public sealed class SavesService(
         }
     }
 
-    /// <summary>Снять аренду, не дождавшись отмены команды; не вышло — только предупреждение (следующая выдача её перезапишет).</summary>
-    private async Task ReleaseAsync(string id)
+    /// <summary>
+    /// Снять аренду, не дождавшись отмены команды; не вышло — только предупреждение (следующая выдача её перезапишет).
+    /// <paramref name="overLimit"/> — сохранения больше лимита и не отправлены: сервер ставит игроку отметку
+    /// <c>overLimit</c> для панели (spec п. 6), <paramref name="bytes"/> — сколько набралось.
+    /// </summary>
+    private async Task ReleaseAsync(string id, bool overLimit = false, long? bytes = null)
     {
         try
         {
-            await api.ReleaseSavesLeaseAsync(id, CancellationToken.None);
+            if (overLimit)
+            {
+                await api.ReleaseSavesLeaseOverLimitAsync(id, bytes, CancellationToken.None);
+            }
+            else
+            {
+                await api.ReleaseSavesLeaseAsync(id, CancellationToken.None);
+            }
         }
         catch (Exception ex) when (ex is ServerUnavailableException or SavesRejectedException or PendingApprovalException)
         {

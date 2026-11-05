@@ -386,6 +386,54 @@ public sealed class SavesApiTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// Помощник сам увидел, что сохранения больше лимита, и не отправляет их (spec п. 4.3): снимает аренду с
+    /// <c>reason=overLimit</c> — у игрока отметка <c>overLimit</c> в панели (п. 6), прошлая версия и её размер не тронуты.
+    /// Чужая аренда не снимается и отметки нет; другая причина — 400.
+    /// </summary>
+    [Fact]
+    public async Task Release_over_limit_marks_player()
+    {
+        var entry = await Repository.CreateEntryAsync("Game", @"%APPDATA%\Game", enabled: true);
+        var (a, _) = await MachineAsync("02:00:00:00:40:93");
+        var (b, _) = await MachineAsync("02:00:00:00:40:94");
+        (await AttachAsync(a)).Dispose();
+        (await PutAsync(a, Zip(Saved(entry.Id, "save.dat", "good")))).Dispose();
+        var saved = await PlayerAsync();
+        (await AttachAsync(a)).Dispose();
+
+        using (var other = await b.SendAsync(HttpMethod.Delete, SavesPath(b) + "/lease?reason=overLimit&bytes=314572800"))
+        {
+            Assert.Equal(HttpStatusCode.NoContent, other.StatusCode);
+        }
+
+        Assert.Equal(a.MachineId, await Repository.LeaseHolderAsync(PlayerId));
+        Assert.Equal("ok", (await PlayerAsync())!.LastResult);
+
+        using (var bad = await a.SendAsync(HttpMethod.Delete, SavesPath(a) + "/lease?reason=tired"))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
+            Contract.AssertError(await bad.Content.ReadFromJsonAsync<JsonElement>(), "validation", "format");
+        }
+
+        Assert.Equal(a.MachineId, await Repository.LeaseHolderAsync(PlayerId));
+        using (var own = await a.SendAsync(HttpMethod.Delete, SavesPath(a) + "/lease?reason=overLimit&bytes=314572800"))
+        {
+            Assert.Equal(HttpStatusCode.NoContent, own.StatusCode);
+        }
+
+        Assert.Null(await Repository.LeaseHolderAsync(PlayerId));
+        var row = await PlayerAsync();
+        Assert.NotNull(row);
+        Assert.Equal("overLimit", row.LastResult);
+        Assert.Contains("314572800", row.LastError);
+        Assert.Equal((saved!.SizeBytes, saved.FileCount, saved.SavedAt, saved.MachineId), (row.SizeBytes, row.FileCount, row.SavedAt, row.MachineId));
+        using (var again = await AttachAsync(b))
+        {
+            Assert.Equal("good", (await ReadZipAsync(again))[$"{entry.Id:D}/save.dat"]);
+        }
+    }
+
+    /// <summary>
     /// Настоящий Kestrel (TestServer лимита тела не знает): его лимит по умолчанию — 30 МБ, на PUT он поднимается до
     /// лимита сохранений + 10 %. Тело в 31 МБ принимается — с Content-Length и потоком; тело больше лимита + 10 % потоком —
     /// 413 <c>overLimit</c> (Kestrel обрывает чтение сам).
