@@ -239,6 +239,13 @@ tests/Club.Helper.Tests  тесты логики и сквозной тест п
 `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\<SID>\ProfileImagePath`. Переменные в пути
 раскрываются. SID сначала разбирается как SID, и в путь реестра идёт его каноническая форма, а не строка от шелла.
 
+**Проверка на ПК** (до готовности шелла) — `scripts/golden/saves-test.ps1`, выкладывается в `/srv/club/pxe/tools`.
+PowerShell от администратора: `irm http://192.168.1.201:5080/pxe/v1/files/tools/saves-test.ps1 | iex` — `ping`;
+`& ([scriptblock]::Create((irm http://192.168.1.201:5080/pxe/v1/files/tools/saves-test.ps1))) attach <playerId>`
+и то же с `detach <playerId>`. SID для attach по умолчанию — локального пользователя `player` (другой — `-Sid <SID>`).
+Скрипт шлёт ту же строку, что шелл, печатает ответ как есть и ждёт его столько же, сколько шелл: ping 10 с, attach
+60 с, detach 120 с.
+
 **Тайм-ауты.** Шелл ждёт attach до 60 с, detach до 120 с (SHELL_CHANGES п. 23). Архивы передаются через свой
 HttpClient с тайм-аутом 130 с, тело ответа attach скачивается не дольше столько же. Остальные запросы к серверу идут
 через основной HttpClient (20 с). Список папок помощник обновляет при старте и раз в 5 минут.
