@@ -16,6 +16,9 @@ info:
     - Библиотеки игр: G: — пути `/machines/{machineId}/volume` и `/status`. Вторая и следующие (H: — `solo`,
       Libraries:<ключ>, только личный слой, помощник 1.6.0+) — `/machines/{machineId}/libraries/{key}/volume` и `/status`
       с теми же телами; их тома, мастер-тома и `libraryLetterReserved` в ответах путей G: не появляются никогда.
+    - Сохранения игр игрока (помощник 1.7.0+, docs/superpowers/specs/2026-11-05-player-saves-design.md):
+      `/machines/{machineId}/saves/…` — список папок, выдача (аренда «игрок на этом ПК»), приём новой версии и снятие
+      аренды. Сервер хранит папку каждого игрока на общем диске сохранений; кто такой игрок, не знает (ID от шелла).
 servers:
   - url: https://{host}/diskless/v1
     variables:
@@ -242,6 +245,147 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
+  /machines/{machineId}/saves/config:
+    parameters:
+      - $ref: '#/components/parameters/MachineId'
+    get:
+      operationId: getSavesConfig
+      summary: Настройки сохранений и включённые папки (помощник — при старте и раз в 5 минут)
+      description: >-
+        Отвечает всегда, и когда сохранения выключены (Saves:Enabled) или диск сохранений не смонтирован (нет файла-метки
+        `.club-saves` в Saves:Root) — тогда `enabled=false`, и остальные пути сохранений отвечают 503.
+      security:
+        - machineBearer: []
+      responses:
+        '200':
+          description: Настройки и список папок.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavesConfig'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+  /machines/{machineId}/saves/{playerId}/attach:
+    parameters:
+      - $ref: '#/components/parameters/MachineId'
+      - $ref: '#/components/parameters/PlayerId'
+    post:
+      operationId: attachSaves
+      summary: Выдать сохранения игрока на этот ПК (вход игрока)
+      description: >-
+        Записывает аренду «игрок на этом ПК», забирая её у другого ПК, если была (тот пропал, не сохранив). Только с
+        арендой сервер примет сохранение в конце сеанса. Если текущей папки игрока нет, а предыдущая копия есть (сбой
+        между двумя переименованиями при приёме), выдаётся предыдущая. В архиве могут быть записи, которых уже нет в
+        списке (папку удалили в панели), — помощник их пропускает.
+      security:
+        - machineBearer: []
+      responses:
+        '200':
+          description: >-
+            Zip текущей папки игрока: записи `<entryId>/<относительный путь>` (entryId — id папки из списка, GUID в
+            нижнем регистре; разделитель `/`; имена в UTF-8).
+          headers:
+            X-Club-Saves-Config:
+              $ref: '#/components/headers/SavesConfig'
+          content:
+            application/zip:
+              schema:
+                type: string
+                contentMediaType: application/zip
+        '204':
+          description: У игрока нет сохранений (аренда всё равно записана).
+          headers:
+            X-Club-Saves-Config:
+              $ref: '#/components/headers/SavesConfig'
+        '400':
+          description: '`validation`: ID игрока не по формату (`details.field = playerId`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/SavesUnavailable'
+  /machines/{machineId}/saves/{playerId}:
+    parameters:
+      - $ref: '#/components/parameters/MachineId'
+      - $ref: '#/components/parameters/PlayerId'
+    put:
+      operationId: putSaves
+      summary: Новая версия сохранений игрока (конец сеанса)
+      description: >-
+        Принимается, только если аренда игрока у этой машины. Тело — zip, как в ответе attach, только записи включённых
+        папок из списка; не больше `limitMb` + 10 %. Распакованные файлы — не больше `limitMb` МиБ и 50 000 файлов;
+        запрещены абсолютные пути, `..`, двоеточия, `\` и имена устройств Windows. Принятая версия целиком заменяет
+        папку игрока, прошлая становится предыдущей копией; аренда снимается.
+      security:
+        - machineBearer: []
+      requestBody:
+        required: true
+        content:
+          application/zip:
+            schema:
+              type: string
+              contentMediaType: application/zip
+      responses:
+        '204':
+          description: Принято; аренда снята.
+        '400':
+          description: >-
+            `validation`: `details.reason = badArchive` — не zip, плохое имя записи или запись не из списка включённых
+            папок (у игрока отметка `error`, аренда остаётся); или ID игрока не по формату (`details.field = playerId`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '409':
+          description: >-
+            `conflict`, `details.reason = notAttached`: аренда не у этой машины (не выдавали или игрок уже вошёл на
+            другом ПК). Ничего не меняется, у игрока отметка `rejected`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '413':
+          description: >-
+            `validation`, `details.reason = overLimit`: тело или распакованные файлы больше лимита. Прошлая версия
+            остаётся, у игрока отметка `overLimit`, аренда снята.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          $ref: '#/components/responses/SavesUnavailable'
+  /machines/{machineId}/saves/{playerId}/lease:
+    parameters:
+      - $ref: '#/components/parameters/MachineId'
+      - $ref: '#/components/parameters/PlayerId'
+    delete:
+      operationId: releaseSavesLease
+      summary: Снять аренду без сохранения (выдача на ПК не удалась после ответа сервера)
+      description: Аренду другой машины не трогает; ответ тот же.
+      security:
+        - machineBearer: []
+      responses:
+        '204':
+          description: Аренды этой машины нет.
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/SavesUnavailable'
 webhooks:
   machinesSnapshot:
     post:
@@ -317,9 +461,36 @@ components:
         type: string
         pattern: '^[a-z][a-z0-9]{1,11}$'
         examples: [solo]
+    PlayerId:
+      name: playerId
+      in: path
+      required: true
+      description: >-
+        ID игрока от шелла (ID аккаунта в кассе). Сервер приводит к нижнему регистру: `ABC…` и `abc…` — одна папка и
+        одна аренда.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9-]{1,64}$'
+        examples: [0f8fad5b-d9cb-469f-a165-70867728950e]
+  headers:
+    SavesConfig:
+      description: SavesConfig (то же, что GET …/saves/config) — JSON в UTF-8, закодированный base64.
+      required: true
+      schema:
+        type: string
+        contentEncoding: base64
+        contentMediaType: application/json
   responses:
     Error:
       description: Ошибка.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    SavesUnavailable:
+      description: >-
+        `serverUnavailable`, `details.reason = savesUnavailable`: сохранения выключены (Saves:Enabled) или диск
+        сохранений не смонтирован. Помощник отвечает шеллу `disabled`.
       content:
         application/json:
           schema:
@@ -662,6 +833,46 @@ components:
           items:
             type: string
             pattern: '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$'
+    SavesConfig:
+      type: object
+      required: [enabled, limitMb, excludes, entries]
+      properties:
+        enabled:
+          type: boolean
+          description: Сохранения включены на сервере и диск сохранений смонтирован; false — помощник отвечает шеллу `disabled`.
+        limitMb:
+          type: integer
+          minimum: 1
+          maximum: 2000
+          description: Лимит распакованных сохранений игрока, МиБ.
+        excludes:
+          type: array
+          description: >-
+            Не сохраняются: имя папки или файла без `*` и `?` (любая часть пути, `Logs`) или маска имени файла (`*.dmp`),
+            без учёта регистра.
+          items:
+            type: string
+        entries:
+          type: array
+          description: Включённые папки по названию.
+          items:
+            $ref: '#/components/schemas/SaveEntryConfig'
+    SaveEntryConfig:
+      type: object
+      required: [id, path]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: ID папки — имя верхней папки записей в архиве.
+        path:
+          type: string
+          minLength: 1
+          maxLength: 260
+          description: >-
+            Шаблон пути: `%USERPROFILE%`, `%APPDATA%`, `%LOCALAPPDATA%`, `%LOCALAPPDATA_LOW%`, `%DOCUMENTS%`,
+            `%SAVEDGAMES%` с подпапкой или абсолютный путь на букве библиотеки игр.
+          examples: ['%LOCALAPPDATA%\GameName\Saved', 'H:\Игры\CS 1.6\cstrike']
     ErrorEnvelope:
       type: object
       required: [error]

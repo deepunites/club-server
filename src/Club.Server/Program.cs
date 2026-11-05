@@ -127,6 +127,7 @@ app.UseMiddleware<MachineAuthMiddleware>();
 app.UseMiddleware<PanelAuthMiddleware>();
 
 app.MapDisklessEndpoints();
+app.MapSavesEndpoints();
 app.MapLibraryPanelEndpoints();
 app.MapMachinesPanelEndpoints();
 app.MapZonesPanelEndpoints();

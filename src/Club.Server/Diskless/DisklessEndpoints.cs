@@ -363,7 +363,8 @@ public static partial class DisklessEndpoints
         return refresh;
     }
 
-    private static MachineContext RequireSelf(HttpContext context, Guid machineId)
+    /// <summary>Токен — этой машины из пути, иначе 403 <c>otherMachine</c> (и для API сохранений).</summary>
+    internal static MachineContext RequireSelf(HttpContext context, Guid machineId)
     {
         var machine = MachineAuthMiddleware.Machine(context);
         if (machine.Machine.Id != machineId)

@@ -52,6 +52,12 @@ public sealed class SaveStore(SavesOptions options, ILogger<SaveStore> logger)
         return directory;
     }
 
+    /// <summary>
+    /// Свободное имя файла <c>.tmp/&lt;guid&gt;.zip</c> — тело приёма или архив выдачи (сам файл не создаётся, <c>.tmp</c> —
+    /// создаётся). Удаляет его вызывающий; остаток после падения убирает <see cref="CleanTemp"/>.
+    /// </summary>
+    public string NewTempZipPath() => NewTempPath() + ".zip";
+
     /// <summary>Свободное имя <c>.tmp/&lt;guid&gt;</c> (сама папка не создаётся, <c>.tmp</c> — создаётся).</summary>
     private string NewTempPath()
     {
