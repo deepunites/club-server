@@ -744,20 +744,22 @@ public sealed class SelfUpdater
                 return;
             }
 
+            // Имена уже поменяны: дальше ничто, кроме остановки службы, не мешает завершить процесс — иначе он жил бы с
+            // новым exe на диске и с замком сохранений (attach — updating) до перезагрузки.
             swapped = true;
             try
             {
                 _store.Write(prepared with { Phase = UpdatePhases.Swapped });
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            catch (Exception ex)
             {
                 // Страж новой сборки считает prepared после переименований тем же, что swapped.
-                _logger.LogWarning("Update {Id}: phase swapped not written to update.json ({Error}); prepared stays", job.Id, ex.Message);
+                Quietly(log => log.LogWarning("Update {Id}: phase swapped not written to update.json ({Error}); prepared stays", job.Id, ex.Message));
             }
 
-            _logger.LogInformation(
+            Quietly(log => log.LogInformation(
                 "Update {Id}: exe replaced with build {Version} ({Sha}), previous build {From} kept as .old; ending the process so that Windows restarts the service",
-                job.Id, job.Version, job.Sha256, own);
+                job.Id, job.Version, job.Sha256, own));
             _ = await _api.HoldRenewalAsync(ct);
             _terminated = true;
             Publish();
@@ -864,6 +866,22 @@ public sealed class SelfUpdater
         {
             _restorePending = false;
             _logger.LogInformation("Self-update: .old renamed back to the exe; the previous build is in place again");
+        }
+    }
+
+    /// <summary>
+    /// Строка в журнал после переименований: отказ журнала (агрегатор журналов бросает исключение провайдера, например
+    /// журнала событий) не мешает завершить процесс.
+    /// </summary>
+    private void Quietly(Action<ILogger> write)
+    {
+        try
+        {
+            write(_logger);
+        }
+        catch (Exception)
+        {
+            // Журнал — не повод оставить процесс жить после замены exe.
         }
     }
 

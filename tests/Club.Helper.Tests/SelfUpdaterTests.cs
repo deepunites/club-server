@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Club.Helper.Core;
 using Club.Helper.Core.Updates;
+using Microsoft.Extensions.Logging;
 
 namespace Club.Helper.Tests;
 
@@ -406,6 +407,26 @@ public sealed class SelfUpdaterTests : IDisposable
     }
 
     [Fact]
+    public async Task Swap_LogFailsAfterRenames_StillTerminated()
+    {
+        // Журнал событий отказал (агрегатор журналов бросает исключение провайдера) сразу после переименований: exe уже
+        // новый — процесс всё равно завершается, а не остаётся жить с замком сохранений до перезагрузки.
+        var updater = new SelfUpdater(_api, _paths, _store, _service, _saves, () => _masterBusy,
+            new HelperOptions { HelperVersion = "1.8.0", HelperBuild = Sha(OldBuild) }, _clock, new FailingLogger("exe replaced"));
+        _reports = 0;
+        Accepted(updater, Offer());
+        await DownloadedAsync(updater);
+        Assert.Equal(UpdateProgress.Applying, updater.Report()?.State);
+
+        Accepted(updater, Offer());
+        await updater.AfterTickAsync(CancellationToken.None);
+
+        Assert.Equal(1, _service.Terminations);
+        Assert.Equal(NewBuild, File.ReadAllBytes(_paths.Exe));
+        Assert.Equal(UpdatePhases.Swapped, Stored().Phase);
+    }
+
+    [Fact]
     public async Task Cancel_WhileWaiting_NewDeleted_NoSwap()
     {
         _masterBusy = true;
@@ -641,6 +662,22 @@ public sealed class SelfUpdaterTests : IDisposable
             }
 
             return new HttpResponseMessage(HttpStatusCode.NoContent) { RequestMessage = request };
+        }
+    }
+
+    /// <summary>Журнал, который бросает исключение на строке с <paramref name="fragment"/> (отказ журнала событий).</summary>
+    private sealed class FailingLogger(string fragment) : ILogger<SelfUpdater>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (formatter(state, exception).Contains(fragment, StringComparison.Ordinal))
+            {
+                throw new AggregateException(new InvalidOperationException("The event log is full"));
+            }
         }
     }
 
