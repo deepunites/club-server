@@ -77,22 +77,27 @@ public sealed class HelperUpdateWireTests : IDisposable
 
     /// <summary>
     /// Поддельный сервер раздачи: тело — <paramref name="body"/> без Content-Length (поток идёт, пока не кончится), с
-    /// <paramref name="length"/> — с заголовком; <paramref name="breakAfter"/> — обрыв соединения после стольких байт.
+    /// <paramref name="length"/> — с заголовком; <paramref name="breakAfter"/> — обрыв соединения после стольких байт;
+    /// <paramref name="cancel"/> — отменяется после первого куска (вызывающий бросил загрузку на середине).
     /// </summary>
-    private sealed class FakeFiles(byte[] body, bool length = false, int? breakAfter = null, HttpStatusCode status = HttpStatusCode.OK) : HttpMessageHandler
+    private sealed class FakeFiles(
+        byte[] body, bool length = false, int? breakAfter = null, HttpStatusCode status = HttpStatusCode.OK, CancellationTokenSource? cancel = null) : HttpMessageHandler
     {
         public List<HttpRequestMessage> Seen { get; } = [];
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             Seen.Add(request);
-            HttpContent content = length ? new ByteArrayContent(body) : new StreamContent(new Chunks(body, breakAfter));
+            HttpContent content = length ? new ByteArrayContent(body) : new StreamContent(new Chunks(body, breakAfter, cancel));
             return Task.FromResult(new HttpResponseMessage(status) { Content = content, RequestMessage = request });
         }
     }
 
-    /// <summary>Поток без длины и перемотки, по 4 КБ за чтение; после <paramref name="breakAfter"/> байт — обрыв сети.</summary>
-    private sealed class Chunks(byte[] body, int? breakAfter) : Stream
+    /// <summary>
+    /// Поток без длины и перемотки, по 4 КБ за чтение; после <paramref name="breakAfter"/> байт — обрыв сети; после первого
+    /// куска — отмена <paramref name="cancel"/>.
+    /// </summary>
+    private sealed class Chunks(byte[] body, int? breakAfter, CancellationTokenSource? cancel = null) : Stream
     {
         private int _position;
 
@@ -112,6 +117,7 @@ public sealed class HelperUpdateWireTests : IDisposable
             var n = Math.Min(Math.Min(count, 4096), body.Length - _position);
             Array.Copy(body, _position, buffer, offset, n);
             _position += n;
+            cancel?.Cancel();
             return n;
         }
 
@@ -286,6 +292,18 @@ public sealed class HelperUpdateWireTests : IDisposable
         await Assert.ThrowsAnyAsync<ArgumentException>(
             () => FakeClient(files).DownloadAsync("https://elsewhere/ClubDisklessHelper-1.8.1.exe", Destination, body.Length, CancellationToken.None));
         Assert.Empty(files.Seen);
+    }
+
+    [Fact]
+    public async Task Download_Cancelled_NotServerUnavailable_DeletesFile()
+    {
+        // Отмена вызывающего (поручение отозвали, служба останавливается) — отмена, а не «сервер недоступен»: файл стёрт.
+        var body = Encoding.UTF8.GetBytes(new string('d', 50_000));
+        using var cancel = new CancellationTokenSource();
+        var error = await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => FakeClient(new FakeFiles(body, cancel: cancel)).DownloadAsync("pxe/v1/files/tools/" + Build181, Destination, body.Length, cancel.Token));
+        Assert.True(cancel.IsCancellationRequested, error.Message);
+        Assert.False(File.Exists(Destination));
     }
 
     [Fact]
