@@ -1,5 +1,6 @@
 using Club.Server.Api;
 using Club.Server.Data;
+using Club.Server.HelperUpdates;
 using Club.Server.Library;
 
 namespace Club.Server.Panel;
@@ -12,13 +13,18 @@ public sealed record MachineVolumeView(string State, string? LibraryVersion, boo
 /// Строка экрана «Рабочие станции». <c>status</c>: <c>pendingApproval</c> | <c>maintenance</c> | <c>online</c> |
 /// <c>offline</c> | <c>neverSeen</c>. Значения, не прошедшие проверку на вменяемость, отдаются как null (на экране — прочерк).
 /// <c>masterError</c> — причина из отчёта помощника о мастер-томе (у <c>failed</c> и <c>mounting</c>).
+/// Самообновление помощника (spec 2026-11-06, п. 3.5): <c>helperBuild</c> — SHA256 exe из последнего отчёта G:,
+/// <c>helperUpdate</c> — поручение ПК (незавершённое или завершённое за сутки), <c>helperUpdatable</c> — ПК сейчас можно
+/// обновить кнопкой, иначе причина в <c>helperUpdateBlock</c> (<c>notApproved</c>, <c>diskless</c> — «через эталон»,
+/// <c>helperTooOld</c> — «вручную»): панель не выводит это из <c>bootMode</c> сама.
 /// </summary>
 public sealed record MachineView(
     Guid Id, int Number, string Name, string Zone, string Status, string Hostname, string? IpAddress,
     IReadOnlyList<string> MacAddresses, string? HelperVersion, string? OsVersion, DateTimeOffset? LastSeenAt,
     DateTimeOffset? BootTime, MachineVolumeView Volume, DateTimeOffset RegisteredAt, string? ImageVersion, ReimageView? Reimage,
     Diskless.SecureBootReport? SecureBoot = null, string? MasterState = null, string BootMode = "local", string? MasterError = null,
-    IReadOnlyList<MachineLibraryView>? Libraries = null);
+    IReadOnlyList<MachineLibraryView>? Libraries = null, string? HelperBuild = null, HelperUpdateRow? HelperUpdate = null,
+    bool HelperUpdatable = false, string? HelperUpdateBlock = null);
 
 /// <summary>
 /// Вторая (третья, …) библиотека на ПК — по последнему отчёту помощника о ней (<c>machine_library</c>; нет отчёта — том
@@ -82,7 +88,7 @@ public static class MachinesPanelEndpoints
     {
         var panel = app.MapGroup(PanelAuthMiddleware.Prefix + "/v1");
 
-        panel.MapGet("/machines", async (MachineRepository machines, ZoneRepository zones, LibraryRepository library, LibraryOptions libraryOptions, LibrarySet libraries, Imaging.ImageRepository images, Integration.MachineFeedOptions feedOptions, Integration.MachineFeedState feed, TimeProvider clock, ILoggerFactory logs) =>
+        panel.MapGet("/machines", async (MachineRepository machines, ZoneRepository zones, LibraryRepository library, LibraryOptions libraryOptions, LibrarySet libraries, Imaging.ImageRepository images, Integration.MachineFeedOptions feedOptions, Integration.MachineFeedState feed, HelperUpdateRepository helperUpdates, TimeProvider clock, ILoggerFactory logs) =>
         {
             var logger = logs.CreateLogger("Club.Server.Panel.Sanity");
             var now = clock.GetUtcNow();
@@ -95,10 +101,22 @@ public static class MachinesPanelEndpoints
                 extras.Add(new ExtraLibrary(slot, (await slot.Repository.PointersAsync()).Current?.Label, (await slot.Machines!.AllAsync()).ToDictionary(r => r.MachineId)));
             }
 
+            // Поручение ПК: незавершённое, иначе последнее завершённое за сутки (ListAsync — незавершённые первыми, новые выше).
+            var updates = (await helperUpdates.ListAsync(now)).GroupBy(u => u.MachineId).ToDictionary(g => g.Key, g => g.First());
+            var blocks = await helperUpdates.IneligibleReasonsAsync();
             var views = (await machines.AllAsync())
-                .Select(m => View(m, current, now, logger, jobs.TryGetValue(m.Id, out var job) ? job : null, labels) with
+                .Select(m =>
                 {
-                    Libraries = extras.Count == 0 ? null : extras.Select(e => LibraryView(m, e, now)).ToList(),
+                    // Машину добавили между запросами — до следующего обновления экрана она «неизвестна».
+                    var block = blocks.TryGetValue(m.Id, out var reason) ? reason : HelperUpdateCodes.Refusals.Unknown;
+                    return View(m, current, now, logger, jobs.TryGetValue(m.Id, out var job) ? job : null, labels) with
+                    {
+                        Libraries = extras.Count == 0 ? null : extras.Select(e => LibraryView(m, e, now)).ToList(),
+                        HelperBuild = m.HelperBuild,
+                        HelperUpdate = updates.GetValueOrDefault(m.Id),
+                        HelperUpdatable = block is null,
+                        HelperUpdateBlock = block,
+                    };
                 })
                 .ToList();
             return Results.Json(

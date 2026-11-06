@@ -159,6 +159,9 @@ G: (`personal` — подключён личный диск этой библи�
 навсегда оставалось `WIN-…`.
 `volume.personal` — подключён личный диск игр места (`games-seat-NN`, Library:PersonalGames): он на запись по замыслу,
 `readOnlyVerified` у него нет.
+Помощник: `helperBuild` (SHA256 exe из последнего отчёта G:), `helperUpdate` (поручение ПК — незавершённое или
+завершённое за сутки, как строка `GET /helper/updates`), `helperUpdatable` и `helperUpdateBlock` (почему нельзя:
+`notApproved`, `diskless` — «через эталон», `helperTooOld` — «вручную») — раздел «Обновление помощника».
 
 `status`: `pendingApproval` → `maintenance` → `neverSeen` / `online` (отчёт помощника не старше 90 с) / `offline`.
 Время из будущего (сбитые часы) считается невменяемым: в ответе `null`, на экране прочерк, в логе предупреждение.
@@ -309,3 +312,30 @@ pxeArmed, attempts, updatedAt, allowNotGeneralized }`, статус `reimaging`,
 `lastResult`: `ok`, `overLimit` (больше лимита, осталась прошлая версия), `rejected` (сохранение с ПК без аренды),
 `error` (плохой архив). `machineName` — null, если машину удалили из реестра. Удаление игрока ждёт идущую выдачу или
 приём его сохранений (блокировка игрока); ID в любом регистре — тот же игрок.
+
+## Обновление помощника
+
+Карточка на экране ПК. Устройство — `docs/superpowers/specs/2026-11-06-helper-self-update-design.md` (п. 3);
+помощник получает поручение в ответе на отчёт G: (`helperUpdate` в `StatusAccepted`, `docs/diskless-api.yaml`).
+
+| Метод и путь | Что делает | Ответы |
+|---|---|---|
+| `GET /helper/builds` | Сборки из `tools` (`ClubDisklessHelper-X.Y.Z.exe`, не моложе 60 с): `[{ file, version, size, sha256, modifiedAt, updatable }]`, новые первыми; `updatable=false` — старше 1.8.0, «только вручную» | 200 |
+| `POST /helper/updates` `{ file, numbers?, allHybrids? }` | Поручения на сборку `file`: ПК из `numbers` (до 1000) и, если `allHybrids`, всем гибридам (`bootMode=local`) | 200 `{ queued: [номер], paused, refused: [{ number, reason }] }`; 400 |
+| `GET /helper/updates` | Очередь: `{ items, paused, maxActive }`; `items` — незавершённые (первыми) и завершённые за сутки, по номеру ПК | 200 |
+| `POST /helper/updates/resume` | «Продолжить»: поручения на паузе — снова в очередь | 200 `{ count }` |
+| `POST /helper/updates/cancel` | «Отменить всё»: все незавершённые — `cancelled` | 200 `{ count }` |
+| `POST /helper/updates/{id}/cancel` | Отменить одно поручение | 204; 404 |
+
+400: `file` — `required`, `unknown` (не из списка сборок); `numbers` — `required` (нет номеров и не `allHybrids`),
+`tooMany`. Кому отказано — в `refused` (в порядке проверки): `unknown` (нет такого номера), `notApproved`,
+`diskless` (место бездиска; мастер эталона — только в сеансе мастера), `helperTooOld`, `targetTooOld` (сборка старше
+1.8.0), `busy` (уже есть незавершённое поручение), `current` (у ПК уже эта сборка). `paused: true` — очередь на паузе,
+новые поручения созданы сразу на паузе.
+
+Поручение: `id, machineId, number, file, version, sha256, state, progress, reason, error, message, createdAt,
+updatedAt, finishedAt`. `state`: `queued`, `paused`, `active`, `done`, `failed`, `cancelled`; `progress` (что сообщил
+помощник): `downloading`, `waiting` (`reason`: `session`, `command`, `master`), `applying`, `confirming`; `error` —
+коды spec п. 3.4 и 6 (`downloadFailed`, `hashMismatch`, `noRecovery`, `swapFailed`, `startFailed`, `noRollback`,
+`noReturn`, `noProgress`, `buildChanged`, `buildMissing`, `helperTooOld`, `diskless`). Не больше
+`HelperUpdates:MaxActive` активных; первая ошибка (кроме `helperTooOld`, `diskless`, отмены) ставит очередь на паузу.

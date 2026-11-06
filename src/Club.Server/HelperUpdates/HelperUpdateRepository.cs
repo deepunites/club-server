@@ -289,6 +289,29 @@ public sealed class HelperUpdateRepository(NpgsqlDataSource db, HelperBuilds bui
     }
 
     /// <summary>
+    /// То же, что <see cref="IneligibleReasonAsync"/>, для всех машин реестра одним запросом (экран «Рабочие станции»):
+    /// машина → причина или null.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<Guid, string?>> IneligibleReasonsAsync()
+    {
+        await using var c = await db.OpenConnectionAsync();
+        var machines = await c.QueryAsync<Eligibility>(EligibilitySql);
+        return machines.ToDictionary(m => m.Id, m => Ineligible(m, helperVersion: null));
+    }
+
+    /// <summary>
+    /// Данные для проверки «кого можно обновлять». <c>diskless_image</c> — одна строка, <c>seat_disks</c> — не больше
+    /// одной на машину: на машину — одна строка.
+    /// </summary>
+    private const string EligibilitySql = """
+        SELECT m.id, m.approved, m.boot_mode AS BootMode, m.helper_version AS HelperVersion, i.master_machine_id IS NOT NULL AS Master,
+               COALESCE(i.master_machine_id IS NOT NULL AND s.kind = 'master' AND s.last_boot_at > i.updated_at, false) AS MasterSession
+        FROM machines m
+        LEFT JOIN diskless_image i ON i.master_machine_id = m.id
+        LEFT JOIN seat_disks s ON s.machine_id = m.id
+        """;
+
+    /// <summary>
     /// Проверка «кого можно обновлять» (spec п. 3.3). Мастер эталона (<c>diskless_image.master_machine_id</c>) — только в
     /// сеансе мастера: диск <c>seat_disks.kind = 'master'</c> и загрузка по сети после включения режима. Отдельной
     /// отметки времени включения режима нет: его пишет <c>diskless_image.updated_at</c> (<see cref="Diskless.DisklessRepository.SetMasterAsync"/>;
@@ -297,21 +320,12 @@ public sealed class HelperUpdateRepository(NpgsqlDataSource db, HelperBuilds bui
     /// </summary>
     private async Task<string?> IneligibleAsync(NpgsqlConnection c, NpgsqlTransaction? tx, Guid machineId, string? helperVersion)
     {
-        var machine = await c.QuerySingleOrDefaultAsync<Eligibility>(
-            """
-            SELECT m.approved, m.boot_mode AS BootMode, m.helper_version AS HelperVersion, i.master_machine_id IS NOT NULL AS Master,
-                   COALESCE(i.master_machine_id IS NOT NULL AND s.kind = 'master' AND s.last_boot_at > i.updated_at, false) AS MasterSession
-            FROM machines m
-            LEFT JOIN diskless_image i ON i.master_machine_id = m.id
-            LEFT JOIN seat_disks s ON s.machine_id = m.id
-            WHERE m.id = @machineId
-            """,
-            new { machineId }, tx);
-        if (machine is null)
-        {
-            return Refusals.Unknown;
-        }
+        var machine = await c.QuerySingleOrDefaultAsync<Eligibility>(EligibilitySql + " WHERE m.id = @machineId", new { machineId }, tx);
+        return machine is null ? Refusals.Unknown : Ineligible(machine, helperVersion);
+    }
 
+    private string? Ineligible(Eligibility machine, string? helperVersion)
+    {
         if (!machine.Approved)
         {
             return Refusals.NotApproved;
@@ -581,6 +595,7 @@ public sealed class HelperUpdateRepository(NpgsqlDataSource db, HelperBuilds bui
 
     private sealed class Eligibility
     {
+        public Guid Id { get; init; }
         public bool Approved { get; init; }
         public string BootMode { get; init; } = "local";
         public string HelperVersion { get; init; } = "";
