@@ -49,8 +49,25 @@
          администраторы, до 4 подключений, строка JSON до 4096 байт: ping, profile.attach, profile.detach), выдача и
          сохранение папок игрока через сервер клуба (…/saves, архивы — отдельный HttpClient, 130 с), исходное содержимое
          папок на G:/H: (saves-baseline), такт сохранений — в фоне после такта помощника; обновление токенов — по одному на
-         оба потока (такт и канал). Провод G: и H: не изменился. -->
-    <Version>1.7.0</Version>
+         оба потока (такт и канал). Провод G: и H: не изменился.
+         1.8.0: самообновление по кнопке в панели сервера клуба (spec 2026-11-06-helper-self-update-design.md): SHA256
+         своего exe (helperBuild) — в регистрации и в каждом отчёте G:; поручение helperUpdate из ответа на отчёт G: —
+         загрузка в фоне в ClubDisklessHelper.exe.new (до 300 МБ, отдельный HttpClient на 15 минут, SHA256 по ходу),
+         ожидание свободного момента (нет выданных сохранений, команды канала, мастер-тома: waiting session/command/master),
+         applying обычным полным отчётом, exe в .old, .new в exe и завершение процесса (Kill): Windows запускает службу новой
+         сборкой; действия при сбое службы restart/5000/restart/5000/restart/30000 со сбросом через сутки помощник ставит сам
+         при каждом старте (без них замены нет: noRecovery). Страж первым в Main по update.json: попытка — только запуск без
+         «чистого выхода» прошлого (перезагрузка ПК — не попытка), больше трёх — откат на .old (минимальный хост службы и
+         Kill, прежняя сборка сообщает failed/startFailed), иначе «проверка»: 10 минут и 5 принятых отчётов G: — confirmed,
+         .old стёрт. Поручение с ошибкой на этом ПК (update-failed.json, последние 20) снова не выполняется. Любой
+         ненормальный конец хоста службы (исключение в фоновой службе, ошибка при старте, остановка не по команде Windows) —
+         текст в update.json и Kill, а не аккуратная остановка, после которой Windows службу не перезапускала. Канал: ping —
+         build и updating, attach/detach во время замены — ошибка updating. Без поручения провод G: не изменился, H: — без
+         новых полей.
+         Пробные сборки (номера никогда не выпускаются, spec п. 7): -p:Version=1.8.90 -p:ClubTestFault=crash (падение
+         вскоре после старта хоста), 1.8.91 с ClubTestFault=throw (исключение в HelperService.ExecuteAsync после первого
+         такта), 1.8.92 с ClubTestFault=hang (такт не начинается, отчётов нет). Без ClubTestFault этого кода в сборке нет. -->
+    <Version>1.8.0</Version>
     <TargetFramework>net10.0-windows</TargetFramework>
     <!-- Сборка на Linux (CI, разработка); запуск — только на Windows. -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
@@ -59,6 +76,22 @@
     <AssemblyName>ClubDisklessHelper</AssemblyName>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
   </PropertyGroup>
+
+  <!-- Пробные сборки самообновления: ClubTestFault=crash|throw|hang -> CLUB_TEST_FAULT_CRASH|THROW|HANG. -->
+  <PropertyGroup Condition="'$(ClubTestFault)' == 'crash'">
+    <DefineConstants>$(DefineConstants);CLUB_TEST_FAULT_CRASH</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(ClubTestFault)' == 'throw'">
+    <DefineConstants>$(DefineConstants);CLUB_TEST_FAULT_THROW</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(ClubTestFault)' == 'hang'">
+    <DefineConstants>$(DefineConstants);CLUB_TEST_FAULT_HANG</DefineConstants>
+  </PropertyGroup>
+
+  <Target Name="CheckClubTestFault" BeforeTargets="BeforeBuild"
+          Condition="'$(ClubTestFault)' != '' and '$(ClubTestFault)' != 'crash' and '$(ClubTestFault)' != 'throw' and '$(ClubTestFault)' != 'hang'">
+    <Error Text="ClubTestFault is crash, throw or hang, not '$(ClubTestFault)'" />
+  </Target>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.12" />

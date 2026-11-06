@@ -1,4 +1,5 @@
 using Club.Helper.Core;
+using Club.Helper.Core.Updates;
 
 namespace Club.Helper;
 
@@ -9,8 +10,13 @@ namespace Club.Helper;
 /// После каждого такта (1.7.0) — такт сохранений (<see cref="SavesService.OnTickAsync"/>: список папок, исходное содержимое
 /// папок на G:/H:) с библиотеками из последних отчётов циклов. Он идёт в фоне, по одному: снятие исходного содержимого
 /// больших папок с тома библиотеки не задерживает отчёт G: (ПК «на связи» — отчёт не реже 90 с).
+/// Самообновление (1.8.0, spec 2026-11-06, п. 4.3) — только здесь: сразу после такта <see cref="SelfUpdater.OnTick"/> с
+/// последним принятым ответом G: (поручение, отмена, подтверждение), затем, если такт сохранений закончился,
+/// <see cref="SelfUpdater.AfterTickAsync"/> (загрузка, готовность, замена и завершение процесса) — до следующего такта
+/// сохранений: замена не начинается посреди него. Такт сохранений ещё идёт — шаг замены ждёт следующего такта.
 /// </summary>
-public sealed class HelperService(HelperLoops loops, SavesService saves, HelperOptions options, ILogger<HelperService> logger) : BackgroundService
+public sealed class HelperService(HelperLoops loops, SavesService saves, SelfUpdater updater, HelperOptions options, ILogger<HelperService> logger)
+    : BackgroundService
 {
     private Task _savesTick = Task.CompletedTask;
 
@@ -18,9 +24,26 @@ public sealed class HelperService(HelperLoops loops, SavesService saves, HelperO
     {
         DisableFastStartup();
         var interval = TimeSpan.FromSeconds(Math.Max(5, options.PollIntervalSec));
+#if CLUB_TEST_FAULT_HANG
+        // Пробная сборка 1.8.92 (spec п. 7): такт не начинается, отчётов нет — сервер ставит noReturn.
+        await Task.Delay(Timeout.Infinite, stoppingToken);
+#endif
         while (!stoppingToken.IsCancellationRequested)
         {
             await loops.TickAsync(stoppingToken);
+            updater.OnTick(loops.Games.LastAccepted, loops.Games.AcceptedReports);
+#if CLUB_TEST_FAULT_THROW
+            // Пробная сборка 1.8.91 (spec п. 7): исключение в фоновой службе после первого такта.
+            if (!stoppingToken.IsCancellationRequested)
+            {
+                throw new InvalidOperationException("CLUB_TEST_FAULT_THROW: test build fails in HelperService.ExecuteAsync after the first tick");
+            }
+#endif
+            if (_savesTick.IsCompleted)
+            {
+                await updater.AfterTickAsync(stoppingToken);
+            }
+
             StartSavesTick(stoppingToken);
             await Task.Delay(loops.DelayAfterTick(interval), stoppingToken);
         }

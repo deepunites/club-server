@@ -30,6 +30,16 @@ public sealed record UpdatePaths(string InstallDir, string StateDir)
     /// <summary>Поручения, по которым на этом ПК была ошибка (<see cref="FailedUpdate"/>, последние 20).</summary>
     public string FailedFile => Path.Combine(StateDir, "update-failed.json");
 
+    /// <summary>
+    /// SHA256 файла сборки строчными (<c>helperBuild</c>; для стража — свой exe и <c>.old</c>). Файл открывается на чтение
+    /// без запрета чужого чтения, записи и удаления: работающий exe так читается.
+    /// </summary>
+    public static string Sha256Of(string file)
+    {
+        using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 81920, FileOptions.SequentialScan);
+        return Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(stream));
+    }
+
     /// <summary>Папки службы на ПК: <c>%ProgramFiles%\ClubDiskless</c> и <c>%ProgramData%\ClubDiskless</c>.</summary>
     public static UpdatePaths Default() => new(
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "ClubDiskless"),
