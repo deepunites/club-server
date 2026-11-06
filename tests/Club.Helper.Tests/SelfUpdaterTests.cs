@@ -545,19 +545,126 @@ public sealed class SelfUpdaterTests : IDisposable
 
         Accepted(updater, Offer());
         Assert.Equal(new HelperUpdateReport(JobId.ToString(), UpdateProgress.Confirmed), updater.Report());
+
+        // Отчёт с confirmed сервер ещё не принял: update.json, .old и .failed на месте (перезапуск сейчас — снова проверка).
+        NotAccepted(updater, Offer());
+        Assert.Equal(UpdateProgress.Confirmed, updater.Report()?.State);
+        Assert.True(File.Exists(_paths.Old));
+        Assert.True(File.Exists(_paths.Failed));
+        Assert.Equal(UpdatePhases.Swapped, Stored().Phase);
+
+        // Принят — стёрты; confirmed — пока принятый ответ несёт поручение; без него — ничего.
+        Accepted(updater, Offer());
+        Assert.Equal(UpdateProgress.Confirmed, updater.Report()?.State);
         Assert.False(File.Exists(_paths.Old));
         Assert.False(File.Exists(_paths.Failed));
         Assert.Null(_store.Read(out var unreadable));
         Assert.False(unreadable);
         Assert.Equal(NewBuild, File.ReadAllBytes(_paths.Exe));
-
-        // confirmed — пока принятый ответ несёт поручение; без него — ничего.
-        Accepted(updater, Offer());
-        Assert.Equal(UpdateProgress.Confirmed, updater.Report()?.State);
         NotAccepted(updater, null);
         Assert.Equal(UpdateProgress.Confirmed, updater.Report()?.State);
         Accepted(updater, null);
         Assert.Null(updater.Report());
+        Assert.Equal(0, _service.Terminations);
+    }
+
+    [Fact]
+    public void Confirm_PowerCutBeforeConfirmedAccepted_StateKept_ConfirmedAfterRestart()
+    {
+        // Подтверждено на ПК (10 минут, 5 принятых отчётов), но сервер недоступен, а потом пропало питание — отчёт с
+        // confirmed так и не принят. Стёртый при подтверждении update.json оставил бы сервер без confirmed: поручение —
+        // noReturn и пауза очереди, хотя сборка на месте. update.json и .old живут, пока отчёт с confirmed не принят.
+        File.WriteAllBytes(_paths.Exe, NewBuild);
+        File.WriteAllBytes(_paths.Old, OldBuild);
+        _store.Write(new UpdateState(UpdateState.CurrentVersion, JobId, Sha(OldBuild), Sha(NewBuild), "1.8.1", UpdatePhases.Swapped, 1, false,
+            _clock.GetUtcNow(), null, null));
+        var confirming = new HelperUpdateReport(JobId.ToString(), UpdateProgress.Confirming);
+        var confirmed = new HelperUpdateReport(JobId.ToString(), UpdateProgress.Confirmed);
+
+        var first = Updater(NewBuild);
+        for (var i = 0; i < SelfUpdater.ConfirmReports; i++)
+        {
+            Accepted(first, Offer());
+        }
+
+        _clock.Advance(SelfUpdater.ConfirmAfter);
+        NotAccepted(first, Offer());
+        Assert.Equal(confirmed, first.Report());
+        Assert.Equal(OldBuild, File.ReadAllBytes(_paths.Old));
+        Assert.Equal(UpdatePhases.Swapped, Stored().Phase);
+
+        // Питание пропало (не «чистый выход»): та же новая сборка, попытка 2 — снова проверка, а не «готово» без сервера.
+        Assert.Equal(GuardOutcome.RunConfirming, UpdateGuard.Run(_paths, _store, Sha(NewBuild), ShaOf, _clock));
+        Assert.Equal(2, Stored().Attempts);
+        var second = Updater(NewBuild);
+        Assert.Equal(confirming, second.Report());
+        for (var i = 0; i < SelfUpdater.ConfirmReports - 1; i++)
+        {
+            Accepted(second, Offer());
+        }
+
+        _clock.Advance(SelfUpdater.ConfirmAfter);
+        Accepted(second, Offer());
+        Assert.Equal(confirmed, second.Report());
+        Assert.True(File.Exists(_paths.Old));
+
+        // Сервер принял confirmed и закрыл поручение (ответ без него): теперь update.json и .old стёрты.
+        Accepted(second, null);
+        Assert.Null(second.Report());
+        Assert.False(File.Exists(_paths.Old));
+        Assert.Null(_store.Read(out var unreadable));
+        Assert.False(unreadable);
+        Assert.Equal(NewBuild, File.ReadAllBytes(_paths.Exe));
+        Assert.Equal(0, _service.Terminations);
+    }
+
+    [Fact]
+    public void Confirm_ServerDownCleanReboots_NoAttempts_ConfirmedAfterServerReturns()
+    {
+        // Новая сборка на проверке, сервер пропал на час, ПК трижды перезагрузили (служба остановлена командой Windows):
+        // ни попыток, ни отката, .old на месте; подтверждение — когда сервер вернётся, стирание — по принятому confirmed.
+        File.WriteAllBytes(_paths.Exe, NewBuild);
+        File.WriteAllBytes(_paths.Old, OldBuild);
+        _store.Write(new UpdateState(UpdateState.CurrentVersion, JobId, Sha(OldBuild), Sha(NewBuild), "1.8.1", UpdatePhases.Swapped, 0, false,
+            _clock.GetUtcNow(), null, null));
+        Assert.Equal(GuardOutcome.RunConfirming, UpdateGuard.Run(_paths, _store, Sha(NewBuild), ShaOf, _clock));
+
+        var running = Updater(NewBuild);
+        for (var i = 0; i < SelfUpdater.ConfirmReports; i++)
+        {
+            Accepted(running, Offer());
+        }
+
+        // Сервер пропал, 10 минут работы прошли без него: confirmed ждёт сервера, update.json и .old на месте.
+        _clock.Advance(SelfUpdater.ConfirmAfter);
+        NotAccepted(running, Offer());
+        Assert.Equal(UpdateProgress.Confirmed, running.Report()?.State);
+
+        for (var reboot = 0; reboot < 3; reboot++)
+        {
+            running.MarkCleanExit();
+            Assert.Equal(GuardOutcome.RunConfirming, UpdateGuard.Run(_paths, _store, Sha(NewBuild), ShaOf, _clock));
+            Assert.Equal(1, Stored().Attempts);
+            Assert.Equal(OldBuild, File.ReadAllBytes(_paths.Old));
+            running = Updater(NewBuild);
+            _clock.Advance(TimeSpan.FromMinutes(20));
+            NotAccepted(running, null);
+            Assert.Equal(UpdateProgress.Confirming, running.Report()?.State); // принятых отчётов этого процесса нет
+        }
+
+        // Сервер вернулся: 5 принятых отчётов этого процесса — confirmed; принят, поручение закрыто — всё стёрто.
+        for (var i = 0; i < SelfUpdater.ConfirmReports; i++)
+        {
+            Accepted(running, Offer());
+        }
+
+        Assert.Equal(UpdateProgress.Confirmed, running.Report()?.State);
+        Accepted(running, null);
+        Assert.Null(running.Report());
+        Assert.False(File.Exists(_paths.Old));
+        Assert.Null(_store.Read(out _));
+        Assert.Equal(NewBuild, File.ReadAllBytes(_paths.Exe));
+        Assert.Empty(_store.Failed());
         Assert.Equal(0, _service.Terminations);
     }
 

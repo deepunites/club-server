@@ -55,7 +55,9 @@ public static class UpdateWaitReasons
 /// (<see cref="DisklessApiClient.HoldRenewalAsync"/>) — и <see cref="IServiceControl.TerminateSelf"/>, один раз.</item>
 /// <item>Новая сборка (<c>update.json</c> <c>swapped</c>, своя сборка = <c>toSha</c>, ошибки нет): <c>confirming</c>;
 /// <see cref="ConfirmAfter"/> работы этого процесса и не меньше <see cref="ConfirmReports"/> принятых отчётов G: с его
-/// запуска — стереть <c>update.json</c>, <c>.old</c>, <c>.failed</c>, <c>confirmed</c>, пока принятый ответ несёт поручение.</item>
+/// запуска — <c>confirmed</c>, пока принятый ответ несёт поручение. <c>update.json</c>, <c>.old</c>, <c>.failed</c>
+/// стираются, когда сервер принял отчёт с <c>confirmed</c>: «готово» сервер ставит только по нему, и перезапуск раньше
+/// (питание, перезагрузка, падение) — снова проверка, а не подтверждение, о котором сервер так и не узнал бы.</item>
 /// <item>В <c>update.json</c> ошибка (страж: откат <c>startFailed</c>, <c>noRollback</c>): <c>failed</c> с ошибкой и текстом,
 /// пока принятый ответ несёт это поручение; потом <c>update.json</c> стирается (поручение уже в
 /// <c>update-failed.json</c>).</item>
@@ -106,8 +108,8 @@ public sealed class SelfUpdater
     private readonly long _startedAt;
 
     /// <summary>
-    /// <see cref="MarkCleanExit"/> (поток остановки службы) и подтверждение (цикл помощника) не пересекаются: иначе «чистый
-    /// выход» вернул бы на место только что стёртый <c>update.json</c>.
+    /// <see cref="MarkCleanExit"/> (поток остановки службы) и стирание <c>update.json</c> после подтверждения (цикл
+    /// помощника) не пересекаются: иначе «чистый выход» вернул бы на место только что стёртый <c>update.json</c>.
     /// </summary>
     private readonly Lock _stateLock = new();
 
@@ -120,8 +122,14 @@ public sealed class SelfUpdater
     /// <summary>Новая сборка, которая ещё не подтверждена (<c>update.json</c> при запуске); <c>null</c> — не она.</summary>
     private UpdateState? _confirming;
 
-    /// <summary>Новая сборка подтверждена: <c>update.json</c> и <c>.old</c> стёрты, в отчёт — <c>confirmed</c>.</summary>
+    /// <summary>Новая сборка подтверждена (10 минут и 5 принятых отчётов): в отчёт — <c>confirmed</c>.</summary>
     private bool _confirmed;
+
+    /// <summary>
+    /// Сервер принял отчёт с <c>confirmed</c> (новый принятый ответ после подтверждения), <c>update.json</c>, <c>.old</c> и
+    /// <c>.failed</c> стёрты. До этого они на месте: перезапуск — снова проверка новой сборки.
+    /// </summary>
+    private bool _finished;
 
     private Task<string>? _download;
     private CancellationTokenSource? _downloadCancel;
@@ -389,18 +397,27 @@ public sealed class SelfUpdater
 
     /// <summary>
     /// Новая сборка на проверке: подтвердить, когда пора; после подтверждения — <c>confirmed</c>, пока принятый ответ несёт
-    /// поручение. <c>false</c> — проверка закончилась, ответ разбирается как обычно.
+    /// поручение. Первый новый принятый ответ после подтверждения значит, что принят и отчёт с <c>confirmed</c> (он уходит
+    /// следующим тактом): тогда стереть <c>update.json</c>, <c>.old</c> и <c>.failed</c> (<see cref="Finish"/>).
+    /// <c>false</c> — проверка закончилась, ответ разбирается как обычно.
     /// </summary>
     private bool Confirming(bool fresh, HelperUpdateOffer? offer, int acceptedReports)
     {
         var state = _confirming!;
         if (_confirmed)
         {
-            if (fresh && offer?.Id != state.Id)
+            if (!fresh)
+            {
+                return true;
+            }
+
+            _finished = _finished || Finish(state);
+            if (_finished && offer?.Id != state.Id)
             {
                 _logger.LogInformation("Update {Id}: closed by the server; build {Version} ({Sha}) is installed", state.Id, state.ToVersion, state.ToSha);
                 _confirming = null;
                 _confirmed = false;
+                _finished = false;
                 return false;
             }
 
@@ -409,14 +426,20 @@ public sealed class SelfUpdater
 
         if (_clock.GetElapsedTime(_startedAt) >= ConfirmAfter && acceptedReports >= ConfirmReports)
         {
-            Confirm(state, acceptedReports);
+            _confirmed = true;
+            _logger.LogInformation(
+                "Update {Id}: build {Version} ({Sha}) confirmed after {Elapsed:g} and {Reports} accepted reports; previous build {From} is removed once the server accepts confirmed",
+                state.Id, state.ToVersion, state.ToSha, _clock.GetElapsedTime(_startedAt), acceptedReports, state.FromSha);
         }
 
         return true;
     }
 
-    /// <summary>Подтверждение: сначала <c>update.json</c> (без него страж сотрёт <c>.old</c> сам), потом <c>.old</c> и <c>.failed</c>.</summary>
-    private void Confirm(UpdateState state, int acceptedReports)
+    /// <summary>
+    /// Сервер принял отчёт с <c>confirmed</c>: сначала <c>update.json</c> (без него страж сотрёт <c>.old</c> сам), потом
+    /// <c>.old</c> и <c>.failed</c>. <c>false</c> — <c>update.json</c> не стёрт, повтор со следующим принятым ответом.
+    /// </summary>
+    private bool Finish(UpdateState state)
     {
         try
         {
@@ -427,16 +450,14 @@ public sealed class SelfUpdater
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            _logger.LogWarning("Update {Id}: update.json not removed ({Error}); confirming again after the next tick", state.Id, ex.Message);
-            return;
+            _logger.LogWarning("Update {Id}: update.json not removed ({Error}); retrying with the next accepted report", state.Id, ex.Message);
+            return false;
         }
 
         Remove(_paths.Old);
         Remove(_paths.Failed);
-        _confirmed = true;
-        _logger.LogInformation(
-            "Update {Id}: build {Version} ({Sha}) confirmed after {Elapsed:g} and {Reports} accepted reports; previous build {From} removed",
-            state.Id, state.ToVersion, state.ToSha, _clock.GetElapsedTime(_startedAt), acceptedReports, state.FromSha);
+        _logger.LogInformation("Update {Id}: the server accepted confirmed; update.json and the previous build {From} (.old) removed", state.Id, state.FromSha);
+        return true;
     }
 
     /// <summary>Ответ несёт то же поручение: тот же <c>id</c> (и SHA256, если поручение из ответа).</summary>
