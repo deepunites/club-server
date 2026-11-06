@@ -55,6 +55,12 @@ var options = builder.Configuration.GetSection("Helper").Get<HelperOptions>() ??
 options.HelperVersion = typeof(HelperService).Assembly.GetName().Version?.ToString(3) ?? options.HelperVersion;
 options.HelperBuild = ownBuild;
 options.Libraries = HelperOptions.LibrariesFrom(builder.Configuration.AsEnumerable());
+// Версия и сборка для скриптов (helper-build.json, spec п. 5.1): только обычный путь службы, после стража — ветка отката
+// сюда не доходит (её процесс — новая сборка, которая сейчас завершится).
+if (asService && ownBuild is not null)
+{
+    HelperBuildFile.Write(paths, options.HelperVersion, ownBuild, line => Journal(line, EventLogEntryType.Warning));
+}
 
 builder.Services.AddSingleton(options);
 builder.Services.AddSingleton(TimeProvider.System);

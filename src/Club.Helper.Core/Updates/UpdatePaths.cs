@@ -5,8 +5,11 @@ namespace Club.Helper.Core.Updates;
 /// <paramref name="InstallDir"/> (<c>%ProgramFiles%\ClubDiskless</c>, тот же диск и права папки): <see cref="New"/> —
 /// скачанная новая, <see cref="Old"/> — прежняя до подтверждения, <see cref="Failed"/> — новая после отката. Состояние —
 /// в <paramref name="StateDir"/> (<c>%ProgramData%\ClubDiskless</c>, StateDirectory службы): <see cref="StateFile"/>
-/// (<c>update.json</c>) и <see cref="FailedFile"/> (<c>update-failed.json</c>). Эти же имена стирают и проверяют скрипты
-/// (<c>install-helper.ps1</c>, <c>update-helper-net.ps1</c>, <c>seal-golden.ps1</c>, <c>seal-hybrid.ps1</c>).
+/// (<c>update.json</c>), <see cref="FailedFile"/> (<c>update-failed.json</c>) и <see cref="BuildFile"/>
+/// (<c>helper-build.json</c>). Эти же имена стирают и проверяют скрипты
+/// (<c>install-helper.ps1</c>, <c>update-helper-net.ps1</c>, <c>seal-golden.ps1</c>, <c>seal-hybrid.ps1</c>);
+/// <c>helper-build.json</c> читают и скрипты шелла (<c>shell-preflight.ps1</c>, <c>shell-install.ps1</c>,
+/// <c>shell-uninstall.ps1</c>).
 /// </summary>
 public sealed record UpdatePaths(string InstallDir, string StateDir)
 {
@@ -29,6 +32,9 @@ public sealed record UpdatePaths(string InstallDir, string StateDir)
 
     /// <summary>Поручения, по которым на этом ПК была ошибка (<see cref="FailedUpdate"/>, последние 20).</summary>
     public string FailedFile => Path.Combine(StateDir, "update-failed.json");
+
+    /// <summary>Версия и SHA256 работающей сборки для скриптов (<see cref="HelperBuildFile"/>).</summary>
+    public string BuildFile => Path.Combine(StateDir, "helper-build.json");
 
     /// <summary>
     /// SHA256 файла сборки строчными (<c>helperBuild</c>; для стража — свой exe и <c>.old</c>). Файл открывается на чтение

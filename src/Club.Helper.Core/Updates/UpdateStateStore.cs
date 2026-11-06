@@ -87,7 +87,8 @@ public sealed class UpdateStateStore(UpdatePaths paths)
         WriteWhole(paths.FailedFile, JsonSerializer.Serialize(list.TakeLast(FailedKept), Json));
     }
 
-    private static void WriteWhole(string file, string text)
+    /// <summary>Записать <paramref name="text"/> целым файлом: <c>.tmp</c>, сброс на диск, перенос на место с заменой.</summary>
+    internal static void WriteWhole(string file, string text)
     {
         var temp = file + ".tmp";
         using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
