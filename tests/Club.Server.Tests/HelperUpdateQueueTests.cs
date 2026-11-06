@@ -4,6 +4,7 @@ using Club.Server.Imaging;
 using Club.TestSupport;
 using Dapper;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using static Club.Server.HelperUpdates.HelperUpdateCodes;
@@ -43,8 +44,26 @@ public sealed class HelperUpdateQueueTests(ServerFixture server) : IClassFixture
         return Task.CompletedTask;
     }
 
-    private HelperUpdateRepository Repo(int maxActive = 3) =>
-        new(Db, Builds(), new HelperUpdateOptions { MaxActive = maxActive }, NullLogger<HelperUpdateRepository>.Instance);
+    private HelperUpdateRepository Repo(int maxActive = 3, ILogger<HelperUpdateRepository>? logger = null) =>
+        new(Db, Builds(), new HelperUpdateOptions { MaxActive = maxActive }, logger ?? NullLogger<HelperUpdateRepository>.Instance);
+
+    /// <summary>Журнал для проверки строк: каждая запись — готовый текст.</summary>
+    private sealed class ListLogger : ILogger<HelperUpdateRepository>
+    {
+        public List<string> Lines { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            lock (Lines)
+            {
+                Lines.Add(formatter(state, exception));
+            }
+        }
+    }
 
     private HelperBuilds Builds() =>
         new(new HelperUpdateOptions(), new ImagingOptions { PxeRoot = _pxeRoot }, TimeProvider.System, NullLogger<HelperBuilds>.Instance);
@@ -331,6 +350,40 @@ public sealed class HelperUpdateQueueTests(ServerFixture server) : IClassFixture
         job = await JobAsync(b);
         Assert.Equal((States.Failed, null, "boom"), (job.State, job.Error, job.Message));
         Assert.Equal(States.Paused, (await JobAsync(c)).State);
+
+        // failed с helperTooOld — ошибка без паузы (spec п. 3.3, шаг 2).
+        Assert.Equal(1, await repo.ResumeAsync(T0.AddMinutes(7)));
+        var d = await MachineAsync();
+        await repo.LaunchAsync(Build181, [d.Number], false, "panel", T0.AddMinutes(7));
+        var cid = (await ReportAsync(repo, c, T0.AddMinutes(8)))!.Id;
+        Assert.Null(await ReportAsync(repo, c, T0.AddMinutes(9), new HelperUpdateReport(cid.ToString(), Progress.Failed, null, Errors.HelperTooOld, null)));
+        job = await JobAsync(c);
+        Assert.Equal((States.Failed, Errors.HelperTooOld), (job.State, job.Error));
+        Assert.Equal(States.Queued, (await JobAsync(d)).State);
+        Assert.NotNull(await ReportAsync(repo, d, T0.AddMinutes(10)));
+    }
+
+    [Fact]
+    public async Task Report_FailedMessage_StoredSafely()
+    {
+        var repo = Repo();
+        var a = await MachineAsync();
+        var b = await MachineAsync();
+        await repo.LaunchAsync(Build181, [a.Number, b.Number], false, "panel", T0);
+        var aid = (await ReportAsync(repo, a, T0))!.Id;
+        var bid = (await ReportAsync(repo, b, T0))!.Id;
+
+        // Текст ошибки — как есть от помощника: NUL (PostgreSQL text его не принимает) и пара суррогатов на границе 500
+        // символов (обрезка не должна оставить половину) — отчёт не падает, текст записан.
+        Assert.Null(await ReportAsync(repo, a, T0.AddMinutes(1),
+            new HelperUpdateReport(aid.ToString(), Progress.Failed, null, Errors.SwapFailed, "access\0denied")));
+        Assert.Equal("accessdenied", (await JobAsync(a)).Message);
+
+        var emoji = "x" + string.Concat(Enumerable.Repeat("\U0001F600", 300));
+        Assert.Null(await ReportAsync(repo, b, T0.AddMinutes(1),
+            new HelperUpdateReport(bid.ToString(), Progress.Failed, null, Errors.StartFailed, emoji)));
+        var message = (await JobAsync(b)).Message!;
+        Assert.Equal(emoji[..499], message);
     }
 
     [Fact]
@@ -585,7 +638,8 @@ public sealed class HelperUpdateQueueTests(ServerFixture server) : IClassFixture
     [Fact]
     public async Task Cancel_All_And_One()
     {
-        var repo = Repo(maxActive: 1);
+        var log = new ListLogger();
+        var repo = Repo(maxActive: 1, log);
         var a = await MachineAsync();
         var b = await MachineAsync();
         var c = await MachineAsync();
@@ -599,6 +653,8 @@ public sealed class HelperUpdateQueueTests(ServerFixture server) : IClassFixture
         Assert.False(await repo.CancelAsync(Guid.NewGuid(), T0.AddMinutes(2)));
         var job = await JobAsync(a);
         Assert.Equal((States.Cancelled, T0.AddMinutes(2), T0.AddMinutes(2)), (job.State, job.FinishedAt, job.UpdatedAt));
+        // Строка журнала: ПК, сборка и итог с причиной.
+        Assert.Contains(log.Lines, l => l.Contains($"PC {a.Number} -> 1.8.1", StringComparison.Ordinal) && l.EndsWith("cancelled: cancelled from the panel", StringComparison.Ordinal));
         Assert.Null(await ReportAsync(repo, a, T0.AddMinutes(3), Step(id, Progress.Waiting, Reasons.Session)));
 
         // Ошибка по отменённому за сутки поручению — только запись ошибки, без паузы.

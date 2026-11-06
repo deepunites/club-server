@@ -1,3 +1,4 @@
+using System.Text;
 using Club.Server.Data;
 using Dapper;
 using Npgsql;
@@ -354,9 +355,9 @@ public sealed class HelperUpdateRepository(NpgsqlDataSource db, HelperBuilds bui
             return false;
         }
 
-        var message = report.Message is { Length: > MaxMessageLength } text ? text[..MaxMessageLength] : report.Message;
+        var message = StorableMessage(report.Message);
         var error = report.Error;
-        if (report.State == Progress.Failed && error is not null && !Errors.FromHelper.Contains(error))
+        if (report.State == Progress.Failed && error is not null && !Errors.FromHelper.Contains(error) && error != Errors.HelperTooOld)
         {
             journal.Add(() => logger.LogWarning("Helper update: PC {Number} reported unknown error {Error}, skipped", number, Clip(error)));
             error = null;
@@ -413,7 +414,8 @@ public sealed class HelperUpdateRepository(NpgsqlDataSource db, HelperBuilds bui
                 return false;
             case Progress.Failed:
                 await FinishAsync(c, tx, job, States.Failed, error, message, now, journal, message);
-                return true;
+                // Пауза — на любой ошибке, кроме helperTooOld (spec п. 3.3, шаг 2).
+                return error != Errors.HelperTooOld;
             default:
                 journal.Add(() => logger.LogWarning("Helper update: PC {Number} reported unknown state {State}, skipped", number, Clip(report.State)));
                 return false;
@@ -477,7 +479,7 @@ public sealed class HelperUpdateRepository(NpgsqlDataSource db, HelperBuilds bui
             args, tx)).ToList();
         foreach (var row in rows)
         {
-            Log(journal, row, error is null ? state : $"{state} {error}" + (why is null ? "" : $": {Clip(why)}"));
+            Log(journal, row, (error is null ? state : $"{state} {error}") + (why is null ? "" : $": {Clip(why)}"));
         }
 
         return rows;
@@ -523,6 +525,48 @@ public sealed class HelperUpdateRepository(NpgsqlDataSource db, HelperBuilds bui
 
     private void Log(List<Action> journal, JobRow job, string result) =>
         journal.Add(() => logger.LogInformation("Helper update: PC {Number} -> {Version} ({Sha}): {Result}", job.Number, job.Version, job.Sha256[..Math.Min(8, job.Sha256.Length)], result));
+
+    /// <summary>
+    /// Текст помощника для <c>message</c>: без NUL и непарных суррогатов (PostgreSQL и кодировщик Npgsql их не принимают —
+    /// отчёт упал бы с 500), не длиннее <see cref="MaxMessageLength"/> символов, без половины пары на границе обрезки.
+    /// </summary>
+    private static string? StorableMessage(string? message)
+    {
+        if (message is null)
+        {
+            return null;
+        }
+
+        var text = new StringBuilder(Math.Min(message.Length, MaxMessageLength));
+        for (var i = 0; i < message.Length; i++)
+        {
+            var ch = message[i];
+            if (char.IsHighSurrogate(ch) && i + 1 < message.Length && char.IsLowSurrogate(message[i + 1]))
+            {
+                if (text.Length + 2 > MaxMessageLength)
+                {
+                    break;
+                }
+
+                text.Append(ch).Append(message[++i]);
+                continue;
+            }
+
+            if (ch == '\0' || char.IsSurrogate(ch))
+            {
+                continue;
+            }
+
+            if (text.Length + 1 > MaxMessageLength)
+            {
+                break;
+            }
+
+            text.Append(ch);
+        }
+
+        return text.ToString();
+    }
 
     /// <summary>Значение из отчёта в журнал — не длиннее 100 символов.</summary>
     private static string? Clip(string? value) => value is { Length: > 100 } ? value[..100] + "…" : value;
