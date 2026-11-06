@@ -2,6 +2,7 @@ using Club.Server.Api;
 using Club.Server.Auth;
 using Club.Server.Data;
 using Club.Server.Diskless;
+using Club.Server.HelperUpdates;
 using Club.Server.Imaging;
 using Club.Server.Integration;
 using Club.Server.Library;
@@ -28,6 +29,7 @@ machineFeedOptions.Validate();
 var disklessOptions = builder.Configuration.GetSection("Diskless").Get<DisklessOptions>() ?? new DisklessOptions();
 disklessOptions.Validate();
 var savesOptions = builder.Configuration.GetSection("Saves").Get<SavesOptions>() ?? new SavesOptions();
+var helperUpdateOptions = builder.Configuration.GetSection("HelperUpdates").Get<HelperUpdateOptions>() ?? new HelperUpdateOptions();
 
 builder.Services.ConfigureHttpJsonOptions(o => ApiJson.Configure(o.SerializerOptions));
 builder.Services.AddSingleton(TimeProvider.System);
@@ -89,6 +91,8 @@ builder.Services.AddSingleton<SeatDisks>();
 builder.Services.AddSingleton(savesOptions);
 builder.Services.AddSingleton<SavesRepository>();
 builder.Services.AddSingleton<SaveStore>();
+builder.Services.AddSingleton(helperUpdateOptions);
+builder.Services.AddSingleton<HelperBuilds>();
 if (libraryOptions.Enabled && libraryOptions.RunWorker)
 {
     builder.Services.AddHostedService<StorageWorker>();
