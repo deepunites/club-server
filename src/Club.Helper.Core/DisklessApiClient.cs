@@ -322,6 +322,31 @@ public sealed class DisklessApiClient(
         }
     }
 
+    /// <summary>
+    /// Замок загрузки, обновления и регистрации токенов (<see cref="_renewal"/>) — для самообновления (1.8.0, spec
+    /// 2026-11-06, п. 4.3, шаг 4): дождаться, пока не идёт обновление токена, и держать замок до завершения процесса, чтобы
+    /// процесс не завершился посреди записи новой пары токенов (refresh-токен одноразовый). Отпускает
+    /// <see cref="IDisposable.Dispose"/> (один раз).
+    /// </summary>
+    public async Task<IDisposable> HoldRenewalAsync(CancellationToken ct)
+    {
+        await _renewal.WaitAsync(ct);
+        return new RenewalHold(_renewal);
+    }
+
+    private sealed class RenewalHold(SemaphoreSlim renewal) : IDisposable
+    {
+        private int _released;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0)
+            {
+                renewal.Release();
+            }
+        }
+    }
+
     /// <summary>Недокачанный файл — стереть; не стёрся (антивирус держит) — его сотрёт следующая загрузка, ошибка — прежняя.</summary>
     private static void DeleteQuietly(string path)
     {

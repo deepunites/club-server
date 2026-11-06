@@ -49,6 +49,9 @@ public static class SavesErrors
 
     public const string BadRequest = "badRequest";
 
+    /// <summary>Помощник меняет себя на новую сборку (1.8.0, самообновление): повторить через 5 с.</summary>
+    public const string Updating = "updating";
+
     public const string Internal = "internal";
 }
 

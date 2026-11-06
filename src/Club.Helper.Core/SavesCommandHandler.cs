@@ -15,8 +15,11 @@ namespace Club.Helper.Core;
 /// (<c>rememberLaunchers</c> из старого текста п. 23). Команды attach и detach выполняются по одной
 /// (<see cref="SemaphoreSlim"/>): вторая ждёт, пока закончится первая. <c>ping</c> состояния не трогает и отвечает сразу,
 /// даже во время долгой выдачи. Исключение не выходит наружу — <c>internal</c>.
+/// Самообновление (1.8.0, spec 2026-11-06, п. 4.3, 4.5): <c>ping</c> отвечает и сборкой — <c>"build"</c>, SHA256 exe
+/// (<paramref name="helperBuild"/>, нет — поля нет), а пока замок сохранений у замены exe (<see cref="SavesService.Updating"/>) —
+/// и <c>"updating":true</c>; attach и detach тогда — <c>updating</c>.
 /// </summary>
-public sealed class SavesCommandHandler(SavesService saves, string helperVersion)
+public sealed class SavesCommandHandler(SavesService saves, string helperVersion, string? helperBuild = null)
 {
     /// <summary>Наибольшая длина строки запроса в символах (без <c>\n</c>).</summary>
     public const int MaxRequestLength = 4096;
@@ -38,7 +41,7 @@ public sealed class SavesCommandHandler(SavesService saves, string helperVersion
         try
         {
             var (result, version) = await DispatchAsync(requestLine, ct);
-            return Answer(result, version);
+            return Answer(result, version, version is null ? null : helperBuild, version is not null && saves.Updating);
         }
         catch (Exception ex)
         {
@@ -132,8 +135,11 @@ public sealed class SavesCommandHandler(SavesService saves, string helperVersion
 
     private static (SavesResult, string?) BadRequest(string message) => (SavesResult.Fail(SavesErrors.BadRequest, message), null);
 
-    /// <summary>Одна строка JSON без <c>\n</c> (переводы строк в тексте экранируются).</summary>
-    private static string Answer(SavesResult result, string? version)
+    /// <summary>
+    /// Одна строка JSON без <c>\n</c> (переводы строк в тексте экранируются). <paramref name="version"/>,
+    /// <paramref name="build"/> и <paramref name="updating"/> — только у <c>ping</c>.
+    /// </summary>
+    private static string Answer(SavesResult result, string? version, string? build = null, bool updating = false)
     {
         using var buffer = new MemoryStream();
         using (var writer = new Utf8JsonWriter(buffer))
@@ -149,6 +155,16 @@ public sealed class SavesCommandHandler(SavesService saves, string helperVersion
             if (version is not null)
             {
                 writer.WriteString("version", version);
+            }
+
+            if (build is not null)
+            {
+                writer.WriteString("build", build);
+            }
+
+            if (updating)
+            {
+                writer.WriteBoolean("updating", true);
             }
 
             writer.WriteEndObject();

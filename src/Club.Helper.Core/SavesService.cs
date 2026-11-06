@@ -26,6 +26,9 @@ namespace Club.Helper.Core;
 /// внутри удаляются сами, не то, куда ведут, а папка записи, которая сама ссылка или лежит под ссылкой (до корня профиля
 /// или буквы), пропускается — и при выдаче, и при сохранении. Команды и такт — по одной
 /// (<see cref="SemaphoreSlim"/>): такт, пока идёт команда, пропускается и цикл помощника не ждёт.
+/// Самообновление (1.8.0, spec 2026-11-06, п. 4.3) берёт этот же замок без ожидания (<see cref="TryHoldForUpdateAsync"/>),
+/// когда никому не выдано: пока он у обновления, attach и detach сразу отвечают <c>updating</c> (шелл повторит), а
+/// не ждут замка.
 /// </summary>
 public sealed class SavesService(
     DisklessApiClient api, IProfileLocator profiles, IDriveRoots drives, Func<bool> masterActive, string stateDirectory, TimeProvider clock, ILogger logger)
@@ -79,7 +82,16 @@ public sealed class SavesService(
     private bool _configFailing;
 
     /// <summary>Кому выдано на этом ПК и какие папки разложены; <c>null</c> — никому.</summary>
-    private Session? _attached;
+    private volatile Session? _attached;
+
+    /// <summary>Замок у самообновления (<see cref="TryHoldForUpdateAsync"/>).</summary>
+    private volatile bool _updating;
+
+    /// <summary>Сохранения игрока выданы на этом ПК (сеанс игрока): самообновление ждёт конца сеанса (<c>session</c>).</summary>
+    public bool Attached => _attached is not null;
+
+    /// <summary>Замок у самообновления: идёт замена exe, команды шелла отвечают <c>updating</c>, <c>ping</c> — <c>updating: true</c>.</summary>
+    public bool Updating => _updating;
 
     /// <summary>Папка записи списка на этом ПК: ID записи, путь и корень, под которым он (профиль, буква библиотеки).</summary>
     private sealed record Folder(Guid Id, string Directory, string Root);
@@ -111,6 +123,11 @@ public sealed class SavesService(
             return Logged("attach", id, (SavesResult.Fail(SavesErrors.BadRequest, "playerId and windowsUserSid are required"), 0, 0), started);
         }
 
+        if (_updating)
+        {
+            return Logged("attach", id, (UpdatingResult(), 0, 0), started);
+        }
+
         await _gate.WaitAsync(ct);
         try
         {
@@ -132,6 +149,11 @@ public sealed class SavesService(
             return Logged("detach", id, (SavesResult.Fail(SavesErrors.BadRequest, "playerId is required"), 0, 0), started);
         }
 
+        if (_updating)
+        {
+            return Logged("detach", id, (UpdatingResult(), 0, 0), started);
+        }
+
         await _gate.WaitAsync(ct);
         try
         {
@@ -142,6 +164,45 @@ public sealed class SavesService(
             _gate.Release();
         }
     }
+
+    /// <summary>
+    /// Замок для замены exe (spec 2026-11-06, п. 4.3): взят без ожидания (не идёт команда шелла и не идёт такт) и никому
+    /// не выдано — держатель (<see cref="IDisposable.Dispose"/> отпускает замок), иначе <c>null</c>. Пока он взят,
+    /// <see cref="Updating"/> = <c>true</c>.
+    /// </summary>
+    public async Task<IDisposable?> TryHoldForUpdateAsync()
+    {
+        if (!await _gate.WaitAsync(0))
+        {
+            return null;
+        }
+
+        if (_attached is not null)
+        {
+            _gate.Release();
+            return null;
+        }
+
+        _updating = true;
+        return new UpdateHold(this);
+    }
+
+    /// <summary>Отпускает замок самообновления один раз.</summary>
+    private sealed class UpdateHold(SavesService owner) : IDisposable
+    {
+        private int _released;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0)
+            {
+                owner._updating = false;
+                owner._gate.Release();
+            }
+        }
+    }
+
+    private static SavesResult UpdatingResult() => SavesResult.Fail(SavesErrors.Updating, "The diskless helper is replacing itself with a new build; retry in 5 seconds");
 
     /// <summary>
     /// Такт помощника: запоминает библиотеки ПК, раз в <see cref="ConfigEvery"/> обновляет список папок (не получилось —

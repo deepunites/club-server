@@ -55,9 +55,9 @@ public sealed class SavesCommandHandlerTests(SavesCommandHandlerTests.Stand stan
     }
 
     /// <summary>Один ПК: профиль игрока по <see cref="Sid"/>, папка состояния помощника и обработчик канала над ними.</summary>
-    private sealed record Pc(SavesCommandHandler Handler, string Profile);
+    private sealed record Pc(SavesCommandHandler Handler, string Profile, SavesService Saves);
 
-    private Pc NewPc(string name, DelegatingHandler? transfers = null, IProfileLocator? locator = null)
+    private Pc NewPc(string name, DelegatingHandler? transfers = null, IProfileLocator? locator = null, string? build = null)
     {
         var directory = Path.Combine(_work, name);
         var profile = Path.Combine(directory, "Users", "player");
@@ -68,7 +68,7 @@ public sealed class SavesCommandHandlerTests(SavesCommandHandlerTests.Stand stan
             new FakeIdentity($"hwid-{name}-{Guid.NewGuid():N}"), transfers is null ? null : stand.Server.CreateDefaultClient(transfers));
         var saves = new SavesService(api, locator ?? profiles, new FakeDrives(), () => false, Path.Combine(directory, "ProgramData", "ClubDiskless"), new ManualClock(),
             new ListLogger<SavesService>());
-        return new Pc(new SavesCommandHandler(saves, Version), profile);
+        return new Pc(new SavesCommandHandler(saves, Version, build), profile, saves);
     }
 
     private static string NewPlayer() => Guid.NewGuid().ToString("D");
@@ -206,6 +206,37 @@ public sealed class SavesCommandHandlerTests(SavesCommandHandlerTests.Stand stan
         hold.Release.SetResult();
         Assert.Equal("""{"ok":true}""", await attach.WaitAsync(TimeSpan.FromSeconds(30)));
         Assert.Equal("""{"ok":true}""", await detach.WaitAsync(TimeSpan.FromSeconds(30)));
+    }
+
+    [Fact]
+    public async Task Pipe_DuringUpdate_UpdatingError_PingUpdatingTrue()
+    {
+        const string Build = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        var pc = NewPc("A", build: Build);
+        var player = NewPlayer();
+        Assert.Equal($$"""{"ok":true,"version":"1.7.0","build":"{{Build}}"}""", await pc.Handler.HandleAsync("""{"op":"ping"}""", CancellationToken.None));
+
+        // Замок сохранений взят самообновлением (spec 2026-11-06, п. 4.3): attach и detach — сразу updating, ping — updating: true.
+        using (var hold = await pc.Saves.TryHoldForUpdateAsync())
+        {
+            Assert.NotNull(hold);
+            Assert.True(pc.Saves.Updating);
+            Assert.Null(await pc.Saves.TryHoldForUpdateAsync());
+            Assert.Equal($$"""{"ok":true,"version":"1.7.0","build":"{{Build}}","updating":true}""",
+                await pc.Handler.HandleAsync("""{"op":"ping"}""", CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal((false, SavesErrors.Updating), Parse(await pc.Handler.HandleAsync(Attach(player), CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5))));
+            Assert.Equal((false, SavesErrors.Updating), Parse(await pc.Handler.HandleAsync(Detach(player), CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5))));
+        }
+
+        // Замок отпущен (замена не удалась): канал снова работает.
+        Assert.False(pc.Saves.Updating);
+        Assert.Equal($$"""{"ok":true,"version":"1.7.0","build":"{{Build}}"}""", await pc.Handler.HandleAsync("""{"op":"ping"}""", CancellationToken.None));
+        Assert.Equal("""{"ok":true}""", await pc.Handler.HandleAsync(Attach(player), CancellationToken.None));
+
+        // Выдано — замок самообновлению не даётся: ждёт конца сеанса.
+        Assert.Null(await pc.Saves.TryHoldForUpdateAsync());
+        Assert.True(pc.Saves.Attached);
+        Assert.False(pc.Saves.Updating);
     }
 
     [Fact]
