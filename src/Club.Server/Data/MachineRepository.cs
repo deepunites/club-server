@@ -36,6 +36,9 @@ public sealed class MachineRow
 
     /// <summary><c>local</c> — Windows на диске ПК (гибрид), <c>diskless</c> — загрузка по сети с личного диска места.</summary>
     public string BootMode { get; init; } = "local";
+
+    /// <summary>SHA256 exe помощника (64 hex строчными) из последнего отчёта G: или регистрации; null — помощник старше 1.8.0.</summary>
+    public string? HelperBuild { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
 }
 
@@ -47,7 +50,9 @@ public sealed class RefreshTokenRow
     public DateTimeOffset? UsedAt { get; init; }
 }
 
-public sealed record MachineRegistration(string Hwid, string Hostname, IReadOnlyList<string> MacAddresses, string IpAddress, string HelperVersion, string? OsVersion);
+/// <summary>Регистрация помощника. <paramref name="HelperBuild"/> — SHA256 его exe (помощник 1.8.0+), пишется как есть.</summary>
+public sealed record MachineRegistration(string Hwid, string Hostname, IReadOnlyList<string> MacAddresses, string IpAddress, string HelperVersion, string? OsVersion,
+    string? HelperBuild = null);
 
 public sealed record VolumeReport(string State, string? TargetIqn, string? LibraryVersion, bool? ReadOnlyVerified, string? Error);
 
@@ -58,7 +63,7 @@ public sealed class MachineRepository(NpgsqlDataSource db)
         approved, maintenance, helper_version AS HelperVersion, os_version AS OsVersion, last_seen_at AS LastSeenAt,
         boot_time AS BootTime, volume_state AS VolumeState, volume_iqn AS VolumeIqn, volume_version AS VolumeVersion,
         volume_ro_verified AS VolumeRoVerified, volume_error AS VolumeError, dhcp_servers AS DhcpServers, image_version AS ImageVersion, system_disk::text AS SystemDiskJson, secure_boot::text AS SecureBootJson, initiator_iqn AS InitiatorIqn, master_state AS MasterState, master_error AS MasterError, credentials_version AS CredentialsVersion, boot_mode AS BootMode,
-        created_at AS CreatedAt
+        helper_build AS HelperBuild, created_at AS CreatedAt
         """;
 
     static MachineRepository() => DapperSetup.Ensure();
@@ -131,14 +136,14 @@ public sealed class MachineRepository(NpgsqlDataSource db)
         await c.ExecuteAsync(
             """
             INSERT INTO machines (id, number, name, zone_id, hwid, hostname, mac_addresses, ip_address, approved, maintenance,
-                                  helper_version, os_version)
+                                  helper_version, os_version, helper_build)
             VALUES (@id, @number, @name, 'standard', @Hwid, @Hostname, @macs, @IpAddress, @approved, NOT @approved,
-                    @HelperVersion, @OsVersion)
+                    @HelperVersion, @OsVersion, @HelperBuild)
             """,
             new
             {
                 id, number, name = $"PC-{number:D2}", registration.Hwid, registration.Hostname, macs = registration.MacAddresses.ToArray(),
-                registration.IpAddress, approved, registration.HelperVersion, registration.OsVersion,
+                registration.IpAddress, approved, registration.HelperVersion, registration.OsVersion, registration.HelperBuild,
             },
             tx);
         await tx.CommitAsync();
@@ -217,11 +222,15 @@ public sealed class MachineRepository(NpgsqlDataSource db)
         await c.ExecuteAsync(
             """
             UPDATE machines SET hwid = @Hwid, hostname = @Hostname, ip_address = @IpAddress, helper_version = @HelperVersion,
-                                os_version = @OsVersion, credentials_version = credentials_version + 1,
+                                os_version = @OsVersion, helper_build = @HelperBuild, credentials_version = credentials_version + 1,
                                 mac_addresses = ARRAY(SELECT m FROM unnest(mac_addresses || @macs) WITH ORDINALITY AS u(m, o) GROUP BY m ORDER BY min(o))
             WHERE id = @id
             """,
-            new { id, registration.Hwid, registration.Hostname, registration.IpAddress, registration.HelperVersion, registration.OsVersion, macs = registration.MacAddresses.ToArray() });
+            new
+            {
+                id, registration.Hwid, registration.Hostname, registration.IpAddress, registration.HelperVersion, registration.OsVersion, registration.HelperBuild,
+                macs = registration.MacAddresses.ToArray(),
+            });
         await c.ExecuteAsync("DELETE FROM machine_refresh_tokens WHERE machine_id = @id", new { id });
         return (await FindAsync(id))!;
     }
@@ -233,10 +242,14 @@ public sealed class MachineRepository(NpgsqlDataSource db)
         await c.ExecuteAsync(
             """
             UPDATE machines SET credentials_version = credentials_version + 1, hostname = @Hostname, mac_addresses = @macs,
-                                ip_address = @IpAddress, helper_version = @HelperVersion, os_version = @OsVersion
+                                ip_address = @IpAddress, helper_version = @HelperVersion, os_version = @OsVersion, helper_build = @HelperBuild
             WHERE id = @id
             """,
-            new { id, registration.Hostname, macs = registration.MacAddresses.ToArray(), registration.IpAddress, registration.HelperVersion, registration.OsVersion });
+            new
+            {
+                id, registration.Hostname, macs = registration.MacAddresses.ToArray(), registration.IpAddress, registration.HelperVersion, registration.OsVersion,
+                registration.HelperBuild,
+            });
         await c.ExecuteAsync("DELETE FROM machine_refresh_tokens WHERE machine_id = @id", new { id });
         return (await FindAsync(id))!;
     }
@@ -352,10 +365,11 @@ public sealed class MachineRepository(NpgsqlDataSource db)
 
     /// <summary>
     /// Отчёт помощника: факты о томе на ПК и отметка «машина на связи» (считается для подписки). <paramref name="hostname"/>
-    /// null — имя ПК не меняется (старый помощник его не шлёт).
+    /// null — имя ПК не меняется (старый помощник его не шлёт). <paramref name="helperBuild"/> пишется как есть, без
+    /// «оставить прежнее»: отчёт без сборки (помощник старше 1.8.0 или неправдоподобное значение) её обнуляет.
     /// </summary>
     public async Task RecordStatusAsync(Guid id, string helperVersion, string ipAddress, DateTimeOffset? bootTime, VolumeReport volume, IReadOnlyList<string>? dhcpServers, DateTimeOffset now,
-        string? imageVersion = null, string? systemDiskJson = null, string? secureBootJson = null, string? hostname = null)
+        string? imageVersion = null, string? systemDiskJson = null, string? secureBootJson = null, string? hostname = null, string? helperBuild = null)
     {
         await using var c = await db.OpenConnectionAsync();
         await c.ExecuteAsync(
@@ -367,13 +381,14 @@ public sealed class MachineRepository(NpgsqlDataSource db)
                    image_version = COALESCE(@imageVersion, image_version),
                    system_disk = COALESCE(@systemDiskJson::jsonb, system_disk),
                    secure_boot = COALESCE(@secureBootJson::jsonb, secure_boot),
-                   hostname = COALESCE(@hostname, hostname)
+                   hostname = COALESCE(@hostname, hostname),
+                   helper_build = @helperBuild
             WHERE id = @id
             """,
             new
             {
                 id, now, helperVersion, ipAddress, bootTime, volume.State, volume.TargetIqn, volume.LibraryVersion, volume.ReadOnlyVerified, volume.Error,
-                dhcpServers = dhcpServers?.ToArray(), imageVersion, systemDiskJson, secureBootJson, hostname,
+                dhcpServers = dhcpServers?.ToArray(), imageVersion, systemDiskJson, secureBootJson, hostname, helperBuild,
             });
     }
 }

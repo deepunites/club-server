@@ -36,6 +36,9 @@ public class ServerFixture : WebApplicationFactory<Program>, IAsyncLifetime
         builder.UseSetting("Auth:ClubApiKey", ClubKey);
         builder.UseSetting("Auth:AutoApprovePcs", "true");
         builder.UseSetting("Auth:SigningKeyPath", _keyPath);
+        // Работник очереди самообновления помощника ходит по настоящим часам: тесты очереди ведут время сами (now в
+        // параметрах), и проход посреди теста менял бы их поручения. Нужен — Settings["HelperUpdates:RunWorker"] = "true".
+        builder.UseSetting("HelperUpdates:RunWorker", "false");
         foreach (var (key, value) in Settings)
         {
             builder.UseSetting(key, value);

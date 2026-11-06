@@ -420,10 +420,11 @@ public sealed class SoloLibraryTests : IAsyncLifetime
             Assert.Contains("library_versions resolves to public", await LibrarySet.SchemaProblemAsync(main, broken, "solo"));
         }
 
-        // Схемы нет (миграция откатена): при старте библиотека выключается, G: работает.
+        // Схемы нет (миграция откатена): при старте библиотека выключается, G: работает. Откатывается только M0011: откат до
+        // её версии снял бы и более поздние миграции, а без них G: не работает (machines.helper_build, M0013).
         using (var scope = _server.Services.CreateScope())
         {
-            scope.ServiceProvider.GetRequiredService<IMigrationRunner>().MigrateDown(2026102301);
+            scope.ServiceProvider.GetRequiredService<IMigrationRunner>().Down(new Club.Server.Data.Migrations.M0011_SoloLibrary());
         }
 
         await Libraries.CheckSchemasAsync();

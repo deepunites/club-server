@@ -94,6 +94,11 @@ builder.Services.AddSingleton<SavesRepository>();
 builder.Services.AddSingleton<SaveStore>();
 builder.Services.AddSingleton(helperUpdateOptions);
 builder.Services.AddSingleton<HelperBuilds>();
+builder.Services.AddSingleton<HelperUpdateRepository>();
+if (helperUpdateOptions.RunWorker)
+{
+    builder.Services.AddHostedService<HelperUpdateWorker>();
+}
 if (libraryOptions.Enabled && libraryOptions.RunWorker)
 {
     builder.Services.AddHostedService<StorageWorker>();

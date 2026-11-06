@@ -2,11 +2,14 @@ using System.Text.RegularExpressions;
 using Club.Server.Api;
 using Club.Server.Auth;
 using Club.Server.Data;
+using Club.Server.HelperUpdates;
 using Club.Server.Library;
 
 namespace Club.Server.Diskless;
 
-public sealed record MachineRegisterRequest(string Hwid, string Hostname, IReadOnlyList<string> MacAddresses, string HelperVersion, string? OsVersion);
+/// <summary>Регистрация помощника. <paramref name="HelperBuild"/> (помощник 1.8.0+) — SHA256 его exe, как в отчёте G:.</summary>
+public sealed record MachineRegisterRequest(string Hwid, string Hostname, IReadOnlyList<string> MacAddresses, string HelperVersion, string? OsVersion,
+    string? HelperBuild = null);
 
 public sealed record MachineRegisterResponse(
     Guid MachineId, int Number, string Name, string Zone, string AccessToken, string RefreshToken, DateTimeOffset ExpiresAt, DateTimeOffset ServerTime);
@@ -36,19 +39,23 @@ public sealed record MasterAssignment(string TargetIqn, string Portal, string Ch
 /// <summary>
 /// Отчёт помощника. <paramref name="Hostname"/> (помощник 1.5.2+) — текущее имя Windows: гибрид регистрируется в проходе
 /// specialize, до переименования ПК, и имя из регистрации (WIN-…) иначе осталось бы навсегда. Старые помощники поля
-/// не шлют — имя из регистрации сохраняется.
+/// не шлют — имя из регистрации сохраняется. <paramref name="HelperBuild"/> и <paramref name="HelperUpdate"/> (помощник 1.8.0+) —
+/// SHA256 своего exe и ход поручения самообновления; оба — строки, незнакомое значение пропускается, а не 400.
 /// </summary>
 public sealed record MachineStatus(
     string HelperVersion, DateTimeOffset? BootTime, MountedVolume Volume, IReadOnlyList<string>? DhcpServers,
     string? ImageVersion = null, SystemDiskReport? SystemDisk = null, SecureBootReport? SecureBoot = null,
-    string? InitiatorIqn = null, MasterReport? Master = null, string? Hostname = null);
+    string? InitiatorIqn = null, MasterReport? Master = null, string? Hostname = null,
+    string? HelperBuild = null, HelperUpdateReport? HelperUpdate = null);
 
 /// <summary>
 /// Ответ на отчёт. <paramref name="LibraryLetterReserved"/> — буква тома библиотеки отдана мастер-тому этого ПК
 /// (<see cref="LibraryOptions.MasterOnLibraryLetter"/>): <paramref name="Volume"/> нет намеренно. Иначе поля нет (null не
-/// передаётся) — старые помощники его и не видят.
+/// передаётся) — старые помощники его и не видят. <paramref name="HelperUpdate"/> — желаемая сборка помощника: только у
+/// активного поручения этого ПК (<see cref="HelperUpdateRepository.OnReportAsync"/>), иначе поля нет.
 /// </summary>
-public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume, MasterAssignment? Master = null, bool? LibraryLetterReserved = null);
+public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume, MasterAssignment? Master = null, bool? LibraryLetterReserved = null,
+    HelperUpdateOffer? HelperUpdate = null);
 
 /// <summary>
 /// API бездиска для помощника на ПК (docs/diskless-api.yaml). Не зависит от шелла: только машины и том библиотеки.
@@ -73,6 +80,9 @@ public static partial class DisklessEndpoints
 
     [GeneratedRegex("^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")]
     private static partial Regex MacPattern();
+
+    [GeneratedRegex(@"\A[0-9a-f]{64}\z")]
+    private static partial Regex Sha256Pattern();
 
     public static void MapDisklessEndpoints(this IEndpointRouteBuilder app)
     {
@@ -148,11 +158,12 @@ public static partial class DisklessEndpoints
         var owners = await machines.PrimaryOwnersAsync(macs, (existing ?? placeholder)?.Id);
         var foreign = owners.Where(o => o.Mac != first).ToList();
         macs = macs.Where(mac => mac == first || foreign.All(f => f.Mac != mac)).ToList();
-        var registration = new MachineRegistration(request.Hwid, request.Hostname, macs, ClientIp(context), request.HelperVersion, request.OsVersion);
+        var log = logs.CreateLogger("Club.Server.Diskless");
+        var registration = new MachineRegistration(request.Hwid, request.Hostname, macs, ClientIp(context), request.HelperVersion, request.OsVersion,
+            HelperBuildOrNull(request.HelperBuild, request.Hostname, log));
         var machine = existing is not null ? await machines.ReregisterAsync(existing.Id, registration)
             : placeholder is not null ? await machines.AdoptAsync(placeholder.Id, registration)
             : await machines.CreateAsync(registration, options.AutoApprovePcs);
-        var log = logs.CreateLogger("Club.Server.Diskless");
         if (foreign.Count > 0)
         {
             log.LogWarning(
@@ -216,7 +227,8 @@ public static partial class DisklessEndpoints
         return Results.Json(new RefreshResponse(access, refresh, expiresAt), ApiJson.Options);
     }
 
-    private static async Task<IResult> StatusAsync(Guid machineId, MachineStatus request, HttpContext context, MachineRepository machines, LibraryRepository library, LibraryOptions options, Imaging.ImageRepository images, MasterRepository master, SeatGames seatGames, TimeProvider clock, CancellationToken ct)
+    private static async Task<IResult> StatusAsync(Guid machineId, MachineStatus request, HttpContext context, MachineRepository machines, LibraryRepository library, LibraryOptions options, Imaging.ImageRepository images, MasterRepository master, SeatGames seatGames,
+        HelperUpdateRepository helperUpdates, ILoggerFactory logs, TimeProvider clock, CancellationToken ct)
     {
         RequireSelf(context, machineId);
         Require(request.HelperVersion, "helperVersion");
@@ -227,12 +239,13 @@ public static partial class DisklessEndpoints
 
         var v = request.Volume;
         var dhcp = request.DhcpServers?.Where(d => Network.IpPlan.TryParseIp(d, out _)).Distinct().Take(8).ToList();
+        var helperBuild = HelperBuildOrNull(request.HelperBuild, machineId.ToString(), logs.CreateLogger("Club.Server.Diskless"));
         await machines.RecordStatusAsync(
             machineId, request.HelperVersion, ClientIp(context), request.BootTime,
             new VolumeReport(v.State, v.TargetIqn, v.LibraryVersion, v.ReadOnlyVerified, Truncate(v.Error, 2000)), dhcp, clock.GetUtcNow(),
             ImageVersionOrNull(request.ImageVersion), SystemDiskJson(request.SystemDisk),
             request.SecureBoot is { } sb ? System.Text.Json.JsonSerializer.Serialize(sb, System.Text.Json.JsonSerializerOptions.Web) : null,
-            HostnameOrNull(request.Hostname));
+            HostnameOrNull(request.Hostname), helperBuild);
         // Состав версии — с тома, который точно версия: общий read-only (проверен) или свежий личный клон (сброшен при
         // загрузке; запись игрока до отчёта о составе почти невозможна, а состав — только список папок верхнего уровня).
         if (v is { State: "mounted", LibraryVersion: { } mountedVersion, Contents: { } contents } && (v.ReadOnlyVerified == true || options.PersonalGames))
@@ -271,13 +284,17 @@ public static partial class DisklessEndpoints
             await machines.RecordMasterAsync(machineId, iqn, null, null, keepMaster: true);
         }
 
+        // Самообновление помощника (spec 2026-11-06, п. 3.3, шаги 2–5): helper_build уже записан выше; поручение в ответе —
+        // желаемая сборка, ставить её или нет и когда — решает помощник.
+        var helperUpdate = await helperUpdates.OnReportAsync(machineId, request.HelperVersion, helperBuild, request.HelperUpdate, clock.GetUtcNow());
+
         var masterAssignment = await MasterAssignmentAsync(machineId, master, options);
         var reserved = LibraryLetterReserved(masterAssignment, options);
         var volume = reserved ? null
             : options.PersonalGames
             ? await machines.FindAsync(machineId) is { } machine ? await seatGames.AssignmentAsync(machine, atBoot: false, ct) : null
             : await AssignmentAsync(library, options);
-        return Results.Json(new StatusAccepted(clock.GetUtcNow(), volume, masterAssignment, reserved ? true : null), ApiJson.Options);
+        return Results.Json(new StatusAccepted(clock.GetUtcNow(), volume, masterAssignment, reserved ? true : null, helperUpdate), ApiJson.Options);
     }
 
     /// <summary>
@@ -393,6 +410,27 @@ public static partial class DisklessEndpoints
             .Order(StringComparer.OrdinalIgnoreCase)
             .Take(1000)
             .ToList();
+
+    /// <summary>
+    /// SHA256 exe помощника из отчёта или регистрации: без пробелов по краям, строчными, ровно 64 hex. Иначе null (как без
+    /// поля) и строка в журнал — отчёт из-за этого не отклоняется.
+    /// </summary>
+    private static string? HelperBuildOrNull(string? value, string machine, ILogger log)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        var build = value.Trim().ToLowerInvariant();
+        if (Sha256Pattern().IsMatch(build))
+        {
+            return build;
+        }
+
+        log.LogWarning("Machine {Machine} reported helperBuild {Build} that is not a SHA256, ignored", machine, Truncate(value, 100));
+        return null;
+    }
 
     private static string? ImageVersionOrNull(string? value) =>
         value is not null && Imaging.ImageLibrary.LabelPattern().IsMatch(value) ? value : null;

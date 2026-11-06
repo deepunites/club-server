@@ -19,6 +19,9 @@ public sealed class HelperUpdateOptions
     /// <summary>Как часто работник очереди проверяет поручения и файлы сборок.</summary>
     public int WorkerIntervalSec { get; set; } = 30;
 
+    /// <summary>Запускать работник очереди (<see cref="HelperUpdateWorker"/>); false — в тестах, которые сами ведут время.</summary>
+    public bool RunWorker { get; set; } = true;
+
     /// <summary>ПК молчит столько минут — активное поручение без замены возвращается в очередь; после замены — <c>noReturn</c>.</summary>
     public int SilentMinutes { get; set; } = 10;
 
