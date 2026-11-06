@@ -313,11 +313,57 @@ Start-Service ClubDisklessHelper
 на каждом ПК свой — образ одинаков для всех. **До sysprep службу не запускать** (или удалить
 `credentials.bin` перед захватом образа), иначе все ПК получат одну и ту же регистрацию.
 
+### Обновление до 1.7.0 в клубе (сохранения игрока)
+
+Один exe 1.7.0 (сборка выше, `-o out/helper-1.7.0`, `-p:RuntimeFrameworkVersion=10.0.13`): `1.7.0+f79e0d5`
+(.NET 10.0.13), SHA256 `41da96a0b0721b22bb5f5e1898c927f08c4856968ee059a0c40b3d2b54a30e23` закреплён в
+`scripts/golden/install-helper.ps1` и `scripts/golden/update-helper-net.ps1`; проверки помощника в скриптах шелла
+(`shell-preflight.ps1`, `shell-install.ps1`, `shell-uninstall.ps1`) принимают и 1.7.0, и 1.6.0. Порядок
+(spec 2026-11-05-player-saves-design.md, п. 7–8), каждый шаг — после ОК владельца:
+
+1. **Сервер клуба** с диском `/srv/club/saves` и `Saves__Enabled=true`; `GET /panel/api/v1/saves/status` —
+   `enabled` и `available` равны `true`. Резервная копия диска — владелец в Shell TrueNAS:
+   `sh club-backup.sh <zvol ВМ>` (`scripts/truenas/club-backup.sh`, снимок `games/club/saves` ежедневно в 04:45,
+   репликация в `backup/saves/club-saves`).
+2. **Набор шелла** заново (`scripts/shell/publish-kit.sh` с машины разработки, сервер клуба должен работать): новые
+   проверки помощника и `seal-golden.ps1`, который стирает `saves-*`. Безопасно, пока на ПК ещё 1.6.0; без этого
+   эталон в п. 5 закрывать нельзя, а старая проверка на ПК с 1.7.0 советует `update-helper-net.ps1`, который до п. 4
+   ставит 1.6.0.
+3. **Проба на гибриде PC-22.** В `/srv/club/pxe/tools` — `ClubDisklessHelper-1.7.0.exe`, `install-helper-1.7.0.ps1`,
+   `update-helper-net-1.7.0.ps1` (копия нового `update-helper-net.ps1`) и `saves-test.ps1`; сам `update-helper-net.ps1`
+   там пока ставит 1.6.0.
+   - В панели, вкладка «Сохранения», — **пробные** папки, до установки 1.7.0 (список папок помощник читает при старте
+     службы и раз в 5 минут): одна в профиле (`%DOCUMENTS%\ClubSavesTest`) и одна на H: (`H:\ClubSavesTest`, если её нет
+     в опубликованной версии H: — папка просто пустая). Attach **очищает** папки из списка в профиле, поэтому
+     настоящих папок учётки, под которой идёт проба, в списке быть не должно.
+   - Вход `Club` (Shift при входе — мимо киоска), PowerShell от администратора:
+     `irm http://192.168.1.201:5080/pxe/v1/files/tools/update-helper-net-1.7.0.ps1 | iex`. Папку на H: помощник берёт в
+     работу после строки журнала «Приложение» (источник `ClubDisklessHelper`) об исходном содержимом папки
+     сохранений — до неё attach пропускает эту папку.
+   - `saves-test.ps1` (команды — в шапке скрипта): `ping`; затем attach/detach двух выдуманных ID (`test-pc22-a`,
+     `test-pc22-b`, не GUID кассы) с SID своей учётки — `-Sid ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)`.
+     По умолчанию берётся SID `player`, а его профиль шелл стирает после сеанса (`profileNotFound`). Проверить:
+     у игрока A после detach и attach файлы на месте; у игрока B папки пустые, на H: — только опубликованное.
+   - После пробы — удалить пробных игроков и пробные папки в панели.
+4. **Гибриды:** старый `update-helper-net.ps1` сохранить как `update-helper-net-1.6.0.ps1`, на его место — новый; затем
+   на остальных гибридах — та же строка, что для 1.6.0. Откат гибрида —
+   `irm http://192.168.1.201:5080/pxe/v1/files/tools/update-helper-net-1.6.0.ps1 | iex`.
+5. **Бездиск** (эталон уже с шеллом — `docs/shell-install.md`, «Каждый следующий сеанс мастера»): ПК-мастер в режиме
+   мастера, при загрузке Shift, вход администратором эталона; помощник — по сети той же строкой (USB выключен агентом);
+   `prepare-golden.ps1` → перезагрузка (снова Shift) → `get-shell-kit` (на вопрос про киоск — `n`) →
+   `C:\ClubShellKit\seal-golden.ps1` → публикация эталона. Затем одно место: перезагрузка, `saves-test.ps1` (ping,
+   attach/detach), и только потом — остальные места вне работы клуба. Откат — прежняя версия эталона в «Бездиск».
+6. **Образ гибрида для перезаливок:** h1e — с 1.6.0; после перезаливки из h1e — строка из п. 4. Образ с 1.7.0
+   (h1f = h1e + exe 1.7.0) — `scripts/server/patch-hybrid-wim.sh` с текущим `install-helper.ps1` в папке подготовки.
+
+Откат помощника: exe 1.6.0 и `install-helper.ps1` из git `f79e0d5` (на сервере — `ClubDisklessHelper-1.6.0.exe`,
+`install-helper-1.6.0.ps1`); канал сохранений пропадает, G: и H: как прежде.
+
 ### Обновление до 1.6.0 в клубе
 
 Один exe 1.6.0 (сборка выше, `-o out/helper-1.6.0`) — для эталона, гибридов и образа гибрида: `1.6.0+13609a5`
-(.NET 10.0.13), SHA256 `26635a5f7aab4d77441d0b0138064b9c7f64bb1daf4b0bcaf09052439ddd0148` закреплён в
-`scripts/golden/install-helper.ps1` (`$ExeSha256`). На флешке рядом — для отката exe 1.5.1 (`out/helper-1.5.1`) и
+(.NET 10.0.13), SHA256 `26635a5f7aab4d77441d0b0138064b9c7f64bb1daf4b0bcaf09052439ddd0148` был закреплён в
+`scripts/golden/install-helper.ps1` (`$ExeSha256`) до 1.7.0 — git `f79e0d5`. На флешке рядом — для отката exe 1.5.1 (`out/helper-1.5.1`) и
 `install-helper.ps1` из git `1b748fa`.
 
 - **Бездиск:** ПК-мастер в режиме мастера → `install-helper.ps1` → `prepare-golden.ps1` → перезагрузка →

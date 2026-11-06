@@ -13,7 +13,7 @@
 #   games/club/images        weekly Mon 05:30, 2 weeks on games, 3 weeks on hdd          -> hdd/backup/images/club-images
 #   <VM zvol>                daily 04:30,      7 days on ssd,    14 days + Sundays 8 weeks -> backup/vm/clubserver
 #   ssd/club/diskless/win11  img-* (versions the server publishes), daily 05:15, kept as on ssd -> backup/diskless/win11
-#   games/club/saves         daily 04:45,      7 days on games,  14 days + Sundays 8 weeks -> backup/saves/club-saves
+#   games/club/saves         daily 04:45,      7 days on games,  7 days + Sundays 4 weeks -> backup/saves/club-saves
 # Not backed up: games/club/seats, games/club/published, ssd/club/diskless/seats (rebuilt by the server), ssd/iso, hdd/club.
 # Quotas on hdd, GiB (split confirmed by the owner 2026-10-26: H: gets 1 TiB, the copies the rest): hdd/backup 720
 # (games 560, images 160) next to hdd/club 1024 (H:) = 1744 of ~1790 (1.75 TiB) in the pool, so copies and H: never take
@@ -26,6 +26,7 @@ GIB=1073741824
 BACKUP_QUOTA=720 # hdd/backup: everything below
 GAMES_QUOTA=560  # hdd/backup/games: the G: replica
 IMAGES_QUOTA=160 # hdd/backup/images: the hybrid images replica
+SAVES_QUOTA=80   # backup/saves: the player saves replica, so it cannot crowd out the VM and golden copies on «backup»
 
 json_field() { python3 -c "import json,sys; v=json.load(sys.stdin); print($1)"; }
 
@@ -86,7 +87,7 @@ mk hdd/backup/games "$GAMES_QUOTA"
 mk hdd/backup/images "$IMAGES_QUOTA"
 mk backup/vm
 mk backup/diskless
-mk backup/saves
+mk backup/saves "$SAVES_QUOTA"
 
 # Games library master G:: weekly.
 LIB=$(task_id games/club/lib)
@@ -144,7 +145,9 @@ fi
 
 # Player game saves (the club server's /srv/club/saves, spec 2026-11-05-player-saves-design.md 3.1): daily. The pool
 # «games» has no redundancy, so this replica is the only other copy. The saves change at every session end; a
-# crash-consistent snapshot is enough (ext4 journal, the server swaps a player's folder by rename).
+# crash-consistent snapshot is enough (ext4 journal, the server swaps a player's folder by rename). Every session end
+# rewrites that player's folder, so each kept snapshot holds about one day of played saves: the replica keeps a week
+# plus 4 Sundays under SAVES_QUOTA. Check after the first weeks: zfs list -o space backup/saves/club-saves games/club/saves
 if exists games/club/saves; then
     SAV=$(task_id games/club/saves)
     if [ -z "$SAV" ]; then
@@ -153,7 +156,7 @@ if exists games/club/saves; then
     fi
     R=$(repl_id "player saves to backup")
     if [ -z "$R" ]; then
-        R=$(midclt call replication.create "{\"name\":\"player saves to backup\",\"direction\":\"PUSH\",\"transport\":\"LOCAL\",\"source_datasets\":[\"games/club/saves\"],\"target_dataset\":\"backup/saves/club-saves\",\"recursive\":false,\"periodic_snapshot_tasks\":[$SAV],\"auto\":true,\"retention_policy\":\"CUSTOM\",\"lifetime_value\":14,\"lifetime_unit\":\"DAY\",\"lifetimes\":[{\"schedule\":{\"minute\":\"*\",\"hour\":\"*\",\"dom\":\"*\",\"month\":\"*\",\"dow\":\"7\"},\"lifetime_value\":8,\"lifetime_unit\":\"WEEK\"}],\"hold_pending_snapshots\":true,\"readonly\":\"SET\",\"properties\":true,\"properties_override\":{\"volmode\":\"none\"},\"allow_from_scratch\":false,\"encryption\":false,\"retries\":5,\"enabled\":true}" | json_field 'v["id"]')
+        R=$(midclt call replication.create "{\"name\":\"player saves to backup\",\"direction\":\"PUSH\",\"transport\":\"LOCAL\",\"source_datasets\":[\"games/club/saves\"],\"target_dataset\":\"backup/saves/club-saves\",\"recursive\":false,\"periodic_snapshot_tasks\":[$SAV],\"auto\":true,\"retention_policy\":\"CUSTOM\",\"lifetime_value\":7,\"lifetime_unit\":\"DAY\",\"lifetimes\":[{\"schedule\":{\"minute\":\"*\",\"hour\":\"*\",\"dom\":\"*\",\"month\":\"*\",\"dow\":\"7\"},\"lifetime_value\":4,\"lifetime_unit\":\"WEEK\"}],\"hold_pending_snapshots\":true,\"readonly\":\"SET\",\"properties\":true,\"properties_exclude\":[\"refreservation\"],\"properties_override\":{\"volmode\":\"none\"},\"allow_from_scratch\":false,\"encryption\":false,\"retries\":5,\"enabled\":true}" | json_field 'v["id"]')
         echo "replication player saves to backup: id $R"
     fi
 else
