@@ -91,15 +91,18 @@ builder.Services.AddSingleton(services => HelperLoops.Create(
     // Ход самообновления — в отчёт G:; берётся при отчёте (SelfUpdater зависит от сохранений, а они — от циклов).
     () => services.GetRequiredService<SelfUpdater>().Report()));
 // Сохранения игрока (1.7.0, spec 2026-11-05): команды шелла по каналу \\.\pipe\club-diskless-helper; библиотека в режиме
-// мастера — любой мастер-том на ПК подключён или подключается.
+// мастера — любой мастер-том на ПК подключён или подключается. attach (1.9.0) берёт библиотеки из последних отчётов циклов
+// в момент команды, а ping отвечает дисками игр и ready (SHELL_CHANGES п. 86).
 builder.Services.AddSingleton(services =>
 {
     var loops = services.GetRequiredService<HelperLoops>();
     return new SavesService(
         services.GetRequiredService<DisklessApiClient>(), new WindowsProfileLocator(), new WindowsDriveRoots(), () => HelperService.MasterActive(loops),
-        StateDirectory.Ensure(), services.GetRequiredService<TimeProvider>(), services.GetRequiredService<ILogger<SavesService>>());
+        StateDirectory.Ensure(), services.GetRequiredService<TimeProvider>(), services.GetRequiredService<ILogger<SavesService>>(),
+        () => HelperService.Libraries(loops));
 });
-builder.Services.AddSingleton(services => new SavesCommandHandler(services.GetRequiredService<SavesService>(), options.HelperVersion, options.HelperBuild));
+builder.Services.AddSingleton(services => new SavesCommandHandler(
+    services.GetRequiredService<SavesService>(), options.HelperVersion, options.HelperBuild, services.GetRequiredService<HelperLoops>().Readiness));
 // Самообновление (1.8.0): поручение из ответа на отчёт G:, загрузка, замена, подтверждение; мастер-том — любой цикл.
 builder.Services.AddSingleton<IServiceControl>(serviceControl);
 builder.Services.AddSingleton(services => new SelfUpdater(

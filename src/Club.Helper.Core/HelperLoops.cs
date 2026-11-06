@@ -126,6 +126,12 @@ public sealed class HelperLoops(HelperLoop games, IReadOnlyList<HelperLoop> libr
     /// <summary>
     /// Мастер-том занят хотя бы в одном цикле (<see cref="HelperLoop.MasterBusy"/>): самообновление ждёт (<c>master</c>).
     /// </summary>
+    /// <summary>
+    /// Диски игр для <c>ping</c> (1.9.0, SHELL_CHANGES п. 86): по диску на цикл в порядке тактов (G:, потом библиотеки из
+    /// helper.json) и <c>ready</c>. Из потоков канала шелла, сразу и из памяти: снимки циклов (<see cref="HelperLoop.Disk"/>).
+    /// </summary>
+    public HelperReadiness Readiness() => HelperReadiness.Of([games.Disk, .. libraries.Select(loop => loop.Disk)]);
+
     public bool MasterBusy() => games.MasterBusy || libraries.Any(loop => loop.MasterBusy);
 
     /// <summary>

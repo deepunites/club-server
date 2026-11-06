@@ -57,7 +57,8 @@ public sealed class SavesCommandHandlerTests(SavesCommandHandlerTests.Stand stan
     /// <summary>Один ПК: профиль игрока по <see cref="Sid"/>, папка состояния помощника и обработчик канала над ними.</summary>
     private sealed record Pc(SavesCommandHandler Handler, string Profile, SavesService Saves);
 
-    private Pc NewPc(string name, DelegatingHandler? transfers = null, IProfileLocator? locator = null, string? build = null)
+    private Pc NewPc(string name, DelegatingHandler? transfers = null, IProfileLocator? locator = null, string? build = null,
+        Func<HelperReadiness>? readiness = null)
     {
         var directory = Path.Combine(_work, name);
         var profile = Path.Combine(directory, "Users", "player");
@@ -68,7 +69,7 @@ public sealed class SavesCommandHandlerTests(SavesCommandHandlerTests.Stand stan
             new FakeIdentity($"hwid-{name}-{Guid.NewGuid():N}"), transfers is null ? null : stand.Server.CreateDefaultClient(transfers));
         var saves = new SavesService(api, locator ?? profiles, new FakeDrives(), () => false, Path.Combine(directory, "ProgramData", "ClubDiskless"), new ManualClock(),
             new ListLogger<SavesService>());
-        return new Pc(new SavesCommandHandler(saves, Version, build), profile, saves);
+        return new Pc(new SavesCommandHandler(saves, Version, build, readiness), profile, saves);
     }
 
     private static string NewPlayer() => Guid.NewGuid().ToString("D");
@@ -99,6 +100,58 @@ public sealed class SavesCommandHandlerTests(SavesCommandHandlerTests.Stand stan
     {
         var pc = NewPc("A");
         Assert.Equal("""{"ok":true,"version":"1.7.0"}""", await pc.Handler.HandleAsync("""{"op":"ping"}""", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Ping_answers_ready_and_disks_after_the_old_fields()
+    {
+        const string Build = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        var readiness = new HelperReadiness(false,
+            [new LibraryDisk("games", DiskStates.Mounted, "G", "2026-11-04"), new LibraryDisk("solo", DiskStates.Attaching)]);
+        var pc = NewPc("A", build: Build, readiness: () => readiness);
+
+        // SHELL_CHANGES п. 86: прежние поля — байт в байт как у 1.8.x, потом ready и disks; буквы нет — поля нет.
+        Assert.Equal(
+            $$"""{"ok":true,"version":"1.7.0","build":"{{Build}}","ready":false,"disks":[{"library":"games","letter":"G","state":"mounted","libraryVersion":"2026-11-04"},{"library":"solo","state":"attaching"}]}""",
+            await pc.Handler.HandleAsync("""{"op":"ping"}""", CancellationToken.None));
+
+        // Причина — для журнала шелла; дисков этому ПК не положено — пустой список и ready: true.
+        readiness = new HelperReadiness(true, [new LibraryDisk("solo", DiskStates.Failed, "H", Error: "drive letter H is in use\nretry")]);
+        Assert.Equal(
+            $$"""{"ok":true,"version":"1.7.0","build":"{{Build}}","ready":true,"disks":[{"library":"solo","letter":"H","state":"failed","error":"drive letter H is in use\nretry"}]}""",
+            await pc.Handler.HandleAsync("""{"op":"ping"}""", CancellationToken.None));
+        readiness = new HelperReadiness(true, []);
+        Assert.Equal($$"""{"ok":true,"version":"1.7.0","build":"{{Build}}","ready":true,"disks":[]}""",
+            await pc.Handler.HandleAsync("""{"op":"ping"}""", CancellationToken.None));
+
+        // Пока идёт замена exe — updating перед ready, как и прежде сразу после build.
+        using (await pc.Saves.TryHoldForUpdateAsync())
+        {
+            Assert.Equal($$"""{"ok":true,"version":"1.7.0","build":"{{Build}}","updating":true,"ready":true,"disks":[]}""",
+                await pc.Handler.HandleAsync("""{"op":"ping"}""", CancellationToken.None));
+        }
+
+        // Остальные команды и ошибки — без новых полей.
+        Assert.Equal("""{"ok":true}""", await pc.Handler.HandleAsync(Attach(NewPlayer()), CancellationToken.None));
+        Assert.DoesNotContain("ready", await pc.Handler.HandleAsync("""{"op":"nope"}""", CancellationToken.None));
+    }
+
+    [Fact]
+    public void Ready_means_no_disk_attaching_or_preparing()
+    {
+        static bool Ready(params string[] states) => HelperReadiness.Of([.. states.Select((s, i) => new LibraryDisk($"lib{i}", s))]).Ready;
+
+        Assert.True(Ready());
+        Assert.True(Ready(DiskStates.Mounted, DiskStates.Mounted));
+        foreach (var definite in new[] { DiskStates.Failed, DiskStates.NoServer, DiskStates.Unpublished, DiskStates.Disabled, DiskStates.Master })
+        {
+            Assert.True(Ready(DiskStates.Mounted, definite), definite);
+            Assert.True(Ready(definite), definite);
+        }
+
+        Assert.False(Ready(DiskStates.Mounted, DiskStates.Attaching));
+        Assert.False(Ready(DiskStates.Preparing, DiskStates.Mounted));
+        Assert.False(Ready(DiskStates.Failed, DiskStates.Preparing));
     }
 
     [Fact]

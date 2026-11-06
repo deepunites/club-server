@@ -29,9 +29,14 @@ namespace Club.Helper.Core;
 /// Самообновление (1.8.0, spec 2026-11-06, п. 4.3) берёт этот же замок без ожидания (<see cref="TryHoldForUpdateAsync"/>),
 /// когда никому не выдано: пока он у обновления, attach и detach сразу отвечают <c>updating</c> (шелл повторит), а
 /// не ждут замка.
+/// Диск подключился только что (1.9.0, SHELL_CHANGES п. 86: шелл шлёт attach сразу по <c>ready</c> в ping): attach берёт
+/// библиотеки ПК в момент команды (<paramref name="libraries"/> — из последних отчётов циклов; нет — из последнего такта
+/// сохранений) и сам, под тем же замком, снимает недостающее исходное содержимое папок на подключённых G:/H:, а не
+/// пропускает их до такта сохранений.
 /// </summary>
 public sealed class SavesService(
-    DisklessApiClient api, IProfileLocator profiles, IDriveRoots drives, Func<bool> masterActive, string stateDirectory, TimeProvider clock, ILogger logger)
+    DisklessApiClient api, IProfileLocator profiles, IDriveRoots drives, Func<bool> masterActive, string stateDirectory, TimeProvider clock, ILogger logger,
+    Func<IReadOnlyList<LibraryMount>>? libraries = null)
 {
     /// <summary>Как часто такт обновляет список папок с сервера (spec п. 3.3).</summary>
     public static readonly TimeSpan ConfigEvery = TimeSpan.FromMinutes(5);
@@ -254,8 +259,11 @@ public sealed class SavesService(
 
     private async Task<(SavesResult Result, long Bytes, int Files)> AttachLockedAsync(string id, string sid, CancellationToken ct)
     {
-        // Новая выдача: прежний игрок закончил (или detach не пришёл) — его «выдано» больше не действует.
+        // Новая выдача: прежний игрок закончил (или detach не пришёл) — его «выдано» больше не действует. Библиотеки — какие
+        // они сейчас: такт сохранений мог пройти до того, как диск подключился.
         Forget();
+        var mounts = libraries?.Invoke() ?? _libraries;
+        _libraries = mounts;
         if (masterActive())
         {
             return (SavesResult.Fail(SavesErrors.MasterMode, "A library on this PC is in master mode"), 0, 0);
@@ -294,9 +302,13 @@ public sealed class SavesService(
 
                 DropCarry();
                 marker = CreateMarker(profile);
+
+                // Исходное содержимое, которого такт сохранений ещё не снял (диск подключился после такта, а на бездиске
+                // %ProgramData% чистый каждую загрузку), — сейчас, до раскладки: иначе папка на G:/H: пропускается.
+                TakeBaselines(attach.Config, mounts);
                 var baselines = new List<(Folder Folder, string Zip)>();
                 var skipped = new List<Guid>();
-                var folders = Folders(attach.Config, profile, _libraries, baselines, skipped);
+                var folders = Folders(attach.Config, profile, mounts, baselines, skipped);
                 var carried = skipped.Select(e => new Folder(e, Path.Combine(_carry, e.ToString("D")), _carry)).ToList();
                 foreach (var folder in folders)
                 {

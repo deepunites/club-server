@@ -62,9 +62,10 @@ public sealed class SavesServiceTests : IAsyncLifetime
     {
         private readonly SavesServiceTests _test;
 
-        public Pc(SavesServiceTests test, string name, HttpClient? transfers = null)
+        public Pc(SavesServiceTests test, string name, HttpClient? transfers = null, bool live = false)
         {
             _test = test;
+            _live = live;
             var directory = Path.Combine(test._work, name);
             Profile = Path.Combine(directory, "Users", "player");
             Library = Path.Combine(directory, "H");
@@ -86,6 +87,11 @@ public sealed class SavesServiceTests : IAsyncLifetime
 
         public bool Master { get; set; }
 
+        private readonly bool _live;
+
+        /// <summary>Библиотеки ПК сейчас — по последним отчётам циклов (служба: <c>HelperService.Libraries</c>); только у ПК с <c>live</c>.</summary>
+        public IReadOnlyList<LibraryMount> Live { get; set; } = [];
+
         public ManualClock Clock { get; } = new();
 
         public ListLogger<SavesService> Log { get; private set; } = null!;
@@ -100,7 +106,7 @@ public sealed class SavesServiceTests : IAsyncLifetime
             var drives = new FakeDrives();
             drives.Roots['H'] = Library;
             Log = new ListLogger<SavesService>();
-            Service = new SavesService(Api, profiles, drives, () => Master, State, Clock, Log);
+            Service = new SavesService(Api, profiles, drives, () => Master, State, Clock, Log, _live ? () => Live : null);
         }
 
         /// <summary>Путь в профиле: части через <c>\</c>, как в шаблоне.</summary>
@@ -570,6 +576,43 @@ public sealed class SavesServiceTests : IAsyncLifetime
         Write(cfg, "left by the player");
         Ok(await pc.Service.AttachAsync(OtherPlayer, Sid, CancellationToken.None));
         Assert.Equal("v2 published", File.ReadAllText(cfg));
+    }
+
+    [Fact]
+    public async Task Attach_right_after_the_disk_appears_takes_the_missing_baseline_itself()
+    {
+        var entry = await EntryAsync(@"H:\Game\Saves");
+        var a = new Pc(this, "A");
+        Write(a.OnH(@"Game\Saves\default.cfg"), "published");
+        await a.Service.OnTickAsync(H("v1"), CancellationToken.None);
+        Ok(await a.Service.AttachAsync(PlayerId, Sid, CancellationToken.None));
+        Write(a.OnH(@"Game\Saves\slot1.sav"), "mine");
+        Ok(await a.Service.DetachAsync(PlayerId, CancellationToken.None));
+
+        // ПК B: такт сохранений прошёл до H:, диск только что подключился (ready в ping), и шелл сразу шлёт attach —
+        // исходное содержимое снимает сама выдача, папка на H: выдаётся (SHELL_CHANGES п. 86: «ready → attach»).
+        var b = new Pc(this, "B", live: true);
+        await b.Service.OnTickAsync([], CancellationToken.None);
+        Write(b.OnH(@"Game\Saves\default.cfg"), "published");
+        b.Live = H("v1");
+        Ok(await b.Service.AttachAsync(PlayerId, Sid, CancellationToken.None));
+        Assert.Equal("mine", File.ReadAllText(b.OnH(@"Game\Saves\slot1.sav")));
+        Assert.Equal("published", File.ReadAllText(b.OnH(@"Game\Saves\default.cfg")));
+        Assert.Equal("published", BaselineText(b, entry.Id, "default.cfg"));
+        Assert.DoesNotContain(b.Log.Entries, e => e.Message.Contains("skipped", StringComparison.Ordinal));
+
+        // Конец сеанса — снова исходное содержимое: гость после игрока его файлов не видит.
+        Write(b.OnH(@"Game\Saves\slot2.sav"), "more");
+        Ok(await b.Service.DetachAsync(PlayerId, CancellationToken.None));
+        Assert.Equal(["default.cfg"], Listing(b.OnH(@"Game\Saves")));
+
+        // Диска нет — папка пропускается, как прежде, и копия не снимается.
+        var c = new Pc(this, "C", live: true);
+        Write(c.OnH(@"Game\Saves\default.cfg"), "published");
+        c.Live = [new('H', "v1", false)];
+        Ok(await c.Service.AttachAsync(OtherPlayer, Sid, CancellationToken.None));
+        Assert.Contains(c.Log.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("library not mounted", StringComparison.Ordinal));
+        Assert.False(File.Exists(Path.Combine(c.State, "saves-baseline", $"{entry.Id:D}.zip")));
     }
 
     [Fact]

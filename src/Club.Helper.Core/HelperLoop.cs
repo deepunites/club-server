@@ -54,6 +54,11 @@ public sealed class InMemoryAssignmentCache : IAssignmentCache
 /// Самообновление (1.8.0): отчёт G: несёт сборку помощника (<see cref="HelperOptions.HelperBuild"/>) и ход поручения из
 /// <paramref name="updateReport"/>; отчёт библиотеки не-G: — ни того ни другого (<paramref name="updateReport"/> там не
 /// спрашивается). Последний принятый ответ — <see cref="LastAccepted"/>, их число — <see cref="AcceptedReports"/>.
+/// Диск для шелла (1.9.0, SHELL_CHANGES п. 86) — <see cref="Disk"/>: такт публикует неизменяемый снимок, канал шелла читает
+/// его из своих потоков (<see cref="HelperLoops.Readiness"/>). Пока назначение применяется, а на букве ещё не тот том —
+/// <c>attaching</c>; тома нет, а сервер сказал, что личный диск готовится (<see cref="BootAssignment.VolumePending"/>,
+/// <see cref="StatusAccepted.VolumePending"/>), — <c>preparing</c>; каждый принятый ответ на отчёт заменяет то, что сказал
+/// запрос при старте.
 /// </summary>
 public sealed class HelperLoop(
     DisklessApiClient api, VolumeManager volumes, IAssignmentCache cache, IMachineIdentity identity, HelperOptions options, ILogger logger,
@@ -63,6 +68,46 @@ public sealed class HelperLoop(
     public static readonly TimeSpan DormantFor = TimeSpan.FromMinutes(10);
 
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
+
+    /// <summary>Ключ библиотеки G: для шелла (<c>disks[].library</c> в ping): в путях API у неё ключа нет.</summary>
+    public const string GamesLibrary = "games";
+
+    /// <summary>
+    /// Снимок диска для канала шелла: пишет такт, читают потоки канала — неизменяемая запись, замена ссылкой.
+    /// <paramref name="NoServerFrom"/> — с какой отметки нет назначения от сервера, когда на ПК подключить нечего: через
+    /// <see cref="CachedPersonalAfter"/> <c>attaching</c> читается как <c>noServer</c> и без нового такта (цикл H: после
+    /// медленного такта пропускает такты до 10 минут).
+    /// </summary>
+    private sealed record DiskSnapshot(LibraryDisk Disk, long? NoServerFrom = null);
+
+    /// <summary>Последний опубликованный снимок; <c>null</c> — первый такт ещё ничего не опубликовал (<c>attaching</c>).</summary>
+    private volatile DiskSnapshot? _snapshot;
+
+    private DiskSnapshot Snapshot => _snapshot ?? new DiskSnapshot(new LibraryDisk(Name, DiskStates.Attaching));
+
+    /// <summary>Тома нет, но сервер сказал, что он будет (<c>preparing</c>) или сборка упала (<c>failed</c>); null — не говорил.</summary>
+    private string? _pending;
+
+    /// <summary>Запрос при старте ответил 204 с X-Library-Letter-Reserved, а ответа на отчёт ещё не было.</summary>
+    private bool _reservedAtBoot;
+
+    /// <summary>Последнее применение тома отпускало букву мастер-тому (<see cref="HeldLetter"/>).</summary>
+    private bool _heldForMaster;
+
+    /// <summary>С какой отметки запрос при старте не получает ответа сервера; null — получил.</summary>
+    private long? _noAnswerSince;
+
+    /// <summary>Почему сервер не дал назначение в последний раз (для <c>error</c> диска).</summary>
+    private string? _serverFailure;
+
+    /// <summary>
+    /// Сервер недоступен, а в assignment.json — личный диск: его подключит такт после <see cref="CachedPersonalAfter"/>, так
+    /// что <c>noServer</c> не наступает.
+    /// </summary>
+    private bool _cachedPersonalWaits;
+
+    /// <summary>Последняя известная буква тома этой библиотеки (из отчёта, назначения или мастер-тома).</summary>
+    private char? _lastLetter;
 
     /// <summary>С какого момента (монотонная отметка) цикл библиотеки спит: сервер ответил 404 на её путь; null — не спит.</summary>
     private long? _dormantSince;
@@ -121,7 +166,29 @@ public sealed class HelperLoop(
     /// </summary>
     public static readonly TimeSpan CachedPersonalAfter = TimeSpan.FromMinutes(3);
 
-    public MountedVolume? LastReport { get; private set; }
+    private volatile MountedVolume? _lastReport;
+
+    /// <summary>Последний отчёт о томе (читают и такт сохранений, и канал шелла — ссылка volatile).</summary>
+    public MountedVolume? LastReport
+    {
+        get => _lastReport;
+        private set => _lastReport = value;
+    }
+
+    /// <summary>
+    /// Диск этой библиотеки для шелла сейчас (SHELL_CHANGES п. 86): из любого потока, без обращений к Windows. До конца
+    /// первого такта — <c>attaching</c>.
+    /// </summary>
+    public LibraryDisk Disk
+    {
+        get
+        {
+            var snapshot = Snapshot;
+            return snapshot.NoServerFrom is { } from && _clock.GetElapsedTime(from) >= CachedPersonalAfter
+                ? snapshot.Disk with { State = DiskStates.NoServer }
+                : snapshot.Disk;
+        }
+    }
 
     /// <summary>
     /// Последний ответ сервера, принятый на отчёт этого цикла (<c>null</c> — ни одного с запуска службы): у G: в нём поручение
@@ -172,6 +239,25 @@ public sealed class HelperLoop(
     private char? HeldLetter => MasterLetter ?? (_masterOnLetter is { } held && held == LibraryLetter ? held : null);
 
     public async Task TickAsync(CancellationToken ct)
+    {
+        try
+        {
+            await TickOnceAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            // Такт упал (assignment.json не записать и т. п.; в журнал пишет HelperLoops): «подключается» не должно остаться
+            // до следующего удачного такта — failed с причиной. То, что уже на букве, остаётся mounted.
+            if (DiskStates.InProgress(Snapshot.Disk.State))
+            {
+                Publish(new LibraryDisk(Name, DiskStates.Failed, Letter(null), Error: ex.Message));
+            }
+
+            throw;
+        }
+    }
+
+    private async Task TickOnceAsync(CancellationToken ct)
     {
         if (_dormantSince is { } since)
         {
@@ -249,6 +335,7 @@ public sealed class HelperLoop(
         {
             // Личный диск в ответе на отчёт: сервер не сбрасывал его для этой загрузки. Берём только из запроса при старте.
             logger.LogInformation("Personal games disk offered in a status reply; asking for it at boot to get it reset first");
+            Publish(new LibraryDisk(Name, DiskStates.Attaching, Letter(offered.DriveLetter)));
             await LearnAssignmentAsync(ct);
             if (Dormant)
             {
@@ -287,6 +374,9 @@ public sealed class HelperLoop(
         {
             await ReportAsync(report, master, ct);
         }
+
+        // Ответ на отчёт мог сказать, что диск готовится (или уже нет), не меняя тома.
+        Publish(report);
     }
 
     public MasterReport? LastMasterReport { get; private set; }
@@ -366,6 +456,11 @@ public sealed class HelperLoop(
             _desired = answer.Volume;
             _known = true;
             _unreachableSince = null;
+            _noAnswerSince = null;
+            _serverFailure = null;
+            _cachedPersonalWaits = false;
+            _pending = answer.Volume is null ? answer.VolumePending : null;
+            _reservedAtBoot = answer.LibraryLetterReserved;
             _personalConfirmed = _desired is not null && volumes.IsPersonalTarget(_desired) ? _desired.TargetIqn : null;
             if (answer.LibraryLetterReserved)
             {
@@ -385,6 +480,9 @@ public sealed class HelperLoop(
         catch (Exception ex) when (ex is ServerUnavailableException or PendingApprovalException)
         {
             // Сервер клуба недоступен (или машина не одобрена): монтируем то, что было назначено в прошлый раз.
+            _noAnswerSince ??= _clock.GetTimestamp();
+            _serverFailure = ex.Message;
+            _cachedPersonalWaits = false;
             _desired = await cache.LoadAsync((await identity.ReadAsync(ct)).Hwid, ct);
             if (ex is ServerUnavailableException { Unreachable: true })
             {
@@ -405,6 +503,7 @@ public sealed class HelperLoop(
                     logger.LogWarning("Server did not give the assignment ({Reason}); asking again instead of mounting the cached personal disk", ex.Message);
                     _desired = null;
                     _known = false;
+                    _cachedPersonalWaits = _unreachableSince is not null; // через CachedPersonalAfter его подключит такт
                     return;
                 }
 
@@ -420,10 +519,16 @@ public sealed class HelperLoop(
     {
         _windowsTimedOut = false;
         var masterLetter = HeldLetter;
+        _heldForMaster = masterLetter is not null;
         if (!_known && masterLetter is null)
         {
             // Ни сервера, ни сохранённого назначения — ничего не трогаем (и ничего не отключаем).
-            return LastReport = new MountedVolume("none", Error: "no assignment known yet");
+            return Published(LastReport = new MountedVolume("none", Error: "no assignment known yet"));
+        }
+
+        if (masterLetter is null)
+        {
+            PublishAttaching();
         }
 
         try
@@ -433,7 +538,7 @@ public sealed class HelperLoop(
             LastReport = masterLetter is { } letter ? await volumes.ReleaseForMasterAsync(_desired, letter, ct) : await volumes.ApplyAsync(_desired, ct);
             _windowsTimedOut = volumes.WindowsTimedOut;
             _volumeFailure = null;
-            return LastReport;
+            return Published(LastReport);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
@@ -441,8 +546,115 @@ public sealed class HelperLoop(
             // как таймаут PowerShell, значит «Windows не ответила».
             _windowsTimedOut = ex is TimeoutException or OperationCanceledException;
             LogFailure(ref _volumeFailure, ex, "Applying the library volume failed; reporting the failure");
-            return LastReport = await volumes.FailedAsync(_desired, ex, ct);
+            return Published(LastReport = await volumes.FailedAsync(_desired, ex, ct));
         }
+    }
+
+    /// <summary>Ключ библиотеки для шелла: у G: — <see cref="GamesLibrary"/>.</summary>
+    private string Name => library ?? GamesLibrary;
+
+    /// <summary>Начало причины у тома, который Windows не проверила за 120 с: сессия осталась, том на букве.</summary>
+    private const string NotChecked = "not checked: ";
+
+    private void Publish(LibraryDisk disk, long? noServerFrom = null) => _snapshot = new DiskSnapshot(disk, noServerFrom);
+
+    private MountedVolume Published(MountedVolume report)
+    {
+        Publish(report);
+        return report;
+    }
+
+    /// <summary>
+    /// Буква для шелла: из отчёта, иначе назначенная, мастер-тома на букве библиотеки или последняя известная; неизвестна —
+    /// <c>null</c>.
+    /// </summary>
+    private string? Letter(string? reported)
+    {
+        var letter = reported is { Length: > 0 } own ? char.ToUpperInvariant(own[0]) : LibraryLetter ?? HeldLetter ?? _lastLetter;
+        _lastLetter = letter;
+        return letter?.ToString();
+    }
+
+    /// <summary>
+    /// Назначение сейчас применяется, а на букве не тот том (первое подключение, новая версия, личный диск после «готовится»):
+    /// <c>attaching</c> на время входа в таргет, ожидания диска и буквы. Назначенный уже на букве (проверка в каждом такте)
+    /// или на ней ещё старая версия в ожидании переключения — остаётся <c>mounted</c>, без мигания.
+    /// </summary>
+    private void PublishAttaching()
+    {
+        if (_desired is not { } desired)
+        {
+            return;
+        }
+
+        var onLetter = Snapshot.Disk.State == DiskStates.Mounted && LastReport is { } last
+            && (last.State == "switchPending" || desired.TargetIqn.Equals(last.TargetIqn, StringComparison.OrdinalIgnoreCase));
+        if (!onLetter)
+        {
+            Publish(new LibraryDisk(Name, DiskStates.Attaching, Letter(desired.DriveLetter)));
+        }
+    }
+
+    /// <summary>Диск для шелла по отчёту о томе и тому, что знает цикл (сон, мастер-том, ответы сервера).</summary>
+    private void Publish(MountedVolume report)
+    {
+        var letter = Letter(report.DriveLetter);
+        if (Dormant)
+        {
+            Publish(new LibraryDisk(Name, DiskStates.Disabled, letter));
+            return;
+        }
+
+        if (_heldForMaster)
+        {
+            Publish(new LibraryDisk(Name, DiskStates.Master, letter, Error: report.Error));
+            return;
+        }
+
+        switch (report.State)
+        {
+            case "mounted" or "switchPending":
+                Publish(new LibraryDisk(Name, DiskStates.Mounted, letter, report.LibraryVersion, report.Error));
+                return;
+            case "failed" when report.TargetIqn is not null && report.Error?.StartsWith(NotChecked, StringComparison.Ordinal) == true:
+                // Windows не ответила при проверке подключённого тома: сессия осталась, том на букве.
+                Publish(new LibraryDisk(Name, DiskStates.Mounted, letter, report.LibraryVersion, report.Error));
+                return;
+            case "failed":
+                Publish(new LibraryDisk(Name, DiskStates.Failed, letter, report.LibraryVersion, report.Error));
+                return;
+            case "none":
+                PublishNothingMounted(letter, report.Error);
+                return;
+            default: // mounting — сессия восстанавливает связь
+                Publish(new LibraryDisk(Name, DiskStates.Attaching, letter, report.LibraryVersion, report.Error));
+                return;
+        }
+    }
+
+    /// <summary>Тома на букве нет: назначения ещё нет, буква у мастер-тома, сервер готовит диск или монтировать нечего.</summary>
+    private void PublishNothingMounted(string? letter, string? error)
+    {
+        if (!_known)
+        {
+            // Ни ответа сервера, ни assignment.json: подключается, пока сервер молчит меньше CachedPersonalAfter, потом
+            // noServer (Disk). Сохранённый личный диск ждёт такта, который его подключит, — noServer не наступает.
+            Publish(new LibraryDisk(Name, DiskStates.Attaching, letter, Error: _serverFailure ?? error), _cachedPersonalWaits ? null : _noAnswerSince);
+            return;
+        }
+
+        if (_reservedAtBoot || _libraryLetterReserved)
+        {
+            Publish(new LibraryDisk(Name, DiskStates.Master, letter, Error: error));
+            return;
+        }
+
+        Publish(_pending switch
+        {
+            DiskStates.Preparing => new LibraryDisk(Name, DiskStates.Preparing, letter),
+            DiskStates.Failed => new LibraryDisk(Name, DiskStates.Failed, letter, Error: "the club server could not build the personal games disk; it retries"),
+            _ => new LibraryDisk(Name, DiskStates.Unpublished, letter),
+        });
     }
 
     /// <summary>Сбой — в журнал при появлении и при смене текста, а не каждый такт (15–30 с).</summary>
@@ -479,6 +691,9 @@ public sealed class HelperLoop(
             var reply = await api.ReportStatusAsync(status, ct, library);
             LastAccepted = reply;
             AcceptedReports++;
+            // Каждый принятый ответ заменяет то, что сказал запрос при старте: нет поля — монтировать нечего.
+            _pending = reply.Volume is null ? DisklessApiClient.PendingOf(reply.VolumePending) : null;
+            _reservedAtBoot = false;
             Awake();
             if (report.Contents is not null)
             {
@@ -513,6 +728,7 @@ public sealed class HelperLoop(
         _known = false;
         _desired = null;
         _personalConfirmed = null;
+        Publish(new LibraryDisk(Name, DiskStates.Disabled, Letter(null)));
         await cache.SaveAsync((await identity.ReadAsync(ct)).Hwid, null, ct);
         if (_dormancyLogged)
         {

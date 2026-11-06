@@ -57,17 +57,21 @@ public sealed record MasterReport(string State, string? TargetIqn = null, string
 /// 1.5.1+) — буква тома библиотеки отдана мастер-тому этого ПК: <paramref name="Volume"/> нет намеренно, и том
 /// библиотеки отпускается, а не сохраняется, как при пустом ответе. <paramref name="HelperUpdate"/> (сервер с
 /// самообновлением, только ответ G:) — поручение поставить другую сборку помощника; нет — поручения нет (принятый ответ
-/// без него отменяет начатое).
+/// без него отменяет начатое). <paramref name="VolumePending"/> (сервер с X-Volume-Pending, SHELL_CHANGES п. 86) — тома нет,
+/// но монтировать есть что: <c>preparing</c> — личный диск места ещё готовится, <c>failed</c> — его сборка упала; как есть
+/// с сервера, читать через <see cref="DisklessApiClient.PendingOf"/>.
 /// </summary>
 public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume, MasterAssignment? Master = null, bool LibraryLetterReserved = false,
-    HelperUpdateOffer? HelperUpdate = null);
+    HelperUpdateOffer? HelperUpdate = null, string? VolumePending = null);
 
 /// <summary>
 /// Ответ на запрос назначения при старте. <paramref name="LibraryLetterReserved"/> (сервер с Library:MasterDriveLetter =
 /// DriveLetter, заголовок <see cref="DisklessApiClient.LibraryLetterReservedHeader"/> у 204) — тома нет, потому что его
-/// буква отдана мастер-тому этого ПК, а не потому, что монтировать нечего.
+/// буква отдана мастер-тому этого ПК, а не потому, что монтировать нечего. <paramref name="VolumePending"/> (заголовок
+/// <see cref="DisklessApiClient.VolumePendingHeader"/> у 204, SHELL_CHANGES п. 86) — тома нет, потому что личный диск места
+/// ещё готовится (<c>preparing</c>) или его сборка упала (<c>failed</c>); <c>null</c> — монтировать нечего.
 /// </summary>
-public sealed record BootAssignment(VolumeAssignment? Volume, bool LibraryLetterReserved = false);
+public sealed record BootAssignment(VolumeAssignment? Volume, bool LibraryLetterReserved = false, string? VolumePending = null);
 
 /// <summary>Регистрация; <paramref name="HelperBuild"/> (1.8.0) — SHA256 своего exe, как в отчёте G:.</summary>
 internal sealed record RegisterRequest(string Hwid, string Hostname, IReadOnlyList<string> MacAddresses, string HelperVersion, string? OsVersion,
@@ -169,6 +173,21 @@ public sealed class DisklessApiClient(
     public const string LibraryLetterReservedHeader = "X-Library-Letter-Reserved";
 
     /// <summary>
+    /// Заголовок 204 на запрос назначения при старте (сервер после 1c690f6, SHELL_CHANGES п. 86): тома нет, но он будет
+    /// (<c>preparing</c>) или его сборка упала (<c>failed</c>). Нет заголовка — монтировать нечего.
+    /// </summary>
+    public const string VolumePendingHeader = "X-Volume-Pending";
+
+    /// <summary>
+    /// Значение X-Volume-Pending или volumePending: <c>failed</c> — <see cref="DiskStates.Failed"/>, любое другое непустое
+    /// (более новый сервер) — <see cref="DiskStates.Preparing"/>, как велит docs/diskless-api.yaml; пусто — <c>null</c>.
+    /// </summary>
+    public static string? PendingOf(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null
+        : value.Trim().Equals(DiskStates.Failed, StringComparison.OrdinalIgnoreCase) ? DiskStates.Failed
+        : DiskStates.Preparing;
+
+    /// <summary>
     /// Назначение при старте помощника. <paramref name="attached"/> — подключён ли на ПК личный диск игр (<c>null</c> —
     /// неизвестно): <c>false</c> разрешает серверу сбросить диск, даже если на нём висит сессия прошлой загрузки.
     /// <paramref name="library"/> — ключ библиотеки не-G: (путь <c>machines/{id}/libraries/{key}/volume</c>, сервер 1.6.0+);
@@ -180,7 +199,8 @@ public sealed class DisklessApiClient(
         using var response = await SendAuthorizedAsync(id => new HttpRequestMessage(HttpMethod.Get, $"{MachinePath(id, library)}/volume{query}"), ct);
         return response.StatusCode == HttpStatusCode.NoContent
             ? new BootAssignment(null, response.Headers.TryGetValues(LibraryLetterReservedHeader, out var reserved)
-                && reserved.Any(v => v.Equals("true", StringComparison.OrdinalIgnoreCase)))
+                && reserved.Any(v => v.Equals("true", StringComparison.OrdinalIgnoreCase)),
+                response.Headers.TryGetValues(VolumePendingHeader, out var pending) ? PendingOf(pending.FirstOrDefault()) : null)
             : new BootAssignment(await ReadAsync<VolumeAssignment>(response, ct));
     }
 

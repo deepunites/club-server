@@ -18,8 +18,12 @@ namespace Club.Helper.Core;
 /// Самообновление (1.8.0, spec 2026-11-06, п. 4.3, 4.5): <c>ping</c> отвечает и сборкой — <c>"build"</c>, SHA256 exe
 /// (<paramref name="helperBuild"/>, нет — поля нет), а пока замок сохранений у замены exe (<see cref="SavesService.Updating"/>) —
 /// и <c>"updating":true</c>; attach и detach тогда — <c>updating</c>.
+/// Диски игр (1.9.0, SHELL_CHANGES п. 86): <c>ping</c> после прежних полей отвечает <c>"ready"</c> и <c>"disks"</c>
+/// (<paramref name="readiness"/>, снимки циклов; нет — полей нет):
+/// <c>{"ok":true,"version":"…","build":"…","ready":false,"disks":[{"library":"games","letter":"G","state":"mounted"}]}</c>;
+/// у диска буквы, версии библиотеки и причины может не быть — тогда нет и поля.
 /// </summary>
-public sealed class SavesCommandHandler(SavesService saves, string helperVersion, string? helperBuild = null)
+public sealed class SavesCommandHandler(SavesService saves, string helperVersion, string? helperBuild = null, Func<HelperReadiness>? readiness = null)
 {
     /// <summary>Наибольшая длина строки запроса в символах (без <c>\n</c>).</summary>
     public const int MaxRequestLength = 4096;
@@ -41,7 +45,9 @@ public sealed class SavesCommandHandler(SavesService saves, string helperVersion
         try
         {
             var (result, version) = await DispatchAsync(requestLine, ct);
-            return Answer(result, version, version is null ? null : helperBuild, version is not null && saves.Updating);
+            return version is null
+                ? Answer(result, version)
+                : Answer(result, version, helperBuild, saves.Updating, readiness?.Invoke());
         }
         catch (Exception ex)
         {
@@ -137,9 +143,10 @@ public sealed class SavesCommandHandler(SavesService saves, string helperVersion
 
     /// <summary>
     /// Одна строка JSON без <c>\n</c> (переводы строк в тексте экранируются). <paramref name="version"/>,
-    /// <paramref name="build"/> и <paramref name="updating"/> — только у <c>ping</c>.
+    /// <paramref name="build"/>, <paramref name="updating"/> и <paramref name="readiness"/> — только у <c>ping</c>; новые поля —
+    /// после прежних, прежние байт в байт как у 1.8.x.
     /// </summary>
-    private static string Answer(SavesResult result, string? version, string? build = null, bool updating = false)
+    private static string Answer(SavesResult result, string? version, string? build = null, bool updating = false, HelperReadiness? readiness = null)
     {
         using var buffer = new MemoryStream();
         using (var writer = new Utf8JsonWriter(buffer))
@@ -167,9 +174,36 @@ public sealed class SavesCommandHandler(SavesService saves, string helperVersion
                 writer.WriteBoolean("updating", true);
             }
 
+            if (readiness is not null)
+            {
+                writer.WriteBoolean("ready", readiness.Ready);
+                writer.WriteStartArray("disks");
+                foreach (var disk in readiness.Disks)
+                {
+                    writer.WriteStartObject();
+                    writer.WriteString("library", disk.Library);
+                    WriteOptional(writer, "letter", disk.Letter);
+                    writer.WriteString("state", disk.State);
+                    WriteOptional(writer, "libraryVersion", disk.LibraryVersion);
+                    WriteOptional(writer, "error", disk.Error);
+                    writer.WriteEndObject();
+                }
+
+                writer.WriteEndArray();
+            }
+
             writer.WriteEndObject();
         }
 
         return Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
+    }
+
+    /// <summary>Строковое поле, только если значение есть.</summary>
+    private static void WriteOptional(Utf8JsonWriter writer, string name, string? value)
+    {
+        if (value is not null)
+        {
+            writer.WriteString(name, value);
+        }
     }
 }

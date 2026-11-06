@@ -68,8 +68,19 @@
          build} для скриптов (версия файла exe, собранного на Linux, — от среды .NET, не наша).
          Пробные сборки (номера никогда не выпускаются, spec п. 7): -p:Version=1.8.90 -p:ClubTestFault=crash (падение
          вскоре после старта хоста), 1.8.91 с ClubTestFault=throw (исключение в HelperService.ExecuteAsync после первого
-         такта), 1.8.92 с ClubTestFault=hang (такт не начинается, отчётов нет). Без ClubTestFault этого кода в сборке нет. -->
-    <Version>1.8.0</Version>
+         такта), 1.8.92 с ClubTestFault=hang (такт не начинается, отчётов нет). Без ClubTestFault этого кода в сборке нет.
+         1.9.0: диски игр до входа игрока (SHELL_CHANGES п. 86): ping после прежних полей отвечает ready и disks
+         [{library, letter, state, libraryVersion, error}] — живое состояние каждого цикла (games — G:, потом библиотеки из
+         helper.json), снимок в памяти без обращений к Windows: attaching (первый такт, нет назначения меньше 3 минут, вход
+         iSCSI, ожидание диска, буква, сессия восстанавливает связь), preparing (сервер готовит личный диск:
+         X-Volume-Pending у 204 при старте и volumePending в ответе на отчёт, сервер 1c690f6; незнакомое значение —
+         preparing; каждый принятый ответ на отчёт заменяет сказанное при старте), mounted (и старая версия на букве в
+         ожидании переключения, и том, который Windows не проверила за 120 с), failed, noServer (3 минуты без назначения от
+         сервера, а подключить нечего), unpublished, disabled (404 на путь библиотеки), master; ready — ни один диск не
+         attaching и не preparing. profile.attach берёт библиотеки из последних отчётов циклов в момент команды и сам
+         снимает недостающее исходное содержимое папок на G:/H: — шеллу достаточно «ready → attach». Провод отчётов G: и H:
+         не изменился. -->
+    <Version>1.9.0</Version>
     <TargetFramework>net10.0-windows</TargetFramework>
     <!-- Сборка на Linux (CI, разработка); запуск — только на Windows. -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
