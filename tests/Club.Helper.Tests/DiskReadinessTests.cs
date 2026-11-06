@@ -36,17 +36,35 @@ public sealed class DiskReadinessTests
 
     /// <summary>
     /// Сервер, который готовит личный диск H:: 204 при старте с <c>X-Volume-Pending: <see cref="BootPending"/></c> (null —
-    /// без заголовка) и ответ на отчёт H: без тома с <c>volumePending: <see cref="ReplyPending"/></c> (null — без поля) или
-    /// 500 (<see cref="ReportFails"/>). G: — настоящий сервер.
+    /// без заголовка; <see cref="BootVolume"/> — назначение вместо 204) и ответ на отчёт H: без тома с <c>volumePending:
+    /// <see cref="ReplyPending"/></c> (null — без поля), с томом (<see cref="Replies"/>, <see cref="ReplyVolume"/>) или 500
+    /// (<see cref="ReportFails"/>). G: — настоящий сервер.
     /// </summary>
     private sealed class PendingSolo : DelegatingHandler
     {
+        /// <summary>Личный диск H: этого места, как его отдаёт сервер: на запись, с CHAP места.</summary>
+        public const string SoloDisk =
+            $$"""{"libraryVersion":"v1","portal":"192.168.77.10:3260","targetIqn":"{{LibrariesStand.SoloSeat}}","readOnly":false,"driveLetter":"H","chapUser":"solo-seat-01","chapSecret":"seat-secret-01"}""";
+
+        /// <summary>Общий том H: версии v2 — только чтение, всем ПК (без личного слоя).</summary>
+        public const string SoloShared =
+            $$"""{"libraryVersion":"v2","portal":"192.168.77.10:3260","targetIqn":"{{LibrariesStand.Basename}}:solo-v2","readOnly":true,"driveLetter":"H"}""";
+
         public string? BootPending { get; set; } = "preparing";
 
         public string? ReplyPending { get; set; } = "preparing";
 
         /// <summary>Отчёт H: не принят: сервер отвечает 500.</summary>
         public bool ReportFails { get; set; }
+
+        /// <summary>Назначение (JSON), которое отдаёт запрос при старте вместо 204.</summary>
+        public string? BootVolume { get; set; }
+
+        /// <summary>Том (JSON) в ответе на отчёт H: — сервер подготовил диск, пока держал отчёт; volumePending тогда нет.</summary>
+        public string? ReplyVolume { get; set; }
+
+        /// <summary>Тома для ответов на отчёты по порядку (null — без тома); кончились — <see cref="ReplyVolume"/>.</summary>
+        public Queue<string?> Replies { get; } = new();
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -58,6 +76,15 @@ public sealed class DiskReadinessTests
 
             if (request.Method == HttpMethod.Get)
             {
+                if (BootVolume is { } assignment)
+                {
+                    return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        RequestMessage = request,
+                        Content = new StringContent(assignment, Encoding.UTF8, "application/json"),
+                    });
+                }
+
                 var boot = new HttpResponseMessage(HttpStatusCode.NoContent) { RequestMessage = request };
                 if (BootPending is { } header)
                 {
@@ -72,7 +99,8 @@ public sealed class DiskReadinessTests
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.InternalServerError) { RequestMessage = request });
             }
 
-            var field = ReplyPending is { } pending ? $",\"volumePending\":\"{pending}\"" : "";
+            var volume = Replies.TryDequeue(out var next) ? next : ReplyVolume;
+            var field = volume is not null ? $",\"volume\":{volume}" : ReplyPending is { } pending ? $",\"volumePending\":\"{pending}\"" : "";
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             {
                 RequestMessage = request,
@@ -178,6 +206,59 @@ public sealed class DiskReadinessTests
         await helper.TickAsync(CancellationToken.None);
         Assert.Equal(expected, helper.Libraries[0].Disk.State);
         Assert.Equal(expected is not DiskStates.Preparing, helper.Readiness().Ready);
+    }
+
+    [Fact]
+    public async Task Personal_disk_offered_in_a_reply_is_decided_by_the_boot_answer()
+    {
+        await using var stand = await LibrariesStand.StartAsync();
+        await stand.PublishAsync(stand.Games, "v1");
+        var server = new PendingSolo { ReplyVolume = PendingSolo.SoloDisk };
+        var helper = Helper(stand, stand.Server.CreateDefaultClient(server), new FakeWindowsStorage());
+
+        // Сброс личного диска H: дольше 12 с: при старте — 204 с preparing, ответ на отчёт уже с диском. Личный диск берётся
+        // только из запроса при старте — помощник спрашивает снова, снова 204 с preparing, а ответ на второй отчёт опять с
+        // диском: он всё ещё готовится (подключит следующий такт), а не «монтировать нечего» — ready: true впустил бы игрока
+        // без H:.
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(new LibraryDisk("solo", DiskStates.Preparing, "H"), helper.Readiness().Disks[1]);
+        Assert.False(helper.Readiness().Ready);
+
+        // Запрос при старте диск не отдаёт и не говорит, что он готовится (диск занят чужим IQN, сервер без X-Volume-Pending):
+        // монтировать нечего, сколько бы ответы на отчёт его ни предлагали, — не «подключается» без конца.
+        server.BootPending = null;
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(new LibraryDisk("solo", DiskStates.Unpublished, "H"), helper.Readiness().Disks[1]);
+        Assert.True(helper.Readiness().Ready);
+
+        // Запрос при старте отдал диск — подключён.
+        server.BootVolume = PendingSolo.SoloDisk;
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(new LibraryDisk("solo", DiskStates.Mounted, "H", "v1"), helper.Readiness().Disks[1]);
+        Assert.True(helper.Readiness().Ready);
+    }
+
+    [Fact]
+    public async Task Volume_in_a_reply_the_tick_did_not_mount_yet_is_attaching()
+    {
+        await using var stand = await LibrariesStand.StartAsync();
+        await stand.PublishAsync(stand.Games, "v1");
+        var server = new PendingSolo();
+        var helper = Helper(stand, stand.Server.CreateDefaultClient(server), new FakeWindowsStorage());
+
+        // Первый ответ на отчёт — личный диск (помощник спрашивает его при старте снова: 204 с preparing), второй — уже общий
+        // том (на сервере выключили личный слой H:): этот такт его не подключает, подключит следующий — attaching, не
+        // unpublished.
+        server.Replies.Enqueue(PendingSolo.SoloDisk);
+        server.Replies.Enqueue(PendingSolo.SoloShared);
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(new LibraryDisk("solo", DiskStates.Attaching, "H"), helper.Readiness().Disks[1]);
+        Assert.False(helper.Readiness().Ready);
+
+        server.ReplyVolume = PendingSolo.SoloShared;
+        await helper.TickAsync(CancellationToken.None);
+        Assert.Equal(new LibraryDisk("solo", DiskStates.Mounted, "H", "v2"), helper.Readiness().Disks[1]);
+        Assert.True(helper.Readiness().Ready);
     }
 
     [Fact]
@@ -295,6 +376,37 @@ public sealed class DiskReadinessTests
         Assert.Equal(new LibraryDisk("games", DiskStates.Master, "G", Error: "drive letter G: is given to the master volume (library editing)"),
             helper.Readiness().Disks[0]);
         Assert.Equal(DiskStates.Mounted, helper.Readiness().Disks[1].State);
+    }
+
+    [Fact]
+    public async Task Service_restarted_during_master_editing_is_master_from_the_boot_answer()
+    {
+        await using var stand = await LibrariesStand.StartAsync();
+        await stand.PublishAsync(stand.Games, "v1");
+        var windows = new FakeWindowsStorage();
+        var before = Helper(stand, stand.Http(), windows);
+        await before.TickAsync(CancellationToken.None);
+        await stand.OpenMasterAsync(stand.Games);
+        await before.TickAsync(CancellationToken.None);
+        Assert.Equal(DiskStates.Master, before.Readiness().Disks[0].State);
+
+        // Служба перезапустилась посреди правки (самообновление): запрос при старте — 204 с X-Library-Letter-Reserved.
+        // G: — master уже до ответа на отчёт, а не «монтировать нечего».
+        HelperLoops restarted = null!;
+        var atReport = new List<HelperReadiness>();
+        restarted = Helper(stand, stand.Server.CreateDefaultClient(new Observer(request =>
+        {
+            if (request.StartsWith("PUT ", StringComparison.Ordinal) && request.EndsWith("/status", StringComparison.Ordinal)
+                && !request.Contains("/libraries/", StringComparison.Ordinal))
+            {
+                atReport.Add(restarted.Readiness());
+            }
+        })), windows);
+        await restarted.TickAsync(CancellationToken.None);
+
+        Assert.Equal(DiskStates.Master, atReport[0].Disks[0].State);
+        Assert.Equal(DiskStates.Master, restarted.Readiness().Disks[0].State);
+        Assert.True(restarted.Readiness().Ready);
     }
 
     [Fact]

@@ -58,7 +58,9 @@ public sealed class InMemoryAssignmentCache : IAssignmentCache
 /// его из своих потоков (<see cref="HelperLoops.Readiness"/>). Пока назначение применяется, а на букве ещё не тот том —
 /// <c>attaching</c>; тома нет, а сервер сказал, что личный диск готовится (<see cref="BootAssignment.VolumePending"/>,
 /// <see cref="StatusAccepted.VolumePending"/>), — <c>preparing</c>; каждый принятый ответ на отчёт заменяет то, что сказал
-/// запрос при старте.
+/// запрос при старте: без тома и без поля — <c>unpublished</c>, с томом, которого на букве ещё нет, — <c>attaching</c>.
+/// Личный диск из ответа на отчёт берётся только из нового запроса при старте — пока тот его не отдал, решает его ответ
+/// (<c>preparing</c> или <c>unpublished</c>).
 /// </summary>
 public sealed class HelperLoop(
     DisklessApiClient api, VolumeManager volumes, IAssignmentCache cache, IMachineIdentity identity, HelperOptions options, ILogger logger,
@@ -85,7 +87,11 @@ public sealed class HelperLoop(
 
     private DiskSnapshot Snapshot => _snapshot ?? new DiskSnapshot(new LibraryDisk(Name, DiskStates.Attaching));
 
-    /// <summary>Тома нет, но сервер сказал, что он будет (<c>preparing</c>) или сборка упала (<c>failed</c>); null — не говорил.</summary>
+    /// <summary>
+    /// Что сервер сказал о томе, которого на букве нет: он будет (<c>preparing</c>), сборка упала (<c>failed</c>) или ответ на
+    /// отчёт дал том, а такт его ещё не подключил (<c>attaching</c>); null — монтировать нечего. Личный диск из ответа на
+    /// отчёт, которого запрос при старте ещё не отдал, этого не меняет: решает ответ запроса при старте.
+    /// </summary>
     private string? _pending;
 
     /// <summary>Запрос при старте ответил 204 с X-Library-Letter-Reserved, а ответа на отчёт ещё не было.</summary>
@@ -653,6 +659,7 @@ public sealed class HelperLoop(
         {
             DiskStates.Preparing => new LibraryDisk(Name, DiskStates.Preparing, letter),
             DiskStates.Failed => new LibraryDisk(Name, DiskStates.Failed, letter, Error: "the club server could not build the personal games disk; it retries"),
+            DiskStates.Attaching => new LibraryDisk(Name, DiskStates.Attaching, letter),
             _ => new LibraryDisk(Name, DiskStates.Unpublished, letter),
         });
     }
@@ -691,8 +698,16 @@ public sealed class HelperLoop(
             var reply = await api.ReportStatusAsync(status, ct, library);
             LastAccepted = reply;
             AcceptedReports++;
-            // Каждый принятый ответ заменяет то, что сказал запрос при старте: нет поля — монтировать нечего.
-            _pending = reply.Volume is null ? DisklessApiClient.PendingOf(reply.VolumePending) : null;
+            // Каждый принятый ответ заменяет то, что сказал запрос при старте: нет ни тома, ни поля — монтировать нечего; том —
+            // его подключит этот такт или следующий: пока на букве его нет, он подключается, а не «нечего». Кроме личного
+            // диска, которого запрос при старте ещё не отдал: его берут только оттуда (сброс для этой загрузки), и решает
+            // ответ того запроса — готовится или монтировать нечего (диск занят чужим IQN, сервер без X-Volume-Pending).
+            _pending = reply.Volume switch
+            {
+                null => DisklessApiClient.PendingOf(reply.VolumePending),
+                { } offered when volumes.IsPersonalTarget(offered) && offered.TargetIqn != _personalConfirmed => _pending,
+                _ => DiskStates.Attaching,
+            };
             _reservedAtBoot = false;
             Awake();
             if (report.Contents is not null)
