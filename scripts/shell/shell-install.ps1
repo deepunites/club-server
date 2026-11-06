@@ -95,7 +95,7 @@ $SetupName = 'ClubShellSetup-1.0.18.exe'
 $SetupSize = 75490102
 $SetupSha256 = '1D23DEE18E17BE03A19801CD2D7CD1F8C8FDE7B8D4E83A2B5BA6785EAF46A1CF'
 $SetupUrl = 'https://github.com/Nightcall7442/club-shell/releases/download/v1.0.18/ClubShellSetup-1.0.18.exe'
-$HelperSha256 = '26635A5F7AAB4D77441D0B0138064B9C7F64BB1DAF4B0BCAF09052439DDD0148'   # ClubDisklessHelper 1.6.0+13609a5
+$HelperBuilds = @{ '41DA96A0B0721B22BB5F5E1898C927F08C4856968EE059A0C40B3D2B54A30E23' = '1.7.0+f79e0d5'; '26635A5F7AAB4D77441D0B0138064B9C7F64BB1DAF4B0BCAF09052439DDD0148' = '1.6.0+13609a5' }   # SHA256 exe ClubDisklessHelper -> сборка
 # Корни библиотек и Steam (agent.json -> games). Массив из файла заменяет массив по умолчанию (D:\Games, G:\Games) целиком.
 $LibraryRoots = @('G:\Steam', 'H:\')
 $SteamExe = 'G:\Steam\steam.exe'
@@ -480,8 +480,8 @@ try {
     else { Write-Pass "no folder redirection to G:/H: ($KioskUser's folders stay in C:\Users\$KioskUser)" }
 
     $helperAfter = Get-HelperState
-    if ($helperAfter -and $helperAfter.State -eq 'Running' -and $helperAfter.Hash -eq $HelperSha256 -and $helperBefore -and $helperAfter.Hash -eq $helperBefore.Hash) {
-        Write-Pass 'helper ClubDisklessHelper 1.6.0+13609a5 untouched and running'
+    if ($helperAfter -and $helperAfter.State -eq 'Running' -and $helperAfter.Hash -and $HelperBuilds.ContainsKey($helperAfter.Hash) -and $helperBefore -and $helperAfter.Hash -eq $helperBefore.Hash) {
+        Write-Pass "helper ClubDisklessHelper $($HelperBuilds[$helperAfter.Hash]) untouched and running"
     } else {
         Write-Fail 'helper ClubDisklessHelper changed or stopped' 'irm http://192.168.1.201:5080/pxe/v1/files/tools/update-helper-net.ps1 | iex'
     }

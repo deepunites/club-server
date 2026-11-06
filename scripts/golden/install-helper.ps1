@@ -1,13 +1,13 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Ставит помощник бездиска (ClubDisklessHelper 1.6.0) в эталон или обновляет его на гибриде: служба Windows, которая
+    Ставит помощник бездиска (ClubDisklessHelper 1.7.0) в эталон или обновляет его на гибриде: служба Windows, которая
     подключает диски игр G: («Online Games») и H: («Offline Games», с 1.6.0), правку библиотек и сообщает серверу клуба
-    состояние ПК (docs/helper.md).
+    состояние ПК; с 1.7.0 — сохранения игр игрока по каналу шелла (docs/helper.md).
 
 .DESCRIPTION
     Запускать в эталоне в режиме мастера, PowerShell от администратора. Рядом со скриптом (флешка) — три файла:
-      ClubDisklessHelper.exe — сборка 1.6.0, SHA256 сверяется;
+      ClubDisklessHelper.exe — сборка 1.7.0, SHA256 сверяется;
       helper.json            — адрес сервера и ключ клуба (секрет: после установки удаляется с флешки);
       club-ca.pem            — CA клуба, которым подписан сертификат сервера.
     Помощник 1.5.0 привязывает регистрацию к HWID платы: запуск на мастере безопасен — места с другим HWID
@@ -15,8 +15,8 @@
 
     Гибрид — обновление на месте: та же флешка (helper.json не нужен — остаётся установленный), вход под администратором
     клуба (Shift при входе — мимо киоска). G: и H: при перезапуске службы не сбрасываются и не отключаются. Только G: на
-    ПК — в helper.json "Libraries": []. Откат — install-helper.ps1 из git 1b748fa и exe 1.5.1: H: пропадёт после
-    перезагрузки, G: как прежде.
+    ПК — в helper.json "Libraries": []. Откат — install-helper.ps1 из git f79e0d5 и exe 1.6.0 (в tools сервера —
+    ClubDisklessHelper-1.6.0.exe): G: и H: как прежде, канала сохранений нет.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File E:\club\install-helper.ps1
@@ -30,9 +30,9 @@ $ErrorActionPreference = 'Continue'
 # $PSScriptRoot в значении параметра по умолчанию пуст при запуске powershell.exe -File (PS 5.1) — берём папку скрипта здесь.
 if (-not $Source) { $Source = Split-Path -Parent $MyInvocation.MyCommand.Path }
 
-# Один exe 1.6.0 — для эталона, гибридов и h1e (patch-hybrid-wim.sh сверяет exe с этой строкой).
-$ExeSha256 = '26635a5f7aab4d77441d0b0138064b9c7f64bb1daf4b0bcaf09052439ddd0148'   # 1.6.0+13609a5 (.NET 10.0.13)
-$ExeVersion = '1.6.0'
+# Один exe 1.7.0 — для эталона, гибридов и образа гибрида h1f (h1e — с 1.6.0; patch-hybrid-wim.sh сверяет exe с этой строкой).
+$ExeSha256 = '41da96a0b0721b22bb5f5e1898c927f08c4856968ee059a0c40b3d2b54a30e23'   # 1.7.0+f79e0d5 (.NET 10.0.13)
+$ExeVersion = '1.7.0'
 $ServiceName = 'ClubDisklessHelper'
 $InstallDir = "$env:ProgramFiles\ClubDiskless"
 $StateDir = "$env:ProgramData\ClubDiskless"

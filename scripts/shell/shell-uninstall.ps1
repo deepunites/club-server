@@ -47,7 +47,7 @@ param(
 )
 $ErrorActionPreference = 'Continue'
 $SetupName = 'ClubShellSetup-1.0.18.exe'
-$HelperSha256 = '26635A5F7AAB4D77441D0B0138064B9C7F64BB1DAF4B0BCAF09052439DDD0148'   # ClubDisklessHelper 1.6.0+13609a5
+$HelperBuilds = @{ '41DA96A0B0721B22BB5F5E1898C927F08C4856968EE059A0C40B3D2B54A30E23' = '1.7.0+f79e0d5'; '26635A5F7AAB4D77441D0B0138064B9C7F64BB1DAF4B0BCAF09052439DDD0148' = '1.6.0+13609a5' }   # SHA256 exe ClubDisklessHelper -> сборка
 $UpdateHelperCmd = 'irm http://192.168.1.201:5080/pxe/v1/files/tools/update-helper-net.ps1 | iex'
 $SealUndoCmd = '& ([scriptblock]::Create((irm http://192.168.1.201:5080/pxe/v1/files/tools/seal-default-profile.ps1))) -Undo'
 $DataDir = Join-Path $env:ProgramData 'ClubShell'
@@ -485,7 +485,7 @@ try {
             Start-Service -Name ClubDisklessHelper -ErrorAction SilentlyContinue
             if ((Get-Service -Name ClubDisklessHelper).Status -eq 'Running') { Write-Pass 'helper was stopped: started again' } else { Write-Fail 'helper does not run' $UpdateHelperCmd }
         } else {
-            $label = if ($helperAfter.Hash -eq $HelperSha256) { '1.6.0+13609a5' } else { "SHA256 $($helperAfter.Hash)" }
+            $label = if ($helperAfter.Hash -and $HelperBuilds.ContainsKey($helperAfter.Hash)) { $HelperBuilds[$helperAfter.Hash] } else { "SHA256 $($helperAfter.Hash)" }
             Write-Pass "helper ClubDisklessHelper untouched and running ($label)"
         }
     }

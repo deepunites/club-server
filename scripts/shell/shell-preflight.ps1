@@ -9,7 +9,7 @@
       1. ПК: имя PC-NN и переименование не ждёт перезагрузки; системный диск локальный (бездисковый ПК — отказ: там
          шелл ставится в эталон в режиме мастера, отдельно); место на C:; ожидание перезагрузки; Smart App Control
          (сборка 1.0.18 не подписана — он её заблокирует);
-      2. помощник бездиска: служба ClubDisklessHelper 1.6.0+13609a5 (SHA256 exe); G: «Online Games» и H: «Offline
+      2. помощник бездиска: служба ClubDisklessHelper 1.7.0+f79e0d5 или 1.6.0+13609a5 (SHA256 exe); G: «Online Games» и H: «Offline
          Games» по iSCSI; номер личных дисков (таргеты games-seat-NN, solo-seat-NN) = номер в имени Windows (ClubShell
          берёт номер ПК из имени Windows при первой регистрации); G:\Steam\steam.exe; право записи группы Users в папки
          игр (игрок в киоске — обычный пользователь, не администратор);
@@ -54,7 +54,7 @@ $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 
 # Сверяемые значения — те же, что в shell-install.ps1 (менять вместе).
-$HelperSha256 = '26635A5F7AAB4D77441D0B0138064B9C7F64BB1DAF4B0BCAF09052439DDD0148'   # ClubDisklessHelper 1.6.0+13609a5
+$HelperBuilds = @{ '41DA96A0B0721B22BB5F5E1898C927F08C4856968EE059A0C40B3D2B54A30E23' = '1.7.0+f79e0d5'; '26635A5F7AAB4D77441D0B0138064B9C7F64BB1DAF4B0BCAF09052439DDD0148' = '1.6.0+13609a5' }   # SHA256 exe ClubDisklessHelper -> сборка
 $SetupName = 'ClubShellSetup-1.0.18.exe'
 $SetupSize = 75490102
 $SetupSha256 = '1D23DEE18E17BE03A19801CD2D7CD1F8C8FDE7B8D4E83A2B5BA6785EAF46A1CF'   # SHA256SUMS.txt релиза v1.0.18
@@ -297,8 +297,8 @@ if (-not $helper) {
     $helperExe = ($helper.PathName -replace '^\s*"([^"]+)".*$', '$1').Trim()
     if (Test-Path -LiteralPath $helperExe) {
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $helperExe).Hash
-        if ($hash -eq $HelperSha256) { Write-Pass "helper exe is 1.6.0+13609a5 ($helperExe)" }
-        else { Write-Fail "helper exe SHA256 $hash is not 1.6.0+13609a5 ($helperExe)" $UpdateHelperCmd }
+        if ($hash -and $HelperBuilds.ContainsKey($hash)) { Write-Pass "helper exe is $($HelperBuilds[$hash]) ($helperExe)" }
+        else { Write-Fail "helper exe SHA256 $hash is not 1.7.0+f79e0d5 or 1.6.0+13609a5 ($helperExe)" $UpdateHelperCmd }
     } else {
         Write-Fail "helper exe not found: $helperExe" $UpdateHelperCmd
     }
