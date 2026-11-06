@@ -52,10 +52,11 @@ public sealed record MachineStatus(
 /// Ответ на отчёт. <paramref name="LibraryLetterReserved"/> — буква тома библиотеки отдана мастер-тому этого ПК
 /// (<see cref="LibraryOptions.MasterOnLibraryLetter"/>): <paramref name="Volume"/> нет намеренно. Иначе поля нет (null не
 /// передаётся) — старые помощники его и не видят. <paramref name="HelperUpdate"/> — желаемая сборка помощника: только у
-/// активного поручения этого ПК (<see cref="HelperUpdateRepository.OnReportAsync"/>), иначе поля нет.
+/// активного поручения этого ПК (<see cref="HelperUpdateRepository.OnReportAsync"/>), иначе поля нет. <paramref name="VolumePending"/> —
+/// тома нет, потому что личный диск места ещё готовится или его сборка упала (<see cref="Diskless.VolumePending"/>); иначе поля нет.
 /// </summary>
 public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume, MasterAssignment? Master = null, bool? LibraryLetterReserved = null,
-    HelperUpdateOffer? HelperUpdate = null);
+    HelperUpdateOffer? HelperUpdate = null, string? VolumePending = null);
 
 /// <summary>
 /// API бездиска для помощника на ПК (docs/diskless-api.yaml). Не зависит от шелла: только машины и том библиотеки.
@@ -93,7 +94,7 @@ public static partial class DisklessEndpoints
         // attached=false — помощник проверил: на этом ПК личный диск не подключён, сессия на сервере (если есть) осталась от
         // прошлой загрузки (ПК выключили кнопкой) и сбросу не мешает.
         api.MapGet("/machines/{machineId:guid}/volume", async (Guid machineId, bool? attached, HttpContext context, LibraryRepository library, LibraryOptions options,
-            MachineRepository machines, SeatGames seatGames, MasterRepository master, CancellationToken ct) =>
+            MachineRepository machines, SeatGames seatGames, SeatGamesRepository seatRepository, MasterRepository master, TimeProvider clock, CancellationToken ct) =>
         {
             RequireSelf(context, machineId);
             if (LibraryLetterReserved(await MasterAssignmentAsync(machineId, master, options), options))
@@ -104,10 +105,15 @@ public static partial class DisklessEndpoints
                 return Results.NoContent();
             }
 
-            var volume = options.PersonalGames
-                ? await machines.FindAsync(machineId) is { } machine ? await seatGames.AssignmentAsync(machine, atBoot: true, ct, attached) : null
-                : await AssignmentAsync(library, options);
-            return volume is not null ? Results.Json(volume, ApiJson.Options) : Results.NoContent();
+            if (!options.PersonalGames)
+            {
+                return VolumeResult(context, await AssignmentAsync(library, options), null);
+            }
+
+            var (volume, pending) = await machines.FindAsync(machineId) is { } machine
+                ? await VolumePending.SeatAssignmentAsync(seatGames, seatRepository, library, options, clock, machine, atBoot: true, ct, attached)
+                : (null, null);
+            return VolumeResult(context, volume, pending);
         });
         api.MapPut("/machines/{machineId:guid}/status", StatusAsync);
 
@@ -115,6 +121,25 @@ public static partial class DisklessEndpoints
         // ответы от этих библиотек не меняются. Выключенная или неизвестная библиотека — 404: помощник 1.6.0 усыпляет её цикл.
         api.MapGet("/machines/{machineId:guid}/libraries/{key}/volume", LibraryVolumeAsync);
         api.MapPut("/machines/{machineId:guid}/libraries/{key}/status", LibraryStatusAsync);
+    }
+
+    /// <summary>
+    /// Ответ запроса при старте: назначение или 204; 204 без тома, который ещё готовится, — с заголовком
+    /// <see cref="VolumePending.Header"/> (помощник после 1.8.1 ждёт диск, а не считает, что монтировать нечего).
+    /// </summary>
+    private static IResult VolumeResult(HttpContext context, VolumeAssignment? volume, string? pending)
+    {
+        if (volume is not null)
+        {
+            return Results.Json(volume, ApiJson.Options);
+        }
+
+        if (pending is not null)
+        {
+            context.Response.Headers[VolumePending.Header] = pending;
+        }
+
+        return Results.NoContent();
     }
 
     /// <summary>Текущая опубликованная версия библиотеки. Том всегда read-only: он общий для всех ПК.</summary>
@@ -228,7 +253,7 @@ public static partial class DisklessEndpoints
     }
 
     private static async Task<IResult> StatusAsync(Guid machineId, MachineStatus request, HttpContext context, MachineRepository machines, LibraryRepository library, LibraryOptions options, Imaging.ImageRepository images, MasterRepository master, SeatGames seatGames,
-        HelperUpdateRepository helperUpdates, ILoggerFactory logs, TimeProvider clock, CancellationToken ct)
+        SeatGamesRepository seatRepository, HelperUpdateRepository helperUpdates, ILoggerFactory logs, TimeProvider clock, CancellationToken ct)
     {
         RequireSelf(context, machineId);
         Require(request.HelperVersion, "helperVersion");
@@ -290,11 +315,12 @@ public static partial class DisklessEndpoints
 
         var masterAssignment = await MasterAssignmentAsync(machineId, master, options);
         var reserved = LibraryLetterReserved(masterAssignment, options);
-        var volume = reserved ? null
-            : options.PersonalGames
-            ? await machines.FindAsync(machineId) is { } machine ? await seatGames.AssignmentAsync(machine, atBoot: false, ct) : null
-            : await AssignmentAsync(library, options);
-        return Results.Json(new StatusAccepted(clock.GetUtcNow(), volume, masterAssignment, reserved ? true : null, helperUpdate), ApiJson.Options);
+        var (volume, pending) = reserved ? (null, null)
+            : !options.PersonalGames ? (await AssignmentAsync(library, options), null)
+            : await machines.FindAsync(machineId) is { } machine
+            ? await VolumePending.SeatAssignmentAsync(seatGames, seatRepository, library, options, clock, machine, atBoot: false, ct)
+            : (null, null);
+        return Results.Json(new StatusAccepted(clock.GetUtcNow(), volume, masterAssignment, reserved ? true : null, helperUpdate, pending), ApiJson.Options);
     }
 
     /// <summary>
@@ -302,7 +328,7 @@ public static partial class DisklessEndpoints
     /// личного диска места этой библиотеки. Помощник старше её PersonalMinHelper (1.6.0) назначения не получает (204).
     /// </summary>
     private static async Task<IResult> LibraryVolumeAsync(Guid machineId, string key, bool? attached, HttpContext context, LibrarySet libraries,
-        MachineRepository machines, CancellationToken ct)
+        MachineRepository machines, TimeProvider clock, CancellationToken ct)
     {
         RequireSelf(context, machineId);
         var library = ExtraLibrary(libraries, key);
@@ -313,8 +339,10 @@ public static partial class DisklessEndpoints
             return Results.NoContent();
         }
 
-        var volume = await machines.FindAsync(machineId) is { } machine ? await library.Seats.AssignmentAsync(machine, atBoot: true, ct, attached) : null;
-        return volume is not null ? Results.Json(volume, ApiJson.Options) : Results.NoContent();
+        var (volume, pending) = await machines.FindAsync(machineId) is { } machine
+            ? await VolumePending.SeatAssignmentAsync(library.Seats, library.SeatsRepository, library.Repository, library.Options, clock, machine, atBoot: true, ct, attached)
+            : (null, null);
+        return VolumeResult(context, volume, pending);
     }
 
     /// <summary>
@@ -347,9 +375,11 @@ public static partial class DisklessEndpoints
 
         var masterAssignment = await MasterAssignmentAsync(machineId, library.Master, library.Options);
         var reserved = LibraryLetterReserved(masterAssignment, library.Options);
-        var volume = reserved ? null
-            : await machines.FindAsync(machineId) is { } machine ? await library.Seats.AssignmentAsync(machine, atBoot: false, ct) : null;
-        return Results.Json(new StatusAccepted(clock.GetUtcNow(), volume, masterAssignment, reserved ? true : null), ApiJson.Options);
+        var (volume, pending) = reserved ? (null, null)
+            : await machines.FindAsync(machineId) is { } machine
+            ? await VolumePending.SeatAssignmentAsync(library.Seats, library.SeatsRepository, library.Repository, library.Options, clock, machine, atBoot: false, ct)
+            : (null, null);
+        return Results.Json(new StatusAccepted(clock.GetUtcNow(), volume, masterAssignment, reserved ? true : null, VolumePending: pending), ApiJson.Options);
     }
 
     /// <summary>Работающая библиотека не-G: по ключу из пути. G: (у неё старые пути), выключенная или неизвестная — 404.</summary>
