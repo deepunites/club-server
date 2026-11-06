@@ -174,6 +174,28 @@ public sealed class HelperBuildsTests(ServerFixture server) : IClassFixture<Serv
     }
 
     [Fact]
+    public void Options_Validate_RejectsBrokenSettings()
+    {
+        new HelperUpdateOptions().Validate();
+        new HelperUpdateOptions { MinFileAgeSec = 0, MinTargetVersion = "1.9.2" }.Validate();
+
+        // Кривой порог молча сделал бы все сборки «только вручную», MaxActive = 0 — встала бы очередь.
+        foreach (var broken in new[]
+        {
+            new HelperUpdateOptions { MinTargetVersion = "1.8" },
+            new HelperUpdateOptions { MinTargetVersion = "latest" },
+            new HelperUpdateOptions { MaxActive = 0 },
+            new HelperUpdateOptions { WorkerIntervalSec = 0 },
+            new HelperUpdateOptions { SilentMinutes = 0 },
+            new HelperUpdateOptions { WaitingMinutes = 0 },
+            new HelperUpdateOptions { MinFileAgeSec = -1 },
+        })
+        {
+            Assert.Throws<InvalidOperationException>(broken.Validate);
+        }
+    }
+
+    [Fact]
     public async Task Migration_CreatesHelperUpdates()
     {
         var machine = await server.Services.GetRequiredService<MachineRepository>().CreateAsync(

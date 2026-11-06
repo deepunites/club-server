@@ -33,4 +33,24 @@ public sealed class HelperUpdateOptions
     /// «только вручную».
     /// </summary>
     public string MinTargetVersion { get; set; } = "1.8.0";
+
+    public void Validate()
+    {
+        foreach (var (name, value, min) in new[]
+        {
+            ("MaxActive", MaxActive, 1), ("WorkerIntervalSec", WorkerIntervalSec, 1), ("SilentMinutes", SilentMinutes, 1),
+            ("WaitingMinutes", WaitingMinutes, 1), ("MinFileAgeSec", MinFileAgeSec, 0),
+        })
+        {
+            if (value < min)
+            {
+                throw new InvalidOperationException($"HelperUpdates:{name} must be at least {min}");
+            }
+        }
+
+        if (!Version.TryParse(MinTargetVersion, out var version) || version.Build < 0 || version.Revision >= 0)
+        {
+            throw new InvalidOperationException("HelperUpdates:MinTargetVersion must look like '1.8.0'");
+        }
+    }
 }

@@ -30,6 +30,7 @@ var disklessOptions = builder.Configuration.GetSection("Diskless").Get<DisklessO
 disklessOptions.Validate();
 var savesOptions = builder.Configuration.GetSection("Saves").Get<SavesOptions>() ?? new SavesOptions();
 var helperUpdateOptions = builder.Configuration.GetSection("HelperUpdates").Get<HelperUpdateOptions>() ?? new HelperUpdateOptions();
+helperUpdateOptions.Validate();
 
 builder.Services.ConfigureHttpJsonOptions(o => ApiJson.Configure(o.SerializerOptions));
 builder.Services.AddSingleton(TimeProvider.System);
