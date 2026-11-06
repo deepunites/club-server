@@ -622,6 +622,42 @@ public sealed class HelperUpdateQueueTests(ServerFixture server) : IClassFixture
     }
 
     [Fact]
+    public async Task Sweep_AfterServerDowntime_NeverSeenAndNoProgressCountFromStart()
+    {
+        var repo = Repo();
+        var a = await MachineAsync();
+        var b = await MachineAsync();
+        var down = T0.AddHours(-1);
+        await repo.LaunchAsync(Build181, [a.Number, b.Number], false, "panel", down);
+        Assert.NotNull(await ReportAsync(repo, a, down));
+        var bid = (await ReportAsync(repo, b, down))!.Id;
+        await ReportAsync(repo, b, down, Step(bid, Progress.Downloading));
+        await using (var db = await Db.OpenConnectionAsync())
+        {
+            await db.ExecuteAsync("UPDATE machines SET last_seen_at = NULL WHERE id = @id", new { id = a.Id });
+        }
+
+        // a без отметки last_seen_at: молчание — от запуска сервера, не сразу. b отчитывается после запуска, но о
+        // поручении молчит: «без прогресса» — тоже от запуска сервера.
+        var upSince = T0.AddMinutes(-1);
+        foreach (var minute in new[] { 1, 10 })
+        {
+            await SeenAsync(b, upSince.AddMinutes(minute));
+            await repo.SweepAsync(upSince.AddMinutes(minute), upSince);
+            Assert.Equal(States.Active, (await JobAsync(a)).State);
+            Assert.Equal(States.Active, (await JobAsync(b)).State);
+        }
+
+        // Срок вышел: a — снова в очереди (и на паузе из-за ошибки b), b — noProgress. Поправка не держит поручения вечно.
+        await SeenAsync(b, upSince.AddMinutes(11));
+        await repo.SweepAsync(upSince.AddMinutes(11), upSince);
+        var job = await JobAsync(a);
+        Assert.Equal((States.Paused, null, null), (job.State, job.Progress, job.Error));
+        job = await JobAsync(b);
+        Assert.Equal((States.Failed, Errors.NoProgress), (job.State, job.Error));
+    }
+
+    [Fact]
     public async Task Report_ConfirmedAfterNoReturn_Done_PauseKept()
     {
         var log = new ListLogger();
