@@ -281,3 +281,12 @@ textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; 
 #sv-query { width: min(320px, 100%); margin-top: 10px; }
 .sv-pages { display: flex; gap: 10px; align-items: center; justify-content: center; padding: 10px; border-top: 1px solid var(--border); }
 .sv-pages[hidden] { display: none; }
+
+/* Карточка «Обновление помощника»: заголовок очереди со сводкой и кнопками, подробности ошибки — с переносом строк. */
+.helper-upd-queue-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 8px; }
+.helper-upd-queue-head .summary { flex: 1; }
+#helper-upd-paused { margin: 0 0 8px; }
+#helper-upd-file { min-width: 200px; }
+#helper-upd-seats { width: 200px; }
+td.helper-upd-details { white-space: normal; min-width: 220px; max-width: 420px; overflow-wrap: anywhere; }
+.helper-cell { white-space: normal; min-width: 130px; }

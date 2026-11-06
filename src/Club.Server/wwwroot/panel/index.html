@@ -109,6 +109,68 @@
         </div>
       </div>
 
+      <!-- Обновление помощника (spec 2026-11-06, п. 3.5): сборки из tools, запуск по номерам или всем гибридам, очередь. -->
+      <div id="helper-upd" class="card lib-card spaced-card">
+        <h2 data-i18n="helperUpdTitle">Обновление помощника</h2>
+        <p class="muted small" data-i18n="helperUpdHint"></p>
+        <p id="helper-upd-error" class="error small" hidden></p>
+        <div class="zones-grid">
+          <div>
+            <div class="table-wrap inner">
+              <table>
+                <thead>
+                  <tr>
+                    <th data-i18n="helperUpdColVersion">Версия</th>
+                    <th data-i18n="helperUpdColSize">Размер</th>
+                    <th>SHA256</th>
+                    <th data-i18n="helperUpdColModified">Файл изменён</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="helper-upd-builds"></tbody>
+              </table>
+            </div>
+            <p id="helper-upd-builds-empty" class="muted small" data-i18n="helperUpdBuildsEmpty" hidden></p>
+          </div>
+          <div class="zone-forms">
+            <form id="helper-upd-launch" class="publish-row" novalidate>
+              <label><span data-i18n="helperUpdBuild">Сборка</span><select id="helper-upd-file"></select></label>
+              <label><span data-i18n="zoneSeats">Места</span><input id="helper-upd-seats" class="mono" placeholder="22, 11-20"></label>
+              <button type="submit" id="helper-upd-start" data-i18n="helperUpdStart">Запустить</button>
+              <button type="button" id="helper-upd-all" class="ghost" data-i18n="helperUpdAllHybrids">Все гибриды</button>
+            </form>
+            <p class="muted small" data-i18n="helperUpdSeatsHint"></p>
+            <p id="helper-upd-result" class="small" hidden></p>
+          </div>
+        </div>
+
+        <div class="helper-upd-queue-head spaced-top">
+          <h2 class="flush" data-i18n="helperUpdQueueTitle">Очередь</h2>
+          <div class="summary" id="helper-upd-summary"></div>
+          <div class="row-actions">
+            <button type="button" id="helper-upd-resume" class="small" data-i18n="helperUpdResume" hidden>Продолжить</button>
+            <button type="button" id="helper-upd-cancel-all" class="danger small" data-i18n="helperUpdCancelAll" hidden>Отменить всё</button>
+          </div>
+        </div>
+        <p id="helper-upd-paused" class="notice small" data-i18n="helperUpdPausedNotice" hidden></p>
+        <div class="table-wrap inner">
+          <table>
+            <thead>
+              <tr>
+                <th data-i18n="colNumber">№</th>
+                <th data-i18n="helperUpdBuild">Сборка</th>
+                <th data-i18n="colStatus">Статус</th>
+                <th data-i18n="helperUpdColDetails">Подробности</th>
+                <th data-i18n="helperUpdColUpdated">Изменено</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="helper-upd-rows"></tbody>
+          </table>
+        </div>
+        <p id="helper-upd-empty" class="muted small" data-i18n="helperUpdQueueEmpty" hidden></p>
+      </div>
+
       <div class="table-wrap">
         <table>
           <thead>

@@ -43,6 +43,10 @@
   let svQueryTimer = null;
   let svSettingsDirty = false;
   let svEditing = null;
+  // «Обновление помощника» на экране ПК: сборки из tools и очередь поручений — своим заходом (loadHelperUpdates).
+  let hu = null;
+  let huJson = "";
+  let huBuildsKey = "";
   const openContents = new Set();
   const NET_FIELDS = ["subnet", "interface", "dhcpServer", "gateway", "dnsServers", "poolStart", "poolEnd", "reservedStart", "leaseTimeSec", "keaSubnetId"];
 
@@ -270,6 +274,46 @@
     return el("td", { class: "reimage-cell" }, parts);
   }
 
+  // ---------- Помощник: версия, сборка и поручение обновления ----------
+
+  const HELPER_UPD = { queued: "info", paused: "warn", active: "info", done: "ok", failed: "bad", cancelled: "idle" };
+  const HELPER_UPD_OPEN = ["queued", "paused", "active"];
+
+  const shortSha = (sha) => (sha ? sha.slice(0, 8) : "");
+
+  // Метка поручения (spec п. 3.5): «назначено» — активно, отчёта о нём ещё нет; дальше — что сообщил помощник
+  // (скачивает, ждёт: сеанс / команда шелла / правка библиотеки, перезапуск, проверка); у ошибки — её код.
+  function helperUpdateLabel(u) {
+    if (u.state === "failed") return t("helperUpdFailed", { code: u.error ?? "—" });
+    if (u.state !== "active" || !u.progress) return t(`helperUpdState_${u.state}`);
+    if (u.progress === "waiting" && u.reason) return t("helperUpdWaitingFor", { reason: t(`helperUpdWait_${u.reason}`) });
+    return t(`helperUpdProgress_${u.progress}`);
+  }
+
+  // Объяснение кода ошибки и текст помощника (до 500 символов) — в подсказке столбца и в строке очереди.
+  function helperUpdateDetails(u) {
+    const parts = [];
+    if (u.error) {
+      const key = `helperUpdErr_${u.error}`;
+      parts.push(t(key) === key ? u.error : t(key));
+    }
+    if (u.message) parts.push(u.message);
+    return parts.join(" — ");
+  }
+
+  // Столбец «Помощник»: «версия · 8 символов SHA256 сборки» и поручение ПК; у мест бездиска — «через эталон», у помощника
+  // старше 1.8.0 — «вручную». Можно ли обновлять, решает сервер (helperUpdateBlock), панель не выводит это из bootMode.
+  function helperCell(m) {
+    const version = !m.helperVersion ? dash()
+      : el("span", { class: "mono", ...(m.helperBuild ? { title: m.helperBuild } : {}) }, m.helperBuild ? `${m.helperVersion} · ${shortSha(m.helperBuild)}` : m.helperVersion);
+    const badges = [];
+    const u = m.helperUpdate;
+    if (u) badges.push(badge(HELPER_UPD[u.state] || "idle", helperUpdateLabel(u), [`${u.version} · ${shortSha(u.sha256)}`, helperUpdateDetails(u)].filter(Boolean).join("\n")));
+    if (m.helperUpdateBlock === "diskless") badges.push(badge("idle", t("helperUpdViaImage"), t("helperUpdViaImageHint")));
+    else if (m.helperUpdateBlock === "helperTooOld") badges.push(badge("idle", t("helperUpdManual"), t("helperUpdManualHint")));
+    return el("td", { class: "helper-cell" }, el("div", {}, version), badges.length ? el("div", { class: "badges" }, badges) : null);
+  }
+
   function reimageActions(m) {
     const r = m.reimage;
     const active = r && ["requested", "deploying", "failed", "booting"].includes(r.state);
@@ -354,7 +398,7 @@
         el("td", {}, zoneName(m.zone)),
         libraryCell(m),
         windowsCell(m),
-        el("td", {}, orDash(m.helperVersion, true)),
+        helperCell(m),
         el("td", {}, ago(m.lastSeenAt)),
         reimageActions(m));
     }));
@@ -523,6 +567,161 @@
     }
     dataJson = "";
     await load();
+  }
+
+  // ---------- Обновление помощника ----------
+
+  // Сборки и выбор сборки перестраиваются, только когда изменился сам список (или язык): обновление раз в 5 с не сбрасывает
+  // выбранную сборку. Выбрать можно только сборку 1.8.0+ (updatable), старые видны с пометкой «только вручную».
+  function renderHelperBuilds() {
+    const builds = hu.builds;
+    const key = lang + JSON.stringify(builds);
+    if (key === huBuildsKey) return;
+    huBuildsKey = key;
+    $("helper-upd-builds-empty").hidden = builds.length > 0;
+    $("helper-upd-builds").replaceChildren(...builds.map((b) => el("tr", {},
+      el("td", { class: "mono" }, b.version),
+      el("td", {}, size(b.size)),
+      el("td", { class: "mono", title: b.sha256 }, shortSha(b.sha256)),
+      el("td", {}, ago(b.modifiedAt)),
+      el("td", {}, b.updatable ? null : badge("idle", t("helperUpdManualOnly"), t("helperUpdManualOnlyHint"))))));
+    const select = $("helper-upd-file");
+    const picked = select.value;
+    const usable = builds.filter((b) => b.updatable);
+    select.replaceChildren(...builds.map((b) => el("option", { value: b.file, ...(b.updatable ? {} : { disabled: "" }) },
+      b.updatable ? `${b.version} · ${shortSha(b.sha256)}` : `${b.version} — ${t("helperUpdManualOnly")}`)));
+    if (usable.some((b) => b.file === picked)) select.value = picked;
+    else if (usable.length) select.value = usable[0].file;
+    $("helper-upd-start").disabled = usable.length === 0;
+    $("helper-upd-all").disabled = usable.length === 0;
+  }
+
+  // Очередь: сводка (активно из предела, в очереди, на паузе, готово и ошибки за сутки), «Продолжить» при паузе,
+  // «Отменить всё» при незавершённых, строки поручений с отменой незавершённого.
+  function renderHelperQueue() {
+    const { items, paused, maxActive } = hu.updates;
+    const count = (state) => items.filter((u) => u.state === state).length;
+    const open = items.filter((u) => HELPER_UPD_OPEN.includes(u.state));
+    const chip = (key, value) => el("span", { class: "chip" }, `${t(key)}: `, el("b", {}, value));
+    const chips = [chip("helperUpdSumActive", `${count("active")}/${maxActive}`), chip("helperUpdSumQueued", count("queued"))];
+    if (count("paused")) chips.push(chip("helperUpdSumPaused", count("paused")));
+    if (count("done")) chips.push(chip("helperUpdSumDone", count("done")));
+    if (count("failed")) chips.push(chip("helperUpdSumFailed", count("failed")));
+    $("helper-upd-summary").replaceChildren(...chips);
+    $("helper-upd-paused").hidden = !paused;
+    $("helper-upd-resume").hidden = !paused;
+    $("helper-upd-cancel-all").hidden = open.length === 0;
+    $("helper-upd-empty").hidden = items.length > 0;
+    $("helper-upd-rows").replaceChildren(...items.map((u) => el("tr", {},
+      el("td", { class: "num" }, u.number),
+      el("td", { class: "mono", title: u.sha256 }, `${u.version} · ${shortSha(u.sha256)}`),
+      el("td", {}, badge(HELPER_UPD[u.state] || "idle", helperUpdateLabel(u))),
+      el("td", { class: "helper-upd-details" }, helperUpdateDetails(u) || dash()),
+      el("td", {}, ago(u.updatedAt)),
+      el("td", {}, HELPER_UPD_OPEN.includes(u.state) ? el("button", { class: "danger small", onclick: oneAtATime(async () => {
+        if (await confirmDialog(t("helperUpdCancelConfirm", { number: u.number, version: u.version }), { okText: t("helperUpdCancel") })) {
+          await helperUpdAct(`/helper/updates/${encodeURIComponent(u.id)}/cancel`);
+        }
+      }) }, t("helperUpdCancel")) : null))));
+  }
+
+  function renderHelperUpdates() {
+    if (!hu || view !== "machines") return;
+    renderHelperBuilds();
+    renderHelperQueue();
+  }
+
+  async function loadHelperUpdates() {
+    try {
+      const [builds, updates] = await Promise.all([api("/helper/builds"), api("/helper/updates")]);
+      $("helper-upd-error").hidden = true;
+      const json = JSON.stringify([builds, updates]);
+      if (json !== huJson) {
+        hu = { builds, updates };
+        huJson = json;
+        renderHelperUpdates();
+      }
+    } catch (error) {
+      if (error.message === "unauthorized") return;
+      $("helper-upd-error").textContent = t("loadFailed", { error: error.message });
+      $("helper-upd-error").hidden = false;
+    }
+  }
+
+  // После действия — заново и очередь, и строки ПК (метка поручения в столбце «Помощник»).
+  async function reloadHelperUpdates() {
+    huJson = "";
+    dataJson = "";
+    await Promise.all([loadHelperUpdates(), load()]);
+  }
+
+  // Текст ошибки API обновления: 400 — поле и причина переводом (helperUpdBad_<поле>_<причина>), 404 — поручение уже
+  // завершено.
+  function helperUpdError(error) {
+    if (error.status === 404) return t("helperUpdGone");
+    const key = `helperUpdBad_${error.details?.field}_${error.reason}`;
+    return t(key) !== key ? t(key) : error.message;
+  }
+
+  async function helperUpdAct(path) {
+    try {
+      await api(path, { method: "POST" });
+    } catch (error) {
+      await alertDialog(helperUpdError(error));
+    }
+    await reloadHelperUpdates();
+  }
+
+  // Запуск: по номерам из поля мест или всем гибридам (поле мест тогда не учитывается). Ответ — сколько ПК в очереди
+  // (или на паузе) и кому отказано, сгруппировано по причине.
+  async function launchHelperUpdate(allHybrids) {
+    const result = $("helper-upd-result");
+    const build = hu?.builds.find((b) => b.file === $("helper-upd-file").value && b.updatable);
+    result.hidden = false;
+    if (!build) {
+      result.className = "error small";
+      result.textContent = t("helperUpdNoBuild");
+      return;
+    }
+    let body = { file: build.file, allHybrids: true };
+    if (!allHybrids) {
+      const parsed = parseSeats($("helper-upd-seats").value);
+      if (parsed.error) {
+        result.className = "error small";
+        result.textContent = parsed.error;
+        return;
+      }
+      body = { file: build.file, numbers: parsed.numbers };
+    } else if (!(await confirmDialog(t("helperUpdAllConfirm", { version: build.version, max: hu.updates.maxActive }), { okText: t("helperUpdAllHybrids") }))) {
+      result.hidden = true;
+      return;
+    }
+    $("helper-upd-start").disabled = true;
+    $("helper-upd-all").disabled = true;
+    try {
+      const done = await api("/helper/updates", { method: "POST", body: JSON.stringify(body) });
+      const text = [done.queued.length
+        ? t(done.paused ? "helperUpdLaunchedPaused" : "helperUpdLaunched", { version: build.version, n: done.queued.length, seats: formatSeats([...done.queued].sort((a, b) => a - b)) })
+        : t("helperUpdLaunchedNone")];
+      const refused = new Map();
+      for (const r of done.refused) refused.set(r.reason, [...(refused.get(r.reason) ?? []), r.number]);
+      for (const [reason, numbers] of refused) {
+        const key = `helperUpdRefused_${reason}`;
+        text.push(t("helperUpdRefusedLine", { reason: t(key) === key ? reason : t(key), seats: formatSeats(numbers.sort((a, b) => a - b)) }));
+      }
+      result.className = done.refused.length || done.paused || !done.queued.length ? "small warn-text" : "small ok-text";
+      result.textContent = text.join(" ");
+      if (!allHybrids && !done.refused.length) $("helper-upd-seats").value = "";
+    } catch (error) {
+      result.className = "error small";
+      result.textContent = helperUpdError(error);
+    } finally {
+      // Сборка 1.8.0+ была; если её убрали из tools, кнопки выключит перерисовка списка сборок.
+      $("helper-upd-start").disabled = false;
+      $("helper-upd-all").disabled = false;
+      huBuildsKey = "";
+    }
+    await reloadHelperUpdates();
   }
 
   function render() {
@@ -1569,6 +1768,7 @@
     $("library").hidden = view !== "library";
     $("diskless").hidden = view !== "diskless";
     $("saves").hidden = view !== "saves";
+    if (view === "machines") huJson = "";
     if (view === "diskless") dlJson = "";
     if (view === "images") imgsJson = "";
     if (view === "library") libJson = "";
@@ -1584,7 +1784,10 @@
   }
 
   function refresh() {
-    if (view === "machines") load();
+    if (view === "machines") {
+      load();
+      loadHelperUpdates();
+    }
     if (view === "images") loadImages();
     if (view === "library") loadLibrary();
     if (view === "diskless") loadDiskless();
@@ -1744,6 +1947,8 @@
       applyStaticTexts();
       dataJson = "";
       render();
+      huBuildsKey = "";
+      renderHelperUpdates();
       renderNetwork();
       renderCapacity();
       imgsJson = "";
@@ -1771,6 +1976,18 @@
     $("zone-assign").addEventListener("submit", assignSeats);
     $("zone-rename-form").addEventListener("submit", saveZoneRename);
     $("zone-rename-cancel").addEventListener("click", () => $("zone-rename").close());
+    // Форма не уходит со страницы и при повторном Enter, пока идёт запуск (oneAtATime тогда обработчик не вызывает).
+    const launchByNumbers = oneAtATime(() => launchHelperUpdate(false));
+    $("helper-upd-launch").addEventListener("submit", (event) => {
+      event.preventDefault();
+      launchByNumbers();
+    });
+    $("helper-upd-all").addEventListener("click", oneAtATime(() => launchHelperUpdate(true)));
+    $("helper-upd-resume").addEventListener("click", oneAtATime(() => helperUpdAct("/helper/updates/resume")));
+    $("helper-upd-cancel-all").addEventListener("click", oneAtATime(async () => {
+      const open = hu?.updates.items.filter((u) => HELPER_UPD_OPEN.includes(u.state)).length ?? 0;
+      if (await confirmDialog(t("helperUpdCancelAllConfirm", { n: open }), { okText: t("helperUpdCancelAll"), danger: true })) await helperUpdAct("/helper/updates/cancel");
+    }));
     // Подсказка на «Бездиске» ведёт к общей форме уже с режимом «Бездиск» (по умолчанию там «Гибрид») и сразу к полю MAC.
     // pushState не шлёт hashchange — экран переключается один раз, здесь.
     $("dl-add-go").addEventListener("click", (event) => {
