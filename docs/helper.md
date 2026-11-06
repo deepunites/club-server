@@ -481,6 +481,13 @@ Start-Service ClubDisklessHelper
    новый (1.8.0); затем на остальных гибридах — последний ручной обход той же строкой
    `irm http://192.168.1.201:5080/pxe/v1/files/tools/update-helper-net.ps1 | iex`. Дальше — кнопкой. Откат гибрида —
    `irm http://192.168.1.201:5080/pxe/v1/files/tools/update-helper-net-1.7.0.ps1 | iex`.
+   **Служба Steam в том же обходе.** После `install-helper.ps1` скрипт ставит службу «Steam Client Service»: игрок —
+   обычный пользователь, без неё Steam при обновлении игры (PC-23, Dota 2) просит пароль администратора. Способ Valve
+   (help.steampowered.com, FAQ 22C0-03D0-AE4B-04E8, «Repair the Steam Service»): `G:\Steam\bin\SteamService.exe /repair`
+   от администратора при закрытом Steam, ждёт до 5 мин. Затем PASS — служба есть (состояние, тип запуска и путь из
+   `Win32_Service`), иначе WARN. Нет G: или Steam в библиотеке — WARN и пропуск; запущен `steam.exe` (сеанс игрока) —
+   WARN «close Steam and run again»: закрыть Steam и повторить строку. Сбой этого шага установку помощника не
+   отменяет. На гибриде без службы `shell-preflight.ps1` даёт WARN с этой строкой.
 6. **`HelperUpdates__MaxActive`** — снова по умолчанию (3): убрать переменную из окружения сервера, перезапуск сервера.
 7. **Бездиск** (эталон с шеллом — `docs/shell-install.md`, «Каждый следующий сеанс мастера»): ПК-мастер в режиме
    мастера, Shift при загрузке, вход администратором эталона; 1.8.0 — по сети строкой из п. 5 (позже — кнопкой: мастер в

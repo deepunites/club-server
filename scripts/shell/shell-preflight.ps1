@@ -378,7 +378,7 @@ if (Test-Path -LiteralPath 'G:\Steam\steam.exe') { Write-Pass 'Steam: G:\Steam\s
 elseif ($Golden) { Write-Warn 'G:\Steam\steam.exe not found in this master session (the kassa catalog and agent.json use it)' 'check G: on a seat after the publish' }
 else { Write-Fail 'G:\Steam\steam.exe not found (the kassa catalog and agent.json use it)' 'check G: (Online Games library)' }
 if (Get-Service -Name 'Steam Client Service' -ErrorAction SilentlyContinue) { Write-Pass 'service "Steam Client Service" exists (Steam for a standard user)' }
-else { Write-Warn 'service "Steam Client Service" is missing: Steam as a standard user cannot update games' 'start G:\Steam\steam.exe once as Club (it installs the service)' }
+else { Write-Warn 'service "Steam Client Service" is missing: Steam as a standard user cannot update games' 'hybrid: as admin run irm http://192.168.1.201:5080/pxe/v1/files/tools/update-helper-net.ps1 | iex with Steam closed (it runs G:\Steam\bin\SteamService.exe /repair)' }
 
 # Игрок в киоске — обычный пользователь: игре, которая пишет в свою папку (конфиги, обновления), нужна запись.
 foreach ($path in @('G:\Steam', 'G:\Steam\steamapps')) {
