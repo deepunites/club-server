@@ -4,7 +4,7 @@
 #   sh club-backup.sh <club-server VM zvol>   datasets + snapshot and replication tasks, e.g. ssd/clubserver-3agcve
 #   sh club-backup.sh --quotas                only the hdd/backup quotas below, on datasets that exist (no tasks)
 # Layout since 2026-10-26 (docs/install/club.md): pool «backup» (mirror 2 x 240 GB SSD) holds the copies of the
-# club-server VM and of the diskless golden; pool «hdd» (RAIDZ1 3 x 1 TB) holds the copies of the games library G: and of
+# club-server VM, of the diskless golden and (since 2026-11-06) of the player saves; pool «hdd» (RAIDZ1 3 x 1 TB) holds the copies of the games library G: and of
 # the hybrid images, and the second games library H: itself (hdd/club; not backed up: its games can be downloaded again,
 # its lib-* versions give rollback). Only TrueNAS-owned bkp-* snapshot chains (and the golden's img-* versions, by name)
 # are replicated, non-recursively, so the club server's own lib-* and @clean snapshots and its per-seat clones are never
@@ -13,6 +13,7 @@
 #   games/club/images        weekly Mon 05:30, 2 weeks on games, 3 weeks on hdd          -> hdd/backup/images/club-images
 #   <VM zvol>                daily 04:30,      7 days on ssd,    14 days + Sundays 8 weeks -> backup/vm/clubserver
 #   ssd/club/diskless/win11  img-* (versions the server publishes), daily 05:15, kept as on ssd -> backup/diskless/win11
+#   games/club/saves         daily 04:45,      7 days on games,  14 days + Sundays 8 weeks -> backup/saves/club-saves
 # Not backed up: games/club/seats, games/club/published, ssd/club/diskless/seats (rebuilt by the server), ssd/iso, hdd/club.
 # Quotas on hdd, GiB (split confirmed by the owner 2026-10-26: H: gets 1 TiB, the copies the rest): hdd/backup 720
 # (games 560, images 160) next to hdd/club 1024 (H:) = 1744 of ~1790 (1.75 TiB) in the pool, so copies and H: never take
@@ -85,6 +86,7 @@ mk hdd/backup/games "$GAMES_QUOTA"
 mk hdd/backup/images "$IMAGES_QUOTA"
 mk backup/vm
 mk backup/diskless
+mk backup/saves
 
 # Games library master G:: weekly.
 LIB=$(task_id games/club/lib)
@@ -138,6 +140,24 @@ if exists ssd/club/diskless/win11; then
         R=$(midclt call replication.create '{"name":"diskless golden to backup","direction":"PUSH","transport":"LOCAL","source_datasets":["ssd/club/diskless/win11"],"target_dataset":"backup/diskless/win11","recursive":false,"name_regex":"img-.*","auto":true,"schedule":{"minute":"15","hour":"5","dom":"*","month":"*","dow":"*"},"retention_policy":"SOURCE","readonly":"SET","properties":true,"properties_override":{"volmode":"none"},"enabled":true}' | json_field 'v["id"]')
         echo "replication diskless golden to backup: id $R"
     fi
+fi
+
+# Player game saves (the club server's /srv/club/saves, spec 2026-11-05-player-saves-design.md 3.1): daily. The pool
+# «games» has no redundancy, so this replica is the only other copy. The saves change at every session end; a
+# crash-consistent snapshot is enough (ext4 journal, the server swaps a player's folder by rename).
+if exists games/club/saves; then
+    SAV=$(task_id games/club/saves)
+    if [ -z "$SAV" ]; then
+        SAV=$(midclt call pool.snapshottask.create '{"dataset":"games/club/saves","recursive":false,"naming_schema":"bkp-%Y-%m-%d_%H-%M","lifetime_value":7,"lifetime_unit":"DAY","allow_empty":true,"enabled":true,"schedule":{"minute":"45","hour":"4","dom":"*","month":"*","dow":"*","begin":"04:45","end":"04:59"}}' | json_field 'v["id"]')
+        echo "snapshot task games/club/saves: id $SAV"
+    fi
+    R=$(repl_id "player saves to backup")
+    if [ -z "$R" ]; then
+        R=$(midclt call replication.create "{\"name\":\"player saves to backup\",\"direction\":\"PUSH\",\"transport\":\"LOCAL\",\"source_datasets\":[\"games/club/saves\"],\"target_dataset\":\"backup/saves/club-saves\",\"recursive\":false,\"periodic_snapshot_tasks\":[$SAV],\"auto\":true,\"retention_policy\":\"CUSTOM\",\"lifetime_value\":14,\"lifetime_unit\":\"DAY\",\"lifetimes\":[{\"schedule\":{\"minute\":\"*\",\"hour\":\"*\",\"dom\":\"*\",\"month\":\"*\",\"dow\":\"7\"},\"lifetime_value\":8,\"lifetime_unit\":\"WEEK\"}],\"hold_pending_snapshots\":true,\"readonly\":\"SET\",\"properties\":true,\"properties_override\":{\"volmode\":\"none\"},\"allow_from_scratch\":false,\"encryption\":false,\"retries\":5,\"enabled\":true}" | json_field 'v["id"]')
+        echo "replication player saves to backup: id $R"
+    fi
+else
+    echo "no games/club/saves (player saves volume): its backup tasks come with a run after it is created"
 fi
 
 echo "--- tasks"
