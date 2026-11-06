@@ -14,8 +14,8 @@
 #>
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # прогресс-бар Invoke-WebRequest в 5.1 замедляет скачивание в разы
-$Version = '1.7.0'
-$ExeSha256 = '41da96a0b0721b22bb5f5e1898c927f08c4856968ee059a0c40b3d2b54a30e23'
+$Version = '1.8.0'
+$ExeSha256 = '05a73a8f0cb1717040c7f64fe1c94104fbdf501b9b196f90659c56d0c33b31e1'
 $CaSha256 = '69E23A1433F5A1ECF23FDC5D5B6B21657385DAF24A043B0A21EE891F34648830'
 $Base = 'http://192.168.1.201:5080/pxe/v1/files/tools'
 

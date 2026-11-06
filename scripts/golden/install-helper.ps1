@@ -1,13 +1,14 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Ставит помощник бездиска (ClubDisklessHelper 1.7.0) в эталон или обновляет его на гибриде: служба Windows, которая
+    Ставит помощник бездиска (ClubDisklessHelper 1.8.0) в эталон или обновляет его на гибриде: служба Windows, которая
     подключает диски игр G: («Online Games») и H: («Offline Games», с 1.6.0), правку библиотек и сообщает серверу клуба
-    состояние ПК; с 1.7.0 — сохранения игр игрока по каналу шелла (docs/helper.md).
+    состояние ПК; с 1.7.0 — сохранения игр игрока по каналу шелла; с 1.8.0 — самообновление по кнопке в панели
+    (docs/helper.md, «Самообновление»).
 
 .DESCRIPTION
     Запускать в эталоне в режиме мастера, PowerShell от администратора. Рядом со скриптом (флешка) — три файла:
-      ClubDisklessHelper.exe — сборка 1.7.0, SHA256 сверяется;
+      ClubDisklessHelper.exe — сборка 1.8.0, SHA256 сверяется;
       helper.json            — адрес сервера и ключ клуба (секрет: после установки удаляется с флешки);
       club-ca.pem            — CA клуба, которым подписан сертификат сервера.
     Помощник 1.5.0 привязывает регистрацию к HWID платы: запуск на мастере безопасен — места с другим HWID
@@ -15,8 +16,9 @@
 
     Гибрид — обновление на месте: та же флешка (helper.json не нужен — остаётся установленный), вход под администратором
     клуба (Shift при входе — мимо киоска). G: и H: при перезапуске службы не сбрасываются и не отключаются. Только G: на
-    ПК — в helper.json "Libraries": []. Откат — install-helper.ps1 из git f79e0d5 и exe 1.6.0 (в tools сервера —
-    ClubDisklessHelper-1.6.0.exe): G: и H: как прежде, канала сохранений нет.
+    ПК — в helper.json "Libraries": []. Откат — install-helper.ps1 из git f10ccb6 и exe 1.7.0 (в tools сервера —
+    ClubDisklessHelper-1.7.0.exe): всё как прежде, без самообновления. Хвосты самообновления (.new, .old, .failed,
+    update.json, update-failed.json, helper-build.json) скрипт удаляет: ручная установка заменяет начатое обновление.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File E:\club\install-helper.ps1
@@ -30,9 +32,9 @@ $ErrorActionPreference = 'Continue'
 # $PSScriptRoot в значении параметра по умолчанию пуст при запуске powershell.exe -File (PS 5.1) — берём папку скрипта здесь.
 if (-not $Source) { $Source = Split-Path -Parent $MyInvocation.MyCommand.Path }
 
-# Один exe 1.7.0 — для эталона, гибридов и образа гибрида h1f (h1e — с 1.6.0; patch-hybrid-wim.sh сверяет exe с этой строкой).
-$ExeSha256 = '41da96a0b0721b22bb5f5e1898c927f08c4856968ee059a0c40b3d2b54a30e23'   # 1.7.0+f79e0d5 (.NET 10.0.13)
-$ExeVersion = '1.7.0'
+# Один exe 1.8.0 — для эталона, гибридов и образа гибрида h1f (h1e — с 1.6.0; patch-hybrid-wim.sh сверяет exe с этой строкой).
+$ExeSha256 = '05a73a8f0cb1717040c7f64fe1c94104fbdf501b9b196f90659c56d0c33b31e1'   # 1.8.0+e77f0ad (.NET 10.0.13)
+$ExeVersion = '1.8.0'
 $ServiceName = 'ClubDisklessHelper'
 $InstallDir = "$env:ProgramFiles\ClubDiskless"
 $StateDir = "$env:ProgramData\ClubDiskless"
@@ -102,6 +104,12 @@ try {
         Write-Line 'служба остановлена для обновления'
     }
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+    # Хвосты самообновления (1.8.0): ручная установка заменяет начатое обновление, страж при старте ничего не откатывает.
+    $tails = @('.new', '.old', '.failed' | ForEach-Object { Join-Path $InstallDir "ClubDisklessHelper.exe$_" }) +
+        @('update.json', 'update.json.tmp', 'update-failed.json', 'helper-build.json' | ForEach-Object { Join-Path $StateDir $_ })
+    foreach ($t in $tails) {
+        if (Test-Path -LiteralPath $t) { Remove-Item -LiteralPath $t -Force -ErrorAction Stop; Write-Line "удалён $t" }
+    }
     Copy-Item -LiteralPath $exe -Destination $InstallDir -Force -ErrorAction Stop
     Copy-Item -LiteralPath $ca -Destination $stateCa -Force -ErrorAction Stop
     if ($haveJson) {
