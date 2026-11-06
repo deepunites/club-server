@@ -2,7 +2,8 @@ namespace Club.Helper.Core.Updates;
 
 /// <summary>
 /// Служба Windows помощника для самообновления (spec 2026-11-06, п. 4.1, 4.3). Реализация — в службе
-/// (<c>WindowsServiceControl</c>: <c>sc.exe qfailure</c>/<c>sc.exe failure</c>); в тестах — подделка.
+/// (<c>WindowsServiceControl</c>: проверка — значение <c>FailureActions</c> службы в реестре, <see cref="ServiceRecovery.Matches"/>;
+/// установка — <c>sc.exe failure</c>); в тестах — подделка.
 /// </summary>
 public interface IServiceControl
 {
