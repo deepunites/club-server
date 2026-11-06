@@ -14,7 +14,8 @@
     После install-helper.ps1 — служба «Steam Client Service» для Steam из библиотеки G: (G:\Steam): игрок — обычный
     пользователь, без службы Steam при обновлении игры просит пароль администратора (UAC). Ставит её
     G:\Steam\bin\SteamService.exe /repair — способ Valve (help.steampowered.com, FAQ 22C0-03D0-AE4B-04E8, «Repair the
-    Steam Service»: сначала выйти из Steam, нужны права администратора, идёт несколько минут). Этот шаг только
+    Steam Service»: сначала выйти из Steam, нужны права администратора, идёт несколько минут); exe — только с
+    действующей подписью Valve (G: игрок может менять). Этот шаг только
     предупреждает (WARN) и никогда не роняет скрипт: помощник от него не зависит.
 #>
 $ErrorActionPreference = 'Stop'
@@ -54,14 +55,13 @@ if ($LASTEXITCODE) { Write-Host "install-helper.ps1 exited with code $LASTEXITCO
 
 # Служба Steam: G:\Steam\bin\SteamService.exe /repair (Valve). Только WARN, без исключений наружу.
 function Install-SteamClientService {
-    $steamDir = 'G:\Steam'
-    $svcExe = Join-Path $steamDir 'bin\SteamService.exe'
+    $svcExe = 'G:\Steam\bin\SteamService.exe'   # строкой, не Join-Path: в 5.1 Join-Path падает, если диска G: нет
     $timeoutSec = 300
     if (-not (Test-Path -LiteralPath 'G:\')) {
         Write-Host 'WARN Steam Client Service: G: is not mounted (no Online Games library session), skipped' -ForegroundColor Yellow
         return
     }
-    if (-not (Test-Path -LiteralPath (Join-Path $steamDir 'steam.exe'))) {
+    if (-not (Test-Path -LiteralPath 'G:\Steam\steam.exe')) {
         Write-Host 'WARN Steam Client Service: G:\Steam\steam.exe not found (no Steam in the G: library), skipped' -ForegroundColor Yellow
         return
     }
@@ -75,6 +75,18 @@ function Install-SteamClientService {
         Write-Host ("WARN Steam Client Service: steam.exe is running (PID {0}): Valve's repair needs Steam closed - close Steam and run again" -f (($running | ForEach-Object { $_.Id }) -join ', ')) -ForegroundColor Yellow
         return
     }
+    # G: — диск места, игрок может в него писать: запускать от администратора только exe с действующей подписью Valve
+    # (подписант сейчас «Valve Corp.», у прежних сборок «Valve Corporation»). Проверка — прямо перед запуском.
+    $sig = Get-AuthenticodeSignature -LiteralPath $svcExe
+    $signer = ''
+    if ($sig.SignerCertificate) {
+        $signer = $sig.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
+    }
+    if ([string]$sig.Status -ne 'Valid' -or @('Valve Corp.', 'Valve Corporation') -notcontains $signer) {
+        Write-Host "WARN Steam Client Service: $svcExe signature is not a valid Valve signature (Status=$($sig.Status), Signer='$signer'), not run as admin; restore Steam in the G: library" -ForegroundColor Yellow
+        return
+    }
+    Write-Host "Steam Client Service: $svcExe signed by $signer"
     Write-Host "Steam Client Service: $svcExe /repair (up to $timeoutSec s)"
     $proc = Start-Process -FilePath $svcExe -ArgumentList '/repair' -PassThru -WindowStyle Hidden
     $null = $proc.Handle   # без этого в 5.1 ExitCode после WaitForExit бывает пустым
@@ -83,7 +95,7 @@ function Install-SteamClientService {
     } else {
         Write-Host "SteamService.exe /repair exited with code $($proc.ExitCode)"
     }
-    $svc = @(Get-CimInstance -ClassName Win32_Service -Filter "Name='Steam Client Service' OR DisplayName='Steam Client Service'" -ErrorAction SilentlyContinue)
+    $svc = @(Get-CimInstance -ClassName Win32_Service -Filter "Name='Steam Client Service' OR DisplayName='Steam Client Service'" -ErrorAction SilentlyContinue | Where-Object { $_ })
     if ($svc.Count -gt 0) {
         Write-Host ("PASS service ""Steam Client Service"" exists: Status={0}, StartType={1}, Path={2}" -f $svc[0].State, $svc[0].StartMode, $svc[0].PathName) -ForegroundColor Green
     } else {

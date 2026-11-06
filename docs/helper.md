@@ -484,7 +484,8 @@ Start-Service ClubDisklessHelper
    **Служба Steam в том же обходе.** После `install-helper.ps1` скрипт ставит службу «Steam Client Service»: игрок —
    обычный пользователь, без неё Steam при обновлении игры (PC-23, Dota 2) просит пароль администратора. Способ Valve
    (help.steampowered.com, FAQ 22C0-03D0-AE4B-04E8, «Repair the Steam Service»): `G:\Steam\bin\SteamService.exe /repair`
-   от администратора при закрытом Steam, ждёт до 5 мин. Затем PASS — служба есть (состояние, тип запуска и путь из
+   от администратора при закрытом Steam, ждёт до 5 мин; exe запускается, только если у него действующая подпись Valve
+   (`Valve Corp.`/`Valve Corporation`): G: игрок может менять, иначе WARN и пропуск. Затем PASS — служба есть (состояние, тип запуска и путь из
    `Win32_Service`), иначе WARN. Нет G: или Steam в библиотеке — WARN и пропуск; запущен `steam.exe` (сеанс игрока) —
    WARN «close Steam and run again»: закрыть Steam и повторить строку. Сбой этого шага установку помощника не
    отменяет. На гибриде без службы `shell-preflight.ps1` даёт WARN с этой строкой.
