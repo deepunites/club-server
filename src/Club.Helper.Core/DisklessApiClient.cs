@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -23,11 +24,29 @@ public sealed record MountedVolume(
 /// <summary>
 /// Отчёт о ПК. <paramref name="Hostname"/> (1.5.2) — текущее имя Windows в каждом отчёте: гибрид регистрируется в
 /// specialize, до переименования ПК, а повторной регистрации нет. Старый сервер поле пропускает.
+/// <paramref name="HelperBuild"/> и <paramref name="HelperUpdate"/> (1.8.0, только отчёт G:) — SHA256 своего exe строчными и
+/// ход поручения самообновления; <c>null</c> не передаётся, провод старых помощников не меняется.
 /// </summary>
 public sealed record MachineStatus(
     string HelperVersion, DateTimeOffset? BootTime, MountedVolume Volume, IReadOnlyList<string>? DhcpServers = null,
     string? ImageVersion = null, SystemDiskFacts? SystemDisk = null, SecureBootFacts? SecureBoot = null,
-    string? InitiatorIqn = null, MasterReport? Master = null, string? Hostname = null);
+    string? InitiatorIqn = null, MasterReport? Master = null, string? Hostname = null,
+    string? HelperBuild = null, HelperUpdateReport? HelperUpdate = null);
+
+/// <summary>
+/// Поручение самообновления в ответе на отчёт G: (1.8.0, spec 2026-11-06, п. 3.4): поставить сборку <paramref name="Version"/>
+/// с этим SHA256 (строчными) и размером. <paramref name="Path"/> — относительный путь скачивания на сервере клуба,
+/// <c>pxe/v1/files/tools/ClubDisklessHelper-X.Y.Z.exe</c>; правдоподобие поручения проверяет помощник, а не разбор ответа.
+/// </summary>
+public sealed record HelperUpdateOffer(Guid Id, string Version, string Sha256, long Size, string Path);
+
+/// <summary>
+/// Ход поручения самообновления в отчёте G: (1.8.0): <paramref name="Id"/> — id поручения из <see cref="HelperUpdateOffer"/>;
+/// <paramref name="State"/> — <c>downloading</c>, <c>waiting</c> (с <paramref name="Reason"/>: <c>session</c>,
+/// <c>command</c>, <c>master</c>), <c>applying</c>, <c>confirming</c>, <c>confirmed</c>, <c>failed</c> (с
+/// <paramref name="Error"/> и текстом <paramref name="Message"/>).
+/// </summary>
+public sealed record HelperUpdateReport(string Id, string State, string? Reason = null, string? Error = null, string? Message = null);
 
 public sealed record MasterAssignment(string TargetIqn, string Portal, string ChapUser, string ChapSecret, string DriveLetter);
 
@@ -36,9 +55,12 @@ public sealed record MasterReport(string State, string? TargetIqn = null, string
 /// <summary>
 /// Ответ на отчёт. <paramref name="LibraryLetterReserved"/> (сервер с Library:MasterDriveLetter = DriveLetter, помощник
 /// 1.5.1+) — буква тома библиотеки отдана мастер-тому этого ПК: <paramref name="Volume"/> нет намеренно, и том
-/// библиотеки отпускается, а не сохраняется, как при пустом ответе.
+/// библиотеки отпускается, а не сохраняется, как при пустом ответе. <paramref name="HelperUpdate"/> (сервер с
+/// самообновлением, только ответ G:) — поручение поставить другую сборку помощника; нет — поручения нет (принятый ответ
+/// без него отменяет начатое).
 /// </summary>
-public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume, MasterAssignment? Master = null, bool LibraryLetterReserved = false);
+public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment? Volume, MasterAssignment? Master = null, bool LibraryLetterReserved = false,
+    HelperUpdateOffer? HelperUpdate = null);
 
 /// <summary>
 /// Ответ на запрос назначения при старте. <paramref name="LibraryLetterReserved"/> (сервер с Library:MasterDriveLetter =
@@ -47,7 +69,9 @@ public sealed record StatusAccepted(DateTimeOffset ServerTime, VolumeAssignment?
 /// </summary>
 public sealed record BootAssignment(VolumeAssignment? Volume, bool LibraryLetterReserved = false);
 
-internal sealed record RegisterRequest(string Hwid, string Hostname, IReadOnlyList<string> MacAddresses, string HelperVersion, string? OsVersion);
+/// <summary>Регистрация; <paramref name="HelperBuild"/> (1.8.0) — SHA256 своего exe, как в отчёте G:.</summary>
+internal sealed record RegisterRequest(string Hwid, string Hostname, IReadOnlyList<string> MacAddresses, string HelperVersion, string? OsVersion,
+    string? HelperBuild = null);
 
 internal sealed record RegisterResponse(Guid MachineId, int Number, string Name, string Zone, string AccessToken, string RefreshToken, DateTimeOffset ExpiresAt, DateTimeOffset ServerTime);
 
@@ -113,9 +137,12 @@ public sealed class PendingApprovalException() : Exception("Machine is waiting f
 /// обновление и регистрация токенов — по одной (<see cref="_renewal"/>); запрос, получивший 401 со старым токеном, после
 /// чужого обновления берёт новый, а не обновляет снова.
 /// <paramref name="transfers"/> — отдельный HttpClient для архивов сохранений (attach и PUT: десятки и сотни мегабайт, свой
-/// тайм-аут); <c>null</c> — тот же <paramref name="http"/>.
+/// тайм-аут); <c>null</c> — тот же <paramref name="http"/>. <paramref name="downloads"/> (1.8.0) — HttpClient для больших
+/// файлов (сборки помощника, <see cref="DownloadAsync(string, string, long, CancellationToken)"/>): тот же адрес сервера и
+/// сертификат клуба, свой долгий тайм-аут; <c>null</c> — <paramref name="transfers"/>.
 /// </summary>
-public sealed class DisklessApiClient(HttpClient http, HelperOptions options, ICredentialStore store, IMachineIdentity identity, HttpClient? transfers = null)
+public sealed class DisklessApiClient(
+    HttpClient http, HelperOptions options, ICredentialStore store, IMachineIdentity identity, HttpClient? transfers = null, HttpClient? downloads = null)
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
@@ -128,6 +155,8 @@ public sealed class DisklessApiClient(HttpClient http, HelperOptions options, IC
     private const int BufferSize = 81920;
 
     private readonly HttpClient _transfers = transfers ?? http;
+
+    private readonly HttpClient _downloads = downloads ?? transfers ?? http;
 
     /// <summary>Загрузка, обновление и регистрация токенов — по одной на оба потока (такт и канал шелла).</summary>
     private readonly SemaphoreSlim _renewal = new(1, 1);
@@ -226,6 +255,99 @@ public sealed class DisklessApiClient(HttpClient http, HelperOptions options, IC
     {
         using var response = await SendSavesAsync(http, id => new HttpRequestMessage(HttpMethod.Delete, $"{SavesPath(id, playerId)}/lease{query}"),
             HttpCompletionOption.ResponseContentRead, ct);
+    }
+
+    /// <summary>
+    /// Скачать файл сервера клуба (1.8.0: сборка помощника, <see cref="HelperUpdateOffer.Path"/>) в
+    /// <paramref name="destination"/> через <c>downloads</c>: без токена машины (файлы <c>pxe/v1/files</c> публичны, как файлы
+    /// PXE), только по относительному пути — с адреса сервера из helper.json. Файл открывается монопольно и перезаписывается;
+    /// SHA256 считается по ходу; в конце — сброс на диск (<c>Flush(true)</c>). Возвращает SHA256 строчными (сверяет
+    /// вызывающий). Больше <paramref name="maxBytes"/> байт (по Content-Length или по ходу), сеть, тайм-аут <c>downloads</c>,
+    /// код ответа не 2xx — <see cref="ServerUnavailableException"/>; ошибка записи на диск — как есть (<see cref="IOException"/>);
+    /// при любой ошибке и отмене файл стёрт. Путь абсолютный или от корня другого хоста (<c>//…</c>) — <see cref="ArgumentException"/>,
+    /// запроса нет.
+    /// </summary>
+    public async Task<string> DownloadAsync(string relativePath, string destination, long maxBytes, CancellationToken ct)
+    {
+        if (!Uri.TryCreate(relativePath, UriKind.Relative, out var uri) || relativePath.StartsWith('/') || relativePath.StartsWith('\\'))
+        {
+            throw new ArgumentException($"Not a path on the club server: {relativePath}", nameof(relativePath));
+        }
+
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            if (_downloads.Timeout != Timeout.InfiniteTimeSpan)
+            {
+                timeout.CancelAfter(_downloads.Timeout);
+            }
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+            using var response = await ReceiveAsync(() => _downloads.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token), request, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new ServerUnavailableException($"{Describe(response)}: {(int)response.StatusCode}", status: response.StatusCode);
+            }
+
+            if (response.Content.Headers.ContentLength > maxBytes)
+            {
+                throw new ServerUnavailableException($"{Describe(response)}: {response.Content.Headers.ContentLength} bytes, more than {maxBytes}");
+            }
+
+            await using var file = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None, BufferSize, FileOptions.Asynchronous);
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            await using var body = await ReceiveAsync(() => response.Content.ReadAsStreamAsync(timeout.Token), request, ct);
+            var buffer = new byte[BufferSize];
+            long total = 0;
+            while (await ReceiveAsync(() => body.ReadAsync(buffer, timeout.Token).AsTask(), request, ct) is var read and > 0)
+            {
+                total += read;
+                if (total > maxBytes)
+                {
+                    throw new ServerUnavailableException($"{Describe(response)}: more than {maxBytes} bytes");
+                }
+
+                hash.AppendData(buffer, 0, read);
+                await file.WriteAsync(buffer.AsMemory(0, read), ct);
+            }
+
+            await file.FlushAsync(ct);
+            file.Flush(flushToDisk: true);
+            return Convert.ToHexStringLower(hash.GetHashAndReset());
+        }
+        catch
+        {
+            DeleteQuietly(destination);
+            throw;
+        }
+    }
+
+    /// <summary>Недокачанный файл — стереть; не стёрся (антивирус держит) — его сотрёт следующая загрузка, ошибка — прежняя.</summary>
+    private static void DeleteQuietly(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+        }
+    }
+
+    /// <summary>
+    /// Шаг загрузки (ответ, тело, чтение): сеть оборвалась или истёк тайм-аут <c>downloads</c> (не отмена вызывающего) —
+    /// <see cref="ServerUnavailableException"/>.
+    /// </summary>
+    private static async Task<T> ReceiveAsync<T>(Func<Task<T>> step, HttpRequestMessage request, CancellationToken ct)
+    {
+        try
+        {
+            return await step();
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or OperationCanceledException && !ct.IsCancellationRequested)
+        {
+            throw new ServerUnavailableException($"{request.Method} {request.RequestUri}: {ex.Message}", ex);
+        }
     }
 
     private static string MachinePath(Guid id, string? library) =>
@@ -520,7 +642,8 @@ public sealed class DisklessApiClient(HttpClient http, HelperOptions options, IC
         var facts = await identity.ReadAsync(ct);
         using var request = new HttpRequestMessage(HttpMethod.Post, "diskless/v1/machines/register")
         {
-            Content = JsonContent.Create(new RegisterRequest(facts.Hwid, facts.Hostname, facts.MacAddresses, options.HelperVersion, facts.OsVersion), options: Json),
+            Content = JsonContent.Create(
+                new RegisterRequest(facts.Hwid, facts.Hostname, facts.MacAddresses, options.HelperVersion, facts.OsVersion, options.HelperBuild), options: Json),
         };
         request.Headers.Add("X-Club-Key", options.ClubKey);
         using var response = await SendAsync(request, ct);

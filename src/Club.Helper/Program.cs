@@ -28,11 +28,13 @@ builder.Services.AddSingleton(_ => new HttpClient(ServerHandler(options))
     BaseAddress = new Uri(options.ServerUrl.TrimEnd('/') + "/"),
     Timeout = TimeSpan.FromSeconds(20),
 });
-// Архивы сохранений (1.7.0: attach и PUT, до сотен мегабайт) — свой HttpClient с долгим тайм-аутом; токены, отчёты и
-// остальное — через основной (20 с). Клиент API один на такт помощника и канал шелла.
+// Архивы сохранений (1.7.0: attach и PUT, до сотен мегабайт) — свой HttpClient с долгим тайм-аутом; сборки помощника
+// (1.8.0, самообновление: до 300 МБ, в фоне) — ещё один, на всю загрузку 15 минут; токены, отчёты и остальное — через
+// основной (20 с). Клиент API один на такт помощника и канал шелла.
 builder.Services.AddSingleton(services => new DisklessApiClient(
     services.GetRequiredService<HttpClient>(), options, services.GetRequiredService<ICredentialStore>(), services.GetRequiredService<IMachineIdentity>(),
-    new HttpClient(ServerHandler(options)) { BaseAddress = new Uri(options.ServerUrl.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(130) }));
+    new HttpClient(ServerHandler(options)) { BaseAddress = new Uri(options.ServerUrl.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(130) },
+    new HttpClient(ServerHandler(options)) { BaseAddress = new Uri(options.ServerUrl.TrimEnd('/') + "/"), Timeout = TimeSpan.FromMinutes(15) }));
 // Цикл G: и по циклу на библиотеку (H: — solo) над одной Windows и одним клиентом API; у каждой библиотеки свой файл
 // назначения (assignment.json, assignment.json.solo) и свои категории журнала.
 builder.Services.AddSingleton(services => HelperLoops.Create(

@@ -18,6 +18,12 @@ public sealed class HelperOptions
 
     public string HelperVersion { get; set; } = "1.0.0";
 
+    /// <summary>
+    /// SHA256 exe помощника строчными (1.8.0, <c>helperBuild</c>): в регистрации и в каждом отчёте G:, по нему сервер видит
+    /// сборку ПК и закрывает поручение самообновления. Считает служба при старте; <c>null</c> — не передаётся.
+    /// </summary>
+    public string? HelperBuild { get; set; }
+
     /// <summary>Библиотеки, кроме G:, по умолчанию (1.6.0): H: — <c>solo</c>.</summary>
     public static readonly IReadOnlyList<string> DefaultLibraries = ["solo"];
 

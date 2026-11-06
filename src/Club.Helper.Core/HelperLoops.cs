@@ -124,14 +124,20 @@ public sealed class HelperLoops(HelperLoop games, IReadOnlyList<HelperLoop> libr
     }
 
     /// <summary>
+    /// Мастер-том занят хотя бы в одном цикле (<see cref="HelperLoop.MasterBusy"/>): самообновление ждёт (<c>master</c>).
+    /// </summary>
+    public bool MasterBusy() => games.MasterBusy || libraries.Any(loop => loop.MasterBusy);
+
+    /// <summary>
     /// Циклы помощника над одной Windows и одним клиентом API. У каждой библиотеки — свои VolumeManager и MasterManager с
     /// её метками, свой файл назначения (<paramref name="cache"/> по ключу; <c>null</c> — G:) и свои категории журнала
     /// (<c>Club.Helper.Core.HelperLoop.solo</c> и т. п.; у G: — прежние). Ключ, который сервер не принял бы (см.
     /// <see cref="LibraryMarkers.IsValidKey"/>), пропускается с предупреждением: G: из-за него не останавливается.
+    /// <paramref name="updateReport"/> (1.8.0) — ход самообновления для отчёта G: (только у цикла G:).
     /// </summary>
     public static HelperLoops Create(
         DisklessApiClient api, IWindowsStorage storage, IProcessInspector processes, IMachineIdentity identity, HelperOptions options, TimeProvider clock,
-        ILoggerFactory loggers, Func<string?, IAssignmentCache> cache, ILogger? logger = null)
+        ILoggerFactory loggers, Func<string?, IAssignmentCache> cache, ILogger? logger = null, Func<HelperUpdateReport?>? updateReport = null)
     {
         logger ??= loggers.CreateLogger<HelperLoops>();
         var libraries = new List<HelperLoop>();
@@ -154,7 +160,8 @@ public sealed class HelperLoops(HelperLoop games, IReadOnlyList<HelperLoop> libr
             var key = markers.Key;
             var volumes = new VolumeManager(storage, processes, options, clock, Category<VolumeManager>(key), markers);
             var masters = new MasterManager(storage, options, clock, Category<MasterManager>(key), markers);
-            return new HelperLoop(api, volumes, cache(key), identity, options, Category<HelperLoop>(key), masters, clock, key);
+            return new HelperLoop(api, volumes, cache(key), identity, options, Category<HelperLoop>(key), masters, clock, key,
+                key is null ? updateReport : null);
         }
 
         ILogger Category<T>(string? key) => key is null ? loggers.CreateLogger<T>() : loggers.CreateLogger($"{typeof(T).FullName}.{key}");

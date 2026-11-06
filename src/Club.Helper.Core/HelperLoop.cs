@@ -51,10 +51,13 @@ public sealed class InMemoryAssignmentCache : IAssignmentCache
 /// <paramref name="masters"/> и <paramref name="cache"/> — её собственные). Такого пути на сервере нет (404: библиотека
 /// выключена или неизвестна, сервер старше 1.6.0) — цикл библиотеки засыпает на <see cref="DormantFor"/>: Windows не
 /// трогается вовсе, подключённое остаётся до перезагрузки, assignment.json библиотеки стирается.
+/// Самообновление (1.8.0): отчёт G: несёт сборку помощника (<see cref="HelperOptions.HelperBuild"/>) и ход поручения из
+/// <paramref name="updateReport"/>; отчёт библиотеки не-G: — ни того ни другого (<paramref name="updateReport"/> там не
+/// спрашивается). Последний принятый ответ — <see cref="LastAccepted"/>, их число — <see cref="AcceptedReports"/>.
 /// </summary>
 public sealed class HelperLoop(
     DisklessApiClient api, VolumeManager volumes, IAssignmentCache cache, IMachineIdentity identity, HelperOptions options, ILogger logger,
-    MasterManager? masters = null, TimeProvider? clock = null, string? library = null)
+    MasterManager? masters = null, TimeProvider? clock = null, string? library = null, Func<HelperUpdateReport?>? updateReport = null)
 {
     /// <summary>Сколько спит цикл библиотеки, которой нет на сервере (404), прежде чем спросить снова.</summary>
     public static readonly TimeSpan DormantFor = TimeSpan.FromMinutes(10);
@@ -119,6 +122,21 @@ public sealed class HelperLoop(
     public static readonly TimeSpan CachedPersonalAfter = TimeSpan.FromMinutes(3);
 
     public MountedVolume? LastReport { get; private set; }
+
+    /// <summary>
+    /// Последний ответ сервера, принятый на отчёт этого цикла (<c>null</c> — ни одного с запуска службы): у G: в нём поручение
+    /// самообновления (<see cref="StatusAccepted.HelperUpdate"/>). Отчёт не принят (сервер недоступен) — остаётся прежний.
+    /// </summary>
+    public StatusAccepted? LastAccepted { get; private set; }
+
+    /// <summary>Сколько отчётов этого цикла сервер принял с запуска службы (подтверждение новой сборки — не меньше 5 у G:).</summary>
+    public int AcceptedReports { get; private set; }
+
+    /// <summary>
+    /// Мастер-том занят на ПК: назначен этому циклу или по последнему опросу не отключён (состояние не <c>none</c>, в том
+    /// числе <c>failed</c> с буквой — правку закрыли, а на томе открыты файлы). Самообновление тогда ждёт (<c>master</c>).
+    /// </summary>
+    public bool MasterBusy => _master is not null || LastMasterReport is { State: not "none" };
 
     /// <summary>Ключ библиотеки этого цикла; <c>null</c> — G:.</summary>
     public string? Library => library;
@@ -453,11 +471,14 @@ public sealed class HelperLoop(
             // Имя Windows — в каждом отчёте (1.5.2): регистрация гибрида была ещё в specialize, до переименования ПК. Отчёт
             // библиотеки не-G: — только её том и мастер-том: факты о ПК сервер берёт из отчёта G:.
             var facts = await identity.ReadAsync(ct);
+            // Сборка помощника и ход самообновления (1.8.0) — только в отчёте G:.
             var status = library is null
                 ? new MachineStatus(options.HelperVersion, facts.BootTime, report, facts.DhcpServers, facts.ImageVersion, facts.SystemDisk, facts.SecureBoot,
-                    facts.InitiatorIqn, master, facts.Hostname)
+                    facts.InitiatorIqn, master, facts.Hostname, options.HelperBuild, updateReport?.Invoke())
                 : new MachineStatus(options.HelperVersion, facts.BootTime, report, Master: master);
             var reply = await api.ReportStatusAsync(status, ct, library);
+            LastAccepted = reply;
+            AcceptedReports++;
             Awake();
             if (report.Contents is not null)
             {
