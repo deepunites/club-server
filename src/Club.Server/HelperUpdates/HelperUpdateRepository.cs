@@ -188,8 +188,11 @@ public sealed class HelperUpdateRepository(NpgsqlDataSource db, HelperBuilds bui
     /// Проход работника очереди (spec п. 3.3): молчащий ПК до замены и долгое ожидание — назад в очередь; после замены нет
     /// ни <c>confirmed</c>, ни отчёта с прогрессом — <c>noReturn</c>; ПК отчитывается, а прогресса нет — <c>noProgress</c>;
     /// файл сборки заменили или удалили — <c>buildChanged</c>/<c>buildMissing</c>. Любая ошибка — пауза.
+    /// <paramref name="upSince"/> — когда запущен работник (сервер): каждое правило по времени считает от
+    /// <c>GREATEST(&lt;своя отметка&gt;, upSince)</c>, время, пока сервер был выключен, не считается (ПК не мог отчитаться).
+    /// null — без этой поправки.
     /// </summary>
-    public async Task SweepAsync(DateTimeOffset now)
+    public async Task SweepAsync(DateTimeOffset now, DateTimeOffset? upSince = null)
     {
         var journal = new List<Action>();
         await InLockAsync(async (c, tx) =>
@@ -197,25 +200,31 @@ public sealed class HelperUpdateRepository(NpgsqlDataSource db, HelperBuilds bui
             var silent = now - TimeSpan.FromMinutes(options.SilentMinutes);
             var failed = new List<JobRow>();
             failed.AddRange(await FinishWhereAsync(c, tx,
-                "h.state = 'active' AND h.progress IN ('applying', 'confirming') AND COALESCE(h.progress_at, h.updated_at) < @silent",
-                States.Failed, Errors.NoReturn, new { silent }, now, journal, "no confirmed and no progress after the swap"));
+                """
+                h.state = 'active' AND h.progress IN ('applying', 'confirming')
+                AND GREATEST(COALESCE(h.progress_at, h.updated_at), CAST(@upSince AS timestamptz)) < @silent
+                """,
+                States.Failed, Errors.NoReturn, new { silent, upSince }, now, journal, "no confirmed and no progress after the swap"));
             failed.AddRange(await FinishWhereAsync(c, tx,
                 """
                 h.state = 'active' AND (h.progress IS NULL OR h.progress IN ('downloading', 'waiting'))
-                AND COALESCE(h.progress_at, h.activated_at, h.updated_at) < @silent AND m.last_seen_at >= @silent
+                AND GREATEST(COALESCE(h.progress_at, h.activated_at, h.updated_at), CAST(@upSince AS timestamptz)) < @silent
+                AND m.last_seen_at >= @silent
                 """,
-                States.Failed, Errors.NoProgress, new { silent }, now, journal, "the PC reports without progress"));
+                States.Failed, Errors.NoProgress, new { silent, upSince }, now, journal, "the PC reports without progress"));
 
+            // Молчание без отметки last_seen_at при поправке считается от upSince (GREATEST пропускает NULL).
             var requeued = (await c.QueryAsync<JobRow>(
                 $"""
                 UPDATE helper_updates h SET state = 'queued', progress = NULL, reason = NULL, progress_at = NULL, updated_at = @now
                 FROM machines m
                 WHERE m.id = h.machine_id AND h.state = 'active'
-                  AND ((h.progress IS NULL OR h.progress IN ('downloading', 'waiting')) AND (m.last_seen_at IS NULL OR m.last_seen_at < @silent)
-                       OR h.progress = 'waiting' AND h.updated_at < @waiting)
+                  AND ((h.progress IS NULL OR h.progress IN ('downloading', 'waiting'))
+                       AND COALESCE(GREATEST(m.last_seen_at, CAST(@upSince AS timestamptz)) < @silent, true)
+                       OR h.progress = 'waiting' AND GREATEST(h.updated_at, CAST(@upSince AS timestamptz)) < @waiting)
                 RETURNING {RowColumns}
                 """,
-                new { now, silent, waiting = now - TimeSpan.FromMinutes(options.WaitingMinutes) }, tx)).ToList();
+                new { now, silent, upSince, waiting = now - TimeSpan.FromMinutes(options.WaitingMinutes) }, tx)).ToList();
             foreach (var job in requeued)
             {
                 Log(journal, job, "requeued (the PC is silent or waits too long)");
@@ -345,7 +354,8 @@ public sealed class HelperUpdateRepository(NpgsqlDataSource db, HelperBuilds bui
 
     /// <summary>
     /// Отчёт помощника о поручении (шаг 2). true — ошибка, ставящая очередь на паузу. Поручение ищется по <c>id</c> только
-    /// среди поручений этого ПК; по отменённому за сутки поручению записывается только ошибка.
+    /// среди поручений этого ПК; по отменённому за сутки поручению записывается только ошибка; <c>confirmed</c> по
+    /// завершённому за сутки с <c>noReturn</c> — «готово» без снятия паузы.
     /// </summary>
     private async Task<bool> ApplyReportAsync(NpgsqlConnection c, NpgsqlTransaction tx, Guid machineId, int number, HelperUpdateReport report, DateTimeOffset now, List<Action> journal)
     {
@@ -391,6 +401,17 @@ public sealed class HelperUpdateRepository(NpgsqlDataSource db, HelperBuilds bui
                 Log(journal, job, $"cancelled, the helper reports {error ?? "an error"}");
             }
 
+            return false;
+        }
+
+        if (job is { State: States.Failed, Error: Errors.NoReturn } && report.State == Progress.Confirmed && job.FinishedAt > now - TimeSpan.FromDays(1))
+        {
+            // Новая сборка вернулась позже, чем ждал работник (ПК долго грузился, сеть): она работает — «готово». Пауза
+            // остаётся: её снимает администратор («Продолжить»).
+            await c.ExecuteAsync(
+                "UPDATE helper_updates SET state = 'done', error = NULL, message = NULL, finished_at = @now, updated_at = @now WHERE id = @id",
+                new { id, now }, tx);
+            Log(journal, job, "done: confirmed after noReturn");
             return false;
         }
 

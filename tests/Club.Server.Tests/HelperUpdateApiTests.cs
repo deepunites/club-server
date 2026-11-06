@@ -7,6 +7,8 @@ using Club.Server.Data;
 using Club.Server.HelperUpdates;
 using Club.TestSupport;
 using Dapper;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 using static Club.Server.HelperUpdates.HelperUpdateCodes;
@@ -225,13 +227,15 @@ public sealed class HelperUpdateApiTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Работник очереди включён, как на сервере клуба (зарегистрирован в Program.cs, проход раз в WorkerIntervalSec): ПК с
-    /// активным поручением молчит 10 минут — поручение снова в очереди без участия теста.
+    /// Работник очереди включён, как на сервере клуба (зарегистрирован в Program.cs, проход раз в WorkerIntervalSec), часы
+    /// сервера — свои. Молчание ПК считается от запуска работника: ПК молчал 20 минут до запуска сервера — поручение остаётся
+    /// активным; через 10 минут по часам сервера без отчётов — снова в очереди без участия теста.
     /// </summary>
     [Fact]
-    public async Task Worker_RequeuesActiveOfSilentPc()
+    public async Task Worker_MeasuresFromItsStart_ThenRequeuesSilentPc()
     {
-        var server = new ServerFixture();
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        var server = new ClockFixture(clock);
         server.Settings["HelperUpdates:ToolsDir"] = _tools;
         server.Settings["HelperUpdates:RunWorker"] = "true";
         server.Settings["HelperUpdates:WorkerIntervalSec"] = "1";
@@ -241,16 +245,24 @@ public sealed class HelperUpdateApiTests : IAsyncLifetime
             var machines = server.Services.GetRequiredService<MachineRepository>();
             var queue = server.Services.GetRequiredService<HelperUpdateRepository>();
             var pc = await machines.CreateAsync(new MachineRegistration(Guid.NewGuid().ToString("N"), "PC-HU", [Mac()], "10.0.0.7", "1.8.0", null), approved: true);
-            Assert.Equal([pc.Number], (await queue.LaunchAsync(Build181, [pc.Number], false, "panel", DateTimeOffset.UtcNow)).Queued);
-            Assert.NotNull(await queue.OnReportAsync(pc.Id, "1.8.0", null, null, DateTimeOffset.UtcNow));
+            Assert.Equal([pc.Number], (await queue.LaunchAsync(Build181, [pc.Number], false, "panel", clock.GetUtcNow())).Queued);
+            Assert.NotNull(await queue.OnReportAsync(pc.Id, "1.8.0", null, null, clock.GetUtcNow()));
 
             await using var c = await server.Services.GetRequiredService<NpgsqlDataSource>().OpenConnectionAsync();
-            await c.ExecuteAsync("UPDATE machines SET last_seen_at = now() - interval '20 minutes' WHERE id = @id", new { id = pc.Id });
+            await c.ExecuteAsync("UPDATE machines SET last_seen_at = @at WHERE id = @id", new { id = pc.Id, at = clock.GetUtcNow() - TimeSpan.FromMinutes(20) });
+            async Task<string> StateAsync() =>
+                await c.ExecuteScalarAsync<string>("SELECT state FROM helper_updates WHERE machine_id = @id", new { id = pc.Id }) ?? "";
+
+            // Несколько проходов: молчание до запуска работника не считается.
+            await Task.Delay(TimeSpan.FromSeconds(3));
+            Assert.Equal(States.Active, await StateAsync());
+
+            clock.Advance(TimeSpan.FromMinutes(11));
             var state = States.Active;
             for (var i = 0; i < 100 && state == States.Active; i++)
             {
                 await Task.Delay(100);
-                state = await c.ExecuteScalarAsync<string>("SELECT state FROM helper_updates WHERE machine_id = @id", new { id = pc.Id }) ?? state;
+                state = await StateAsync();
             }
 
             Assert.Equal(States.Queued, state);
@@ -258,6 +270,25 @@ public sealed class HelperUpdateApiTests : IAsyncLifetime
         finally
         {
             await ((IAsyncLifetime)server).DisposeAsync();
+        }
+    }
+
+    /// <summary>Часы сервера, которые тест переводит сам; таймеры — настоящие.</summary>
+    private sealed class ManualClock(DateTimeOffset start) : TimeProvider
+    {
+        private long _ticks = start.UtcTicks;
+
+        public override DateTimeOffset GetUtcNow() => new(Interlocked.Read(ref _ticks), TimeSpan.Zero);
+
+        public void Advance(TimeSpan by) => Interlocked.Add(ref _ticks, by.Ticks);
+    }
+
+    private sealed class ClockFixture(TimeProvider clock) : ServerFixture
+    {
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            base.ConfigureWebHost(builder);
+            builder.ConfigureTestServices(services => services.AddSingleton(clock));
         }
     }
 }

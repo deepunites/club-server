@@ -548,6 +548,130 @@ public sealed class HelperUpdateQueueTests(ServerFixture server) : IClassFixture
     }
 
     [Fact]
+    public async Task Sweep_AfterServerDowntime_NothingUntilSilentAfterStart()
+    {
+        var repo = Repo(maxActive: 1);
+        var a = await MachineAsync();
+        var b = await MachineAsync();
+        var down = T0.AddHours(-1);
+        await repo.LaunchAsync(Build181, [a.Number, b.Number], false, "panel", down);
+        var id = (await ReportAsync(repo, a, down))!.Id;
+        await ReportAsync(repo, a, down, Step(id, Progress.Applying));
+        await SeenAsync(a, down);
+
+        // Сервер был выключен час (замена шла без него) и только что запущен: старые progress_at и last_seen_at — не
+        // молчание ПК, первый проход ничего не завершает.
+        var upSince = T0.AddMinutes(-1);
+        await repo.SweepAsync(T0, upSince);
+        var job = await JobAsync(a);
+        Assert.Equal((States.Active, Progress.Applying), (job.State, job.Progress));
+        Assert.Equal(States.Queued, (await JobAsync(b)).State);
+
+        // 10 минут после запуска сервера — ещё ждём; позже без отчётов — noReturn и пауза, как обычно.
+        await repo.SweepAsync(upSince.AddMinutes(10), upSince);
+        Assert.Equal(States.Active, (await JobAsync(a)).State);
+        await repo.SweepAsync(upSince.AddMinutes(11), upSince);
+        job = await JobAsync(a);
+        Assert.Equal((States.Failed, Errors.NoReturn, upSince.AddMinutes(11)), (job.State, job.Error, job.FinishedAt));
+        Assert.Equal(States.Paused, (await JobAsync(b)).State);
+    }
+
+    [Fact]
+    public async Task Sweep_AfterServerDowntime_SilentDownloadingNotRequeuedDuringGrace()
+    {
+        var repo = Repo();
+        var a = await MachineAsync();
+        var b = await MachineAsync();
+        var down = T0.AddHours(-1);
+        await repo.LaunchAsync(Build181, [a.Number, b.Number], false, "panel", down);
+        var aid = (await ReportAsync(repo, a, down))!.Id;
+        var bid = (await ReportAsync(repo, b, down))!.Id;
+        await ReportAsync(repo, a, down, Step(aid, Progress.Downloading));
+        await ReportAsync(repo, b, down, Step(bid, Progress.Waiting, Reasons.Session));
+        await SeenAsync(a, down);
+
+        // Сервер был выключен час. a ещё не отчитался после запуска; b отчитался сразу и ждёт конца сеанса уже час, из
+        // которого сервер видел минуту.
+        var upSince = T0.AddMinutes(-1);
+        await ReportAsync(repo, b, T0, Step(bid, Progress.Waiting, Reasons.Session));
+        await SeenAsync(b, T0);
+        await repo.SweepAsync(T0, upSince);
+        Assert.Equal(States.Active, (await JobAsync(a)).State);
+        Assert.Equal(States.Active, (await JobAsync(b)).State);
+
+        // Молчание a считается от запуска сервера: через 10 минут — ещё на месте, позже — снова в очереди.
+        await ReportAsync(repo, b, upSince.AddMinutes(10), Step(bid, Progress.Waiting, Reasons.Session));
+        await SeenAsync(b, upSince.AddMinutes(10));
+        await repo.SweepAsync(upSince.AddMinutes(10), upSince);
+        Assert.Equal(States.Active, (await JobAsync(a)).State);
+        await repo.SweepAsync(upSince.AddMinutes(11), upSince);
+        var job = await JobAsync(a);
+        Assert.Equal((States.Queued, null), (job.State, job.Progress));
+
+        // Ожидание b дольше 30 минут — тоже от запуска сервера.
+        foreach (var minute in new[] { 20, 30 })
+        {
+            await ReportAsync(repo, b, upSince.AddMinutes(minute), Step(bid, Progress.Waiting, Reasons.Session));
+            await SeenAsync(b, upSince.AddMinutes(minute));
+        }
+
+        await repo.SweepAsync(upSince.AddMinutes(30), upSince);
+        Assert.Equal(States.Active, (await JobAsync(b)).State);
+        await repo.SweepAsync(upSince.AddMinutes(30).AddSeconds(1), upSince);
+        Assert.Equal(States.Queued, (await JobAsync(b)).State);
+    }
+
+    [Fact]
+    public async Task Report_ConfirmedAfterNoReturn_Done_PauseKept()
+    {
+        var log = new ListLogger();
+        var repo = Repo(maxActive: 2, log);
+        var target = Build(Build181);
+        var a = await MachineAsync();
+        var b = await MachineAsync();
+        var c = await MachineAsync();
+        await repo.LaunchAsync(Build181, [a.Number, b.Number, c.Number], false, "panel", T0);
+        var aid = (await ReportAsync(repo, a, T0))!.Id;
+        var bid = (await ReportAsync(repo, b, T0))!.Id;
+        await ReportAsync(repo, a, T0.AddMinutes(1), Step(aid, Progress.Applying));
+        await SeenAsync(a, T0.AddMinutes(1));
+        await ReportAsync(repo, b, T0.AddMinutes(1), new HelperUpdateReport(bid.ToString(), Progress.Failed, null, Errors.SwapFailed, "locked"));
+        await repo.SweepAsync(T0.AddMinutes(12));
+        Assert.Equal((States.Failed, Errors.NoReturn), ((await JobAsync(a)).State, (await JobAsync(a)).Error));
+        Assert.Equal(States.Paused, (await JobAsync(c)).State);
+        await using (var db = await Db.OpenConnectionAsync())
+        {
+            await db.ExecuteAsync("UPDATE helper_updates SET message = 'stale' WHERE id = @aid", new { aid });
+        }
+
+        // Новая сборка вернулась позже, чем ждал сервер: confirmed — «готово» без ошибки; пауза остаётся до «Продолжить».
+        Assert.Null(await ReportAsync(repo, a, T0.AddMinutes(20), Step(aid, Progress.Confirmed), helperBuild: target.Sha256));
+        var job = await JobAsync(a);
+        Assert.Equal((States.Done, null, null, T0.AddMinutes(20), T0.AddMinutes(20)), (job.State, job.Error, job.Message, job.FinishedAt, job.UpdatedAt));
+        Assert.Single(log.Lines, l => l.Contains($"PC {a.Number} -> 1.8.1", StringComparison.Ordinal) && l.EndsWith("confirmed after noReturn", StringComparison.Ordinal));
+        Assert.Equal(States.Paused, (await JobAsync(c)).State);
+
+        // Повтор confirmed по уже готовому — ничего.
+        await ReportAsync(repo, a, T0.AddMinutes(21), Step(aid, Progress.Confirmed), helperBuild: target.Sha256);
+        Assert.Equal((States.Done, T0.AddMinutes(20)), ((await JobAsync(a)).State, (await JobAsync(a)).FinishedAt));
+        Assert.Single(log.Lines, l => l.EndsWith("confirmed after noReturn", StringComparison.Ordinal));
+
+        // Только noReturn: confirmed по другой ошибке её не снимает.
+        await ReportAsync(repo, b, T0.AddMinutes(21), Step(bid, Progress.Confirmed));
+        Assert.Equal((States.Failed, Errors.SwapFailed), ((await JobAsync(b)).State, (await JobAsync(b)).Error));
+
+        // И только за сутки: noReturn старше суток остаётся ошибкой.
+        await using (var db = await Db.OpenConnectionAsync())
+        {
+            await db.ExecuteAsync("UPDATE helper_updates SET error = 'noReturn', finished_at = @at WHERE id = @bid", new { bid, at = T0.AddMinutes(21).AddDays(-1) });
+        }
+
+        await ReportAsync(repo, b, T0.AddMinutes(21), Step(bid, Progress.Confirmed));
+        Assert.Equal((States.Failed, Errors.NoReturn), ((await JobAsync(b)).State, (await JobAsync(b)).Error));
+        Assert.Equal(States.Paused, (await JobAsync(c)).State);
+    }
+
+    [Fact]
     public async Task Sweep_ActiveNoProgressWhileReporting_NoProgressAndPause()
     {
         var repo = Repo(maxActive: 1);
