@@ -223,4 +223,41 @@ public sealed class HelperUpdateApiTests : IAsyncLifetime
         Assert.Equal(1, replies.Count(r => r.TryGetProperty("helperUpdate", out _)));
         Assert.Equal(3, await ActiveCountAsync());
     }
+
+    /// <summary>
+    /// Работник очереди включён, как на сервере клуба (зарегистрирован в Program.cs, проход раз в WorkerIntervalSec): ПК с
+    /// активным поручением молчит 10 минут — поручение снова в очереди без участия теста.
+    /// </summary>
+    [Fact]
+    public async Task Worker_RequeuesActiveOfSilentPc()
+    {
+        var server = new ServerFixture();
+        server.Settings["HelperUpdates:ToolsDir"] = _tools;
+        server.Settings["HelperUpdates:RunWorker"] = "true";
+        server.Settings["HelperUpdates:WorkerIntervalSec"] = "1";
+        await server.InitializeAsync();
+        try
+        {
+            var machines = server.Services.GetRequiredService<MachineRepository>();
+            var queue = server.Services.GetRequiredService<HelperUpdateRepository>();
+            var pc = await machines.CreateAsync(new MachineRegistration(Guid.NewGuid().ToString("N"), "PC-HU", [Mac()], "10.0.0.7", "1.8.0", null), approved: true);
+            Assert.Equal([pc.Number], (await queue.LaunchAsync(Build181, [pc.Number], false, "panel", DateTimeOffset.UtcNow)).Queued);
+            Assert.NotNull(await queue.OnReportAsync(pc.Id, "1.8.0", null, null, DateTimeOffset.UtcNow));
+
+            await using var c = await server.Services.GetRequiredService<NpgsqlDataSource>().OpenConnectionAsync();
+            await c.ExecuteAsync("UPDATE machines SET last_seen_at = now() - interval '20 minutes' WHERE id = @id", new { id = pc.Id });
+            var state = States.Active;
+            for (var i = 0; i < 100 && state == States.Active; i++)
+            {
+                await Task.Delay(100);
+                state = await c.ExecuteScalarAsync<string>("SELECT state FROM helper_updates WHERE machine_id = @id", new { id = pc.Id }) ?? state;
+            }
+
+            Assert.Equal(States.Queued, state);
+        }
+        finally
+        {
+            await ((IAsyncLifetime)server).DisposeAsync();
+        }
+    }
 }
