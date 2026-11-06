@@ -177,6 +177,53 @@ public sealed class UpdateGuardTests : IDisposable
         Assert.Equal(NewBuild, File.ReadAllBytes(_paths.Exe));
         Assert.Equal(ForeignBuild, File.ReadAllBytes(_paths.Old));
         Assert.Equal(UpdateErrors.NoRollback, Stored().Error);
+        Assert.Equal([new FailedUpdate(JobId, Sha(NewBuild), UpdateErrors.NoRollback)], _store.Failed());
+    }
+
+    [Fact]
+    public void Rollback_SecondRenameFails_NamesRestored_NoRollback()
+    {
+        // .old проверен, но пропал до второго переименования: exe → .failed прошло, .old → exe — нет; exe возвращён.
+        Swapped(attempts: UpdateGuard.MaxAttempts);
+        string VanishingOld(string path)
+        {
+            var sha = ShaOf(path);
+            File.Delete(path);
+            return sha;
+        }
+
+        Assert.Equal(GuardOutcome.Run, Start(NewBuild, VanishingOld));
+
+        Assert.Equal(["ClubDisklessHelper.exe"], InstallFiles());
+        Assert.Equal(NewBuild, File.ReadAllBytes(_paths.Exe));
+        var state = Stored();
+        Assert.Equal(UpdatePhases.Swapped, state.Phase);
+        Assert.Equal(UpdateErrors.NoRollback, state.Error);
+        Assert.Contains("names restored", state.Message);
+        Assert.Equal([new FailedUpdate(JobId, Sha(NewBuild), UpdateErrors.NoRollback)], _store.Failed());
+    }
+
+    [Fact]
+    public void Rollback_StateNotWritten_StillTerminates_NextStartRecords()
+    {
+        // Переименования отката прошли, update.json не записался (на месте .tmp — папка): процесс всё равно уходит, а
+        // следующий запуск — прежняя сборка с фазой swapped — дописывает откат.
+        Swapped(attempts: UpdateGuard.MaxAttempts);
+        Directory.CreateDirectory(_paths.StateFile + ".tmp");
+
+        Assert.Equal(GuardOutcome.RollbackAndTerminate, Start(NewBuild));
+
+        Assert.Equal(OldBuild, File.ReadAllBytes(_paths.Exe));
+        Assert.Equal(NewBuild, File.ReadAllBytes(_paths.Failed));
+        Assert.Equal(UpdatePhases.Swapped, Stored().Phase);
+
+        Directory.Delete(_paths.StateFile + ".tmp");
+        Assert.Equal(GuardOutcome.Run, Start(OldBuild));
+
+        var state = Stored();
+        Assert.Equal(UpdatePhases.RolledBack, state.Phase);
+        Assert.Equal(UpdateErrors.StartFailed, state.Error);
+        Assert.Equal([new FailedUpdate(JobId, Sha(NewBuild), UpdateErrors.StartFailed)], _store.Failed());
     }
 
     [Fact]

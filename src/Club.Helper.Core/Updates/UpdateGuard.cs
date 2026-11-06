@@ -160,9 +160,9 @@ public static class UpdateGuard
         {
             RecordRolledBack(c, state);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex)
         {
-            Note(c.Journal, $"Update {state.Id}: rolled back, but update.json was not written: {ex.Message}");
+            Note(c.Journal, $"Update {state.Id}: rolled back, but update.json was not written: {ex.GetType().Name}: {ex.Message}");
         }
 
         Note(c.Journal, $"Update {state.Id}: new build {state.ToVersion} ({Short(state.ToSha)}) did not start cleanly {MaxAttempts} times; " +
