@@ -9,7 +9,8 @@
       1. ПК: имя PC-NN и переименование не ждёт перезагрузки; системный диск локальный (бездисковый ПК — отказ: там
          шелл ставится в эталон в режиме мастера, отдельно); место на C:; ожидание перезагрузки; Smart App Control
          (сборка 1.0.18 не подписана — он её заблокирует);
-      2. помощник бездиска: служба ClubDisklessHelper 1.7.0+f79e0d5 или 1.6.0+13609a5 (SHA256 exe); G: «Online Games» и H: «Offline
+      2. помощник бездиска: служба ClubDisklessHelper, exe в %ProgramFiles%\ClubDiskless, версия не ниже 1.6.0 (по
+         SHA256 exe: helper-build.json службы 1.8.0+ или таблица известных сборок); G: «Online Games» и H: «Offline
          Games» по iSCSI; номер личных дисков (таргеты games-seat-NN, solo-seat-NN) = номер в имени Windows (ClubShell
          берёт номер ПК из имени Windows при первой регистрации); G:\Steam\steam.exe; право записи группы Users в папки
          игр (игрок в киоске — обычный пользователь, не администратор);
@@ -54,7 +55,16 @@ $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 
 # Сверяемые значения — те же, что в shell-install.ps1 (менять вместе).
-$HelperBuilds = @{ '41DA96A0B0721B22BB5F5E1898C927F08C4856968EE059A0C40B3D2B54A30E23' = '1.7.0+f79e0d5'; '26635A5F7AAB4D77441D0B0138064B9C7F64BB1DAF4B0BCAF09052439DDD0148' = '1.6.0+13609a5' }   # SHA256 exe ClubDisklessHelper -> сборка
+# Помощник: exe службы ClubDisklessHelper и его версия не ниже 1.6.0. Версия — по SHA256 exe (Get-HelperVersion):
+# helper-build.json службы 1.8.0+ или таблица известных сборок ниже (SHA256 exe -> версия).
+$HelperExePath = Join-Path $env:ProgramFiles 'ClubDiskless\ClubDisklessHelper.exe'
+$HelperBuildFile = Join-Path $env:ProgramData 'ClubDiskless\helper-build.json'
+$HelperMinVersion = [version]'1.6.0'
+$HelperBuilds = @{
+    '26635a5f7aab4d77441d0b0138064b9c7f64bb1daf4b0bcaf09052439ddd0148' = '1.6.0'   # 1.6.0+13609a5
+    '41da96a0b0721b22bb5f5e1898c927f08c4856968ee059a0c40b3d2b54a30e23' = '1.7.0'   # 1.7.0+f79e0d5
+    '05a73a8f0cb1717040c7f64fe1c94104fbdf501b9b196f90659c56d0c33b31e1' = '1.8.0'   # 1.8.0+e77f0ad
+}
 $SetupName = 'ClubShellSetup-1.0.18.exe'
 $SetupSize = 75490102
 $SetupSha256 = '1D23DEE18E17BE03A19801CD2D7CD1F8C8FDE7B8D4E83A2B5BA6785EAF46A1CF'   # SHA256SUMS.txt релиза v1.0.18
@@ -286,6 +296,21 @@ if ($here) {
     }
 }
 
+# Версия помощника по SHA256 его exe ($Hash): helper-build.json ({"v":1,"version":"x.y.z","build":"<sha256>"}, пишет сама
+# служба 1.8.0+ при каждом старте) — только если build = SHA256 exe; иначе таблица $HelperBuilds; иначе $null (неизвестная
+# сборка). Версию файла exe не читаем: exe собирается на Linux, и ресурс версии в нём — от среды .NET (10.0.x), а не от
+# помощника. Та же функция — в shell-install.ps1 и shell-uninstall.ps1 (менять вместе).
+function Get-HelperVersion([string]$Hash) {
+    if (-not $Hash) { return $null }
+    $sha = $Hash.ToLowerInvariant()
+    try {
+        $info = [IO.File]::ReadAllText($HelperBuildFile) | ConvertFrom-Json
+        if ($info.v -eq 1 -and "$($info.build)".ToLowerInvariant() -eq $sha -and "$($info.version)" -match '^\d+\.\d+\.\d+$') { return "$($info.version)" }
+    } catch { }
+    if ($HelperBuilds.ContainsKey($sha)) { return $HelperBuilds[$sha] }
+    $null
+}
+
 # ======================================================================================================================
 Write-Title 'Club diskless helper, G: and H:'
 $helper = Get-CimInstance -ClassName Win32_Service -Filter "Name='ClubDisklessHelper'" -ErrorAction SilentlyContinue
@@ -294,11 +319,15 @@ if (-not $helper) {
 } else {
     if ($helper.State -eq 'Running' -and $helper.StartMode -eq 'Auto') { Write-Pass 'service ClubDisklessHelper: running, automatic' }
     else { Write-Fail "service ClubDisklessHelper: $($helper.State), start $($helper.StartMode)" $UpdateHelperCmd }
-    $helperExe = ($helper.PathName -replace '^\s*"([^"]+)".*$', '$1').Trim()
-    if (Test-Path -LiteralPath $helperExe) {
+    $helperExe = [Environment]::ExpandEnvironmentVariables(($helper.PathName -replace '^\s*"([^"]+)".*$', '$1').Trim())
+    if ($helperExe -ne $HelperExePath) {
+        Write-Fail "service ClubDisklessHelper runs $helperExe, not $HelperExePath" $UpdateHelperCmd
+    } elseif (Test-Path -LiteralPath $helperExe) {
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $helperExe).Hash
-        if ($hash -and $HelperBuilds.ContainsKey($hash)) { Write-Pass "helper exe is $($HelperBuilds[$hash]) ($helperExe)" }
-        else { Write-Fail "helper exe SHA256 $hash is not 1.7.0+f79e0d5 or 1.6.0+13609a5 ($helperExe)" $UpdateHelperCmd }
+        $helperVersion = Get-HelperVersion $hash
+        if (-not $helperVersion) { Write-Fail "unknown helper build: SHA256 $hash ($helperExe)" $UpdateHelperCmd }
+        elseif ([version]$helperVersion -lt $HelperMinVersion) { Write-Fail "helper $helperVersion is older than $HelperMinVersion ($helperExe)" $UpdateHelperCmd }
+        else { Write-Pass "helper exe is $helperVersion ($helperExe)" }
     } else {
         Write-Fail "helper exe not found: $helperExe" $UpdateHelperCmd
     }

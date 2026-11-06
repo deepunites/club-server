@@ -31,8 +31,9 @@
       7. по желанию возвращает автовход Club, как было до шелла: удаление ClubShell ставит AutoAdminLogon=0, и гибрид
          останавливается на экране входа. Пароль Club вводит владелец (Enter — если пароль пустой); он проверяется
          входом (LogonUser) и хранится, как его хранит Windows, — в LSA-секрете DefaultPassword, не в реестре;
-      8. проверяет: ClubShell нет, помощник тот же и работает (иначе возвращает exe из копии), G:/H: на месте, USB
-         включён; печатает, что сделать в кассе.
+      8. проверяет: ClubShell нет, помощник работает (exe пропал — возвращает копию, когда процесс помощника вышел;
+         exe сменился на неизвестную сборку — FAIL; на известную — самообновление 1.8.0+, не ошибка), G:/H: на месте,
+         USB включён; печатает, что сделать в кассе.
     Альтернатива откату — перезаливка гибрида из панели club-server (образ h1e): шелла после неё нет.
     Журнал — C:\ClubShellKit\logs\uninstall-<ПК>-<время>.txt и журналы удаления рядом.
     По сети одной строкой — если файл выложен на сервер клуба (/srv/club/pxe/tools; пока не выложен):
@@ -47,7 +48,14 @@ param(
 )
 $ErrorActionPreference = 'Continue'
 $SetupName = 'ClubShellSetup-1.0.18.exe'
-$HelperBuilds = @{ '41DA96A0B0721B22BB5F5E1898C927F08C4856968EE059A0C40B3D2B54A30E23' = '1.7.0+f79e0d5'; '26635A5F7AAB4D77441D0B0138064B9C7F64BB1DAF4B0BCAF09052439DDD0148' = '1.6.0+13609a5' }   # SHA256 exe ClubDisklessHelper -> сборка
+# Версия помощника — по SHA256 exe (Get-HelperVersion): helper-build.json службы 1.8.0+ или таблица известных сборок
+# (SHA256 exe -> версия) — та же, что в shell-preflight.ps1 (менять вместе).
+$HelperBuildFile = Join-Path $env:ProgramData 'ClubDiskless\helper-build.json'
+$HelperBuilds = @{
+    '26635a5f7aab4d77441d0b0138064b9c7f64bb1daf4b0bcaf09052439ddd0148' = '1.6.0'   # 1.6.0+13609a5
+    '41da96a0b0721b22bb5f5e1898c927f08c4856968ee059a0c40b3d2b54a30e23' = '1.7.0'   # 1.7.0+f79e0d5
+    '05a73a8f0cb1717040c7f64fe1c94104fbdf501b9b196f90659c56d0c33b31e1' = '1.8.0'   # 1.8.0+e77f0ad
+}
 $UpdateHelperCmd = 'irm http://192.168.1.201:5080/pxe/v1/files/tools/update-helper-net.ps1 | iex'
 $SealUndoCmd = '& ([scriptblock]::Create((irm http://192.168.1.201:5080/pxe/v1/files/tools/seal-default-profile.ps1))) -Undo'
 $DataDir = Join-Path $env:ProgramData 'ClubShell'
@@ -115,12 +123,27 @@ function Get-ClubShellEntries {
         Where-Object { "$($_.DisplayName)" -like 'ClubShell*' })
 }
 
+# Версия помощника по SHA256 его exe ($Hash): helper-build.json ({"v":1,"version":"x.y.z","build":"<sha256>"}, пишет сама
+# служба 1.8.0+ при каждом старте) — только если build = SHA256 exe; иначе таблица $HelperBuilds; иначе $null (неизвестная
+# сборка). Версию файла exe не читаем: exe собирается на Linux, и ресурс версии в нём — от среды .NET (10.0.x), а не от
+# помощника. Та же функция — в shell-preflight.ps1 и shell-install.ps1 (менять вместе).
+function Get-HelperVersion([string]$Hash) {
+    if (-not $Hash) { return $null }
+    $sha = $Hash.ToLowerInvariant()
+    try {
+        $info = [IO.File]::ReadAllText($HelperBuildFile) | ConvertFrom-Json
+        if ($info.v -eq 1 -and "$($info.build)".ToLowerInvariant() -eq $sha -and "$($info.version)" -match '^\d+\.\d+\.\d+$') { return "$($info.version)" }
+    } catch { }
+    if ($HelperBuilds.ContainsKey($sha)) { return $HelperBuilds[$sha] }
+    $null
+}
+
 function Get-HelperState {
     $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='ClubDisklessHelper'" -ErrorAction SilentlyContinue
     if (-not $service) { return $null }
-    $exe = ($service.PathName -replace '^\s*"([^"]+)".*$', '$1').Trim()
+    $exe = [Environment]::ExpandEnvironmentVariables(($service.PathName -replace '^\s*"([^"]+)".*$', '$1').Trim())
     $hash = if (Test-Path -LiteralPath $exe) { (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash } else { $null }
-    [pscustomobject]@{ State = $service.State; Exe = $exe; Hash = $hash }
+    [pscustomobject]@{ State = $service.State; Exe = $exe; Hash = $hash; Version = (Get-HelperVersion $hash) }
 }
 
 function Invoke-Uninstaller([string]$Exe, [string]$Arguments, [string]$What) {
@@ -472,21 +495,38 @@ try {
     if ($helperBefore -and $helperBefore.Hash) {
         if (-not $helperAfter) {
             Write-Fail 'service ClubDisklessHelper was removed' $UpdateHelperCmd
-        } elseif ($helperAfter.Hash -ne $helperBefore.Hash -and $helperBackup) {
-            # exe удалён или подменён удалением старой сборки — вернуть копию и запустить службу.
+        } elseif (-not $helperAfter.Hash -and $helperBackup) {
+            # exe пропал (удаление старой сборки ClubShell) — вернуть копию, но только когда процесса помощника нет: живой
+            # процесс без exe на месте бывает и посреди самообновления (1.8.0+: exe на миг переименован в .old, новый ещё
+            # не на месте), и после его выхода exe может оказаться на месте — тогда копия не нужна. Exe, который сменился,
+            # но есть, не трогаем: это может быть самообновление (версия проверяется ниже).
             Stop-Service -Name ClubDisklessHelper -Force -ErrorAction SilentlyContinue
-            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $helperAfter.Exe) | Out-Null
-            Copy-Item -LiteralPath $helperBackup -Destination $helperAfter.Exe -Force
-            Start-Service -Name ClubDisklessHelper -ErrorAction SilentlyContinue
-            $helperAfter = Get-HelperState
-            if ($helperAfter.Hash -eq $helperBefore.Hash -and $helperAfter.State -eq 'Running') { Write-Pass 'helper exe was changed by the removal: restored from the copy, running' }
-            else { Write-Fail 'helper exe changed and could not be restored' $UpdateHelperCmd }
+            Get-Process -Name 'ClubDisklessHelper' -ErrorAction SilentlyContinue | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
+            if (Get-Process -Name 'ClubDisklessHelper' -ErrorAction SilentlyContinue) {
+                Write-Fail 'helper exe is gone and the helper process does not exit: the copy is not put back' $UpdateHelperCmd
+            } else {
+                if (-not (Test-Path -LiteralPath $helperAfter.Exe)) {
+                    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $helperAfter.Exe) | Out-Null
+                    Copy-Item -LiteralPath $helperBackup -Destination $helperAfter.Exe -Force
+                }
+                Start-Service -Name ClubDisklessHelper -ErrorAction SilentlyContinue
+                $helperAfter = Get-HelperState
+                if ($helperAfter.Hash -and $helperAfter.State -eq 'Running') { Write-Pass "helper exe was removed by the uninstall: back in place ($($helperAfter.Version)), running" }
+                else { Write-Fail 'helper exe is gone and could not be restored' $UpdateHelperCmd }
+            }
+        } elseif (-not $helperAfter.Hash) {
+            Write-Fail "helper exe is gone: $($helperAfter.Exe)" $UpdateHelperCmd
+        } elseif ($helperAfter.Hash -ne $helperBefore.Hash -and -not $helperAfter.Version) {
+            # Самообновление ставит сборки 1.8.0+, их версия — в helper-build.json; неизвестная сборка — подмена.
+            Write-Fail "helper exe was replaced by an unknown build: SHA256 $($helperAfter.Hash) (before: $($helperBefore.Version))" $UpdateHelperCmd
         } elseif ($helperAfter.State -ne 'Running') {
             Start-Service -Name ClubDisklessHelper -ErrorAction SilentlyContinue
             if ((Get-Service -Name ClubDisklessHelper).Status -eq 'Running') { Write-Pass 'helper was stopped: started again' } else { Write-Fail 'helper does not run' $UpdateHelperCmd }
-        } else {
-            $label = if ($helperAfter.Hash -and $HelperBuilds.ContainsKey($helperAfter.Hash)) { $HelperBuilds[$helperAfter.Hash] } else { "SHA256 $($helperAfter.Hash)" }
+        } elseif ($helperAfter.Hash -eq $helperBefore.Hash) {
+            $label = if ($helperAfter.Version) { $helperAfter.Version } else { "unknown build, SHA256 $($helperAfter.Hash)" }
             Write-Pass "helper ClubDisklessHelper untouched and running ($label)"
+        } else {
+            Write-Pass "helper ClubDisklessHelper running, build changed $($helperBefore.Version) -> $($helperAfter.Version) meanwhile (self-update)"
         }
     }
     $deadline = (Get-Date).AddSeconds(60)

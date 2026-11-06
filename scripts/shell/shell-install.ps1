@@ -19,7 +19,7 @@
          стоп, ClubShell не ставится). Бандл 1.0.18 качает загрузчик WebView2 сам и сверяет его с хэшем, зашитым при
          сборке; Microsoft файл обновила, и установка падала с 0x80091007 (PC-01, 2026-11-01). Если WebView2 уже стоит,
          бандл этот шаг пропускает;
-      4. запоминает DNS всех адаптеров и SHA256 помощника — для сверки после установки;
+      4. запоминает DNS всех адаптеров, SHA256 и версию помощника — для сверки после установки;
          спрашивает ключ ПК (ввод скрыт) и пишет C:\ProgramData\ClubShell\agent.json ДО установки, с правами только
          SYSTEM и Administrators. MSI видит готовый файл и оставляет его как есть (свой agent.json он пишет только на
          чистый ПК, KIOSKUSER в готовый файл не пишет), поэтому ключ не попадает ни в командную строку, ни в журналы
@@ -45,8 +45,9 @@
          MSI запоминает его в HKLM\SOFTWARE\ClubShell\KioskUser, по нему работает удаление;
       6. проверяет: служба агента работает; ключ ушёл из agent.json в secure\club.key; киоск «player» создан и не в
          привилегированных группах; Club — по-прежнему администратор; папок ClubShell на G:/H: нет (перенаправления не
-         было); помощник тот же и G:/H: на месте; DNS не изменился; журнал агента (регистрация: ждёт одобрения / ключ не
-         принят / помощник признан владельцем G:). Автовход здесь — только строка для сведения, не WARN: агент пишет его
+         было); помощник работает, версия не ниже, чем до установки (самообновление 1.8.0+ — не ошибка), G:/H: на
+         месте; DNS не изменился; журнал агента (регистрация: ждёт одобрения / ключ не принят / помощник признан
+         владельцем G:). Автовход здесь — только строка для сведения, не WARN: агент пишет его
          вместе с шеллом в профиль player, а профиля нет, пока в киоск никто не входил (PC-01: ни до, ни после
          одобрения), — профиль создаёт шаг 9;
       7. предлагает задать пароль Club (set-club-password.ps1) и PIN панели администратора киоска (set-shell-pin.ps1);
@@ -95,7 +96,14 @@ $SetupName = 'ClubShellSetup-1.0.18.exe'
 $SetupSize = 75490102
 $SetupSha256 = '1D23DEE18E17BE03A19801CD2D7CD1F8C8FDE7B8D4E83A2B5BA6785EAF46A1CF'
 $SetupUrl = 'https://github.com/Nightcall7442/club-shell/releases/download/v1.0.18/ClubShellSetup-1.0.18.exe'
-$HelperBuilds = @{ '41DA96A0B0721B22BB5F5E1898C927F08C4856968EE059A0C40B3D2B54A30E23' = '1.7.0+f79e0d5'; '26635A5F7AAB4D77441D0B0138064B9C7F64BB1DAF4B0BCAF09052439DDD0148' = '1.6.0+13609a5' }   # SHA256 exe ClubDisklessHelper -> сборка
+# Версия помощника — по SHA256 exe (Get-HelperVersion): helper-build.json службы 1.8.0+ или таблица известных сборок
+# (SHA256 exe -> версия) — та же, что в shell-preflight.ps1 (менять вместе).
+$HelperBuildFile = Join-Path $env:ProgramData 'ClubDiskless\helper-build.json'
+$HelperBuilds = @{
+    '26635a5f7aab4d77441d0b0138064b9c7f64bb1daf4b0bcaf09052439ddd0148' = '1.6.0'   # 1.6.0+13609a5
+    '41da96a0b0721b22bb5f5e1898c927f08c4856968ee059a0c40b3d2b54a30e23' = '1.7.0'   # 1.7.0+f79e0d5
+    '05a73a8f0cb1717040c7f64fe1c94104fbdf501b9b196f90659c56d0c33b31e1' = '1.8.0'   # 1.8.0+e77f0ad
+}
 # Корни библиотек и Steam (agent.json -> games). Массив из файла заменяет массив по умолчанию (D:\Games, G:\Games) целиком.
 $LibraryRoots = @('G:\Steam', 'H:\')
 $SteamExe = 'G:\Steam\steam.exe'
@@ -189,12 +197,27 @@ function Get-DnsSnapshot {
     $map
 }
 
+# Версия помощника по SHA256 его exe ($Hash): helper-build.json ({"v":1,"version":"x.y.z","build":"<sha256>"}, пишет сама
+# служба 1.8.0+ при каждом старте) — только если build = SHA256 exe; иначе таблица $HelperBuilds; иначе $null (неизвестная
+# сборка). Версию файла exe не читаем: exe собирается на Linux, и ресурс версии в нём — от среды .NET (10.0.x), а не от
+# помощника. Та же функция — в shell-preflight.ps1 и shell-uninstall.ps1 (менять вместе).
+function Get-HelperVersion([string]$Hash) {
+    if (-not $Hash) { return $null }
+    $sha = $Hash.ToLowerInvariant()
+    try {
+        $info = [IO.File]::ReadAllText($HelperBuildFile) | ConvertFrom-Json
+        if ($info.v -eq 1 -and "$($info.build)".ToLowerInvariant() -eq $sha -and "$($info.version)" -match '^\d+\.\d+\.\d+$') { return "$($info.version)" }
+    } catch { }
+    if ($HelperBuilds.ContainsKey($sha)) { return $HelperBuilds[$sha] }
+    $null
+}
+
 function Get-HelperState {
     $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='ClubDisklessHelper'" -ErrorAction SilentlyContinue
     if (-not $service) { return $null }
-    $exe = ($service.PathName -replace '^\s*"([^"]+)".*$', '$1').Trim()
+    $exe = [Environment]::ExpandEnvironmentVariables(($service.PathName -replace '^\s*"([^"]+)".*$', '$1').Trim())
     $hash = if (Test-Path -LiteralPath $exe) { (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash } else { $null }
-    [pscustomobject]@{ State = $service.State; Exe = $exe; Hash = $hash }
+    [pscustomobject]@{ State = $service.State; Exe = $exe; Hash = $hash; Version = (Get-HelperVersion $hash) }
 }
 
 # Ключ в agent.json уже стёрт агентом и лежит в secure\club.key. Значение ключа не читается в переменные и не печатается:
@@ -479,11 +502,15 @@ try {
     if ($redirected) { Write-Fail "folder redirection happened: $($redirected -join ', ')" 'shell-uninstall (remove the player profile), then install again' }
     else { Write-Pass "no folder redirection to G:/H: ($KioskUser's folders stay in C:\Users\$KioskUser)" }
 
+    # Сборка помощника может смениться и во время установки — самообновлением (1.8.0+, кнопка в панели): это не ошибка,
+    # если служба работает и версия не ниже, чем до установки.
     $helperAfter = Get-HelperState
-    if ($helperAfter -and $helperAfter.State -eq 'Running' -and $helperAfter.Hash -and $HelperBuilds.ContainsKey($helperAfter.Hash) -and $helperBefore -and $helperAfter.Hash -eq $helperBefore.Hash) {
-        Write-Pass "helper ClubDisklessHelper $($HelperBuilds[$helperAfter.Hash]) untouched and running"
+    if ($helperAfter -and $helperAfter.State -eq 'Running' -and $helperAfter.Version -and $helperBefore -and $helperBefore.Version -and
+        [version]$helperAfter.Version -ge [version]$helperBefore.Version) {
+        if ($helperAfter.Hash -eq $helperBefore.Hash) { Write-Pass "helper ClubDisklessHelper $($helperAfter.Version) untouched and running" }
+        else { Write-Pass "helper ClubDisklessHelper running, updated $($helperBefore.Version) -> $($helperAfter.Version) during the install (self-update)" }
     } else {
-        Write-Fail 'helper ClubDisklessHelper changed or stopped' 'irm http://192.168.1.201:5080/pxe/v1/files/tools/update-helper-net.ps1 | iex'
+        Write-Fail 'helper ClubDisklessHelper stopped, unknown or older than before the install' 'irm http://192.168.1.201:5080/pxe/v1/files/tools/update-helper-net.ps1 | iex'
     }
     foreach ($letter in @('G', 'H')) {
         if (Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue) { Write-Pass "${letter}: is still mounted" }

@@ -25,7 +25,10 @@
         Не удалилось — WARN;
       - помощник: служба остановлена, удалены токены этого ПК и назначения личных дисков (credentials.bin,
         assignment.json, assignment.json.solo и их .tmp) и папки сохранений игрока (saves-baseline, saves-tmp,
-        saves-carry) — как seal-golden.ps1: иначе они достались бы всем гибридам;
+        saves-carry) — как seal-golden.ps1: иначе они достались бы всем гибридам. Самообновление помощника (1.8.0)
+        должно быть закончено: есть update.json, ClubDisklessHelper.exe.new или .failed — WARN (не удаляются; дождаться
+        «готово» в панели или поставить помощник вручную); .old без update.json и update-failed.json удаляются; версия и
+        SHA256 помощника печатаются; служба после остановки не должна запуститься снова (сбой при остановке);
       - образы NGEN (.NET Framework) — достройка;
       - приложения Store (Appx): пакет установлен пользователю, но не в образе (provisioned) или в другой версии —
         sysprep /generalize с ним падает («was installed for a user, but not provisioned for all users»). Копия
@@ -54,6 +57,15 @@ $StateFiles = 'credentials.bin', 'credentials.bin.tmp', 'assignment.json', 'assi
 # Сохранения игрока (помощник 1.7.0): исходное содержимое папок G:/H:, архив detach, файлы игрока для пропущенных
 # папок — у каждого места свои.
 $StateDirs = 'saves-baseline', 'saves-tmp', 'saves-carry'
+# Самообновление (помощник 1.8.0, docs/helper.md, «Самообновление»): .new, .old, .failed — рядом с exe; update.json,
+# update-failed.json, helper-build.json — в $StateDir.
+$HelperExe = "$env:ProgramFiles\ClubDiskless\ClubDisklessHelper.exe"
+# Сборки, известные без helper-build.json: SHA256 exe -> версия (как в scripts/shell/shell-preflight.ps1, менять вместе).
+$HelperBuilds = @{
+    '26635a5f7aab4d77441d0b0138064b9c7f64bb1daf4b0bcaf09052439ddd0148' = '1.6.0'   # 1.6.0+13609a5
+    '41da96a0b0721b22bb5f5e1898c927f08c4856968ee059a0c40b3d2b54a30e23' = '1.7.0'   # 1.7.0+f79e0d5
+    '05a73a8f0cb1717040c7f64fe1c94104fbdf501b9b196f90659c56d0c33b31e1' = '1.8.0'   # 1.8.0+e77f0ad
+}
 $UnattendNs = 'urn:schemas-microsoft-com:unattend'
 $SysprepDir = Join-Path $env:SystemRoot 'System32\Sysprep'
 $SysprepExe = Join-Path $SysprepDir 'sysprep.exe'
@@ -84,6 +96,20 @@ function Write-Warn([string]$Text, [string]$Hint) {
 
 function Get-RegValue([string]$Path, [string]$Name) {
     try { return (Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop).$Name } catch { return $null }
+}
+
+# Версия помощника по SHA256 его exe: helper-build.json ({"v":1,"version":"x.y.z","build":"<sha256>"}, пишет сама служба
+# 1.8.0+ при каждом старте) — только если build = SHA256 exe; иначе таблица $HelperBuilds; иначе $null. Версию файла exe
+# не читаем: exe собирается на Linux, и ресурс версии в нём — от среды .NET (10.0.x), а не от помощника.
+function Get-HelperVersion([string]$Hash) {
+    if (-not $Hash) { return $null }
+    $sha = $Hash.ToLowerInvariant()
+    try {
+        $info = [IO.File]::ReadAllText((Join-Path $StateDir 'helper-build.json')) | ConvertFrom-Json
+        if ($info.v -eq 1 -and "$($info.build)".ToLowerInvariant() -eq $sha -and "$($info.version)" -match '^\d+\.\d+\.\d+$') { return "$($info.version)" }
+    } catch { }
+    if ($HelperBuilds.ContainsKey($sha)) { return $HelperBuilds[$sha] }
+    $null
 }
 
 function Show-LogTail([string]$Path, [int]$Lines, [string]$Pattern) {
@@ -268,12 +294,49 @@ Write-Title 'Помощник: остановка и удаление регис
 $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if (-not $svc) { Write-Warn 'службы ClubDisklessHelper нет — помощник не установлен' 'install-helper.ps1' }
 else {
+    $stopAt = Get-Date
     if ($svc.Status -ne 'Stopped') {
         Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
         Get-Process -Name 'ClubDisklessHelper' -ErrorAction SilentlyContinue | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
     }
     if ((Get-Service -Name $ServiceName).Status -eq 'Stopped') { Write-Pass 'служба остановлена' } else { Write-Warn 'служба не остановилась' }
     if ((Get-Service -Name $ServiceName).StartType -ne 'Automatic') { Write-Warn 'запуск службы не «Автоматически»: на гибридах помощник не запустится (нет G:)' }
+    # Действия при сбое (перезапуск через 5/5/30 с: install-helper.ps1, помощник 1.8.0 ставит их сам) Windows выполняет,
+    # только если процесс завершился, не сообщив «остановлена»: падение или Kill при ненормальном конце хоста (1.8.0) —
+    # и во время остановки тоже. Обычная остановка (Stop-Service, помощник отмечает «чистый выход») — не сбой, её Windows
+    # не перезапускает. Запустись служба снова — помощник опять зарегистрировался бы, и регистрация ушла бы в образ.
+    Start-Sleep -Seconds 6
+    $crashes = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; Id = 7031, 7034; StartTime = $stopAt } -ErrorAction SilentlyContinue |
+        Where-Object { @($svc.DisplayName, $ServiceName) -contains "$($_.Properties[0].Value)" })
+    $statusNow = "$((Get-Service -Name $ServiceName).Status)"
+    if ($crashes.Count -gt 0 -or $statusNow -ne 'Stopped') {
+        Write-Warn ('служба не осталась остановленной: сейчас {0}, сбоев при остановке (события 7031/7034): {1} — Windows запускает её снова' -f $statusNow, $crashes.Count) 'подождать 30 с (служба запустится), потом снова этот скрипт'
+    } else {
+        Write-Pass 'служба не запустилась снова (остановка без сбоя)'
+    }
+}
+if (Test-Path -LiteralPath $HelperExe) {
+    $helperSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $HelperExe).Hash.ToLowerInvariant()
+    $helperVersion = Get-HelperVersion $helperSha
+    if ($helperVersion) { Write-Line "помощник $helperVersion, SHA256 $helperSha" } else { Write-Line "помощник — неизвестная сборка, SHA256 $helperSha" }
+} else {
+    Write-Warn "нет $HelperExe — на гибридах помощника не будет" 'install-helper.ps1'
+}
+# Самообновление не закончено: update.json — замена или проверка новой сборки, .new — скачанная, ещё не поставленная,
+# .failed — откат. Не стирать: в образ ушла бы непроверенная сборка или прерванная замена.
+$updateLeft = @((Join-Path $StateDir 'update.json'), "$HelperExe.new", "$HelperExe.failed" | Where-Object { Test-Path -LiteralPath $_ })
+if ($updateLeft.Count -gt 0) {
+    Write-Warn ('обновление помощника не подтверждено: есть {0}' -f ($updateLeft -join ', ')) ('Start-Service ClubDisklessHelper; дождаться «готово» в панели (карточка «Обновление помощника») или поставить ' +
+        'помощник вручную (install-helper.ps1); потом снова этот скрипт')
+} else {
+    # .old без update.json — хвост подтверждённой замены (помощник стёр бы его при старте); update-failed.json — поручения
+    # с ошибкой на этом ПК: гибридам не нужны.
+    foreach ($p in "$HelperExe.old", (Join-Path $StateDir 'update-failed.json')) {
+        if (Test-Path -LiteralPath $p) {
+            Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $p) { Write-Warn "не удалён $p" } else { Write-Pass "удалён $p" }
+        }
+    }
 }
 foreach ($f in $StateFiles) {
     $p = Join-Path $StateDir $f
