@@ -1,14 +1,14 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Ставит помощник бездиска (ClubDisklessHelper 1.8.0) в эталон или обновляет его на гибриде: служба Windows, которая
+    Ставит помощник бездиска (ClubDisklessHelper 1.9.0) в эталон или обновляет его на гибриде: служба Windows, которая
     подключает диски игр G: («Online Games») и H: («Offline Games», с 1.6.0), правку библиотек и сообщает серверу клуба
     состояние ПК; с 1.7.0 — сохранения игр игрока по каналу шелла; с 1.8.0 — самообновление по кнопке в панели
-    (docs/helper.md, «Самообновление»).
+    (docs/helper.md, «Самообновление»); с 1.9.0 — диски игр и готовность в ping для шелла (SHELL_CHANGES 86).
 
 .DESCRIPTION
     Запускать в эталоне в режиме мастера, PowerShell от администратора. Рядом со скриптом (флешка) — три файла:
-      ClubDisklessHelper.exe — сборка 1.8.0, SHA256 сверяется;
+      ClubDisklessHelper.exe — сборка 1.9.0, SHA256 сверяется;
       helper.json            — адрес сервера и ключ клуба (секрет: после установки удаляется с флешки);
       club-ca.pem            — CA клуба, которым подписан сертификат сервера.
     Помощник 1.5.0 привязывает регистрацию к HWID платы: запуск на мастере безопасен — места с другим HWID
@@ -16,9 +16,9 @@
 
     Гибрид — обновление на месте: та же флешка (helper.json не нужен — остаётся установленный), вход под администратором
     клуба (Shift при входе — мимо киоска). G: и H: при перезапуске службы не сбрасываются и не отключаются. Только G: на
-    ПК — в helper.json "Libraries": []. Откат — install-helper.ps1 из git f10ccb6 и exe 1.7.0 (в tools сервера —
-    ClubDisklessHelper-1.7.0.exe): всё как прежде, без самообновления. Хвосты самообновления (.new, .old, .failed,
-    update.json, update-failed.json, helper-build.json) скрипт удаляет: ручная установка заменяет начатое обновление.
+    ПК — в helper.json "Libraries": []. Откат — кнопкой в панели на 1.8.0 или exe 1.8.0 и install-helper.ps1 из git
+    f9124e6 (в tools — ClubDisklessHelper-1.8.0.exe, install-helper-1.8.0.ps1): без дисков в ping. Хвосты самообновления
+    (.new, .old, .failed, update.json, update-failed.json, helper-build.json) удаляются: начатое обновление отменяется.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File E:\club\install-helper.ps1
@@ -32,9 +32,9 @@ $ErrorActionPreference = 'Continue'
 # $PSScriptRoot в значении параметра по умолчанию пуст при запуске powershell.exe -File (PS 5.1) — берём папку скрипта здесь.
 if (-not $Source) { $Source = Split-Path -Parent $MyInvocation.MyCommand.Path }
 
-# Один exe 1.8.0 — для эталона, гибридов и образа гибрида h1f (h1e — с 1.6.0; patch-hybrid-wim.sh сверяет exe с этой строкой).
-$ExeSha256 = '05a73a8f0cb1717040c7f64fe1c94104fbdf501b9b196f90659c56d0c33b31e1'   # 1.8.0+e77f0ad (.NET 10.0.13)
-$ExeVersion = '1.8.0'
+# Один exe 1.9.0 — для эталона, гибридов и будущего образа гибрида h1f (patch-hybrid-wim.sh сверяет exe с этой строкой).
+$ExeSha256 = '1af4465530dd2d17fa287f9d90f11f0250262940193d1dfc88931e66e4c9ac56'   # 1.9.0+184aabf (.NET 10.0.13)
+$ExeVersion = '1.9.0'
 $ServiceName = 'ClubDisklessHelper'
 $InstallDir = "$env:ProgramFiles\ClubDiskless"
 $StateDir = "$env:ProgramData\ClubDiskless"

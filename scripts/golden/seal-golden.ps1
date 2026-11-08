@@ -6,8 +6,11 @@
 
 .DESCRIPTION
     Запускать в эталоне в режиме мастера, PowerShell от администратора, когда всё остальное готово
-    (prepare-golden.ps1 без WARN, перезагрузка прошла; с шеллом — ещё get-shell-kit в режиме эталона, киоск включён).
-    После выключения — панель «Бездиск» → «Опубликовать».
+    (prepare-golden.ps1 без WARN, перезагрузка прошла; с шеллом — ещё get-shell-kit в режиме эталона: ClubShell 1.0.20,
+    помощник 1.9.0 или новее, киоск включён). После выключения — панель «Бездиск» → «Опубликовать».
+    С ClubShell 1.0.20 из учётки администратора на мастере не выходить: агент ставит в Winlogon ForceAutoLogon=1,
+    и после выхода Windows сразу входит в player и запускает оболочку (её данные в профиле — стоп ниже). Закончить
+    сеанс — этим скриптом (он выключает ПК) или перезагрузкой с Shift при загрузке.
 
     Зачем: помощник на мастере регистрируется на сервере и хранит в %ProgramData%\ClubDiskless токены этого ПК
     (credentials.bin, DPAPI машины — его расшифрует любое место с этим образом) и назначения с CHAP-секретами личных
@@ -27,7 +30,7 @@
     kiosk.cred, офлайн-базу (игроки, неотправленные сеансы), кэши сервера, журналы, а в agent.json — pcId, pcName и
     zone мастера (PolicyStore, SessionManager и SessionLock берут pcId из agent.json раньше, чем из токена: место до
     своей регистрации, а без интернета всегда, было бы мастером). Очистка — та же, что у prepare-image.ps1 из club-shell
-    v1.0.18 (его здесь не запускаем), но:
+    v1.0.20 (его здесь не запускаем; как и он, стоп на cache\profile-dirty.marker — SHELL_CHANGES 50), но:
       - ключ ПК остаётся в secure\club.key (DPAPI машины). Эталон без sysprep: ключи DPAPI машины у мест те же, что у
         мастера (как у credentials.bin помощника), и ключ расшифруется на каждом месте. prepare-image вернул бы его
         открытым текстом в agent.json, а этот файл после перезаписи агентом читает группа Users, — в образ, снимки img-*
@@ -35,15 +38,17 @@
         key»): ключ — в agent.json, но с правами только SYSTEM и Administrators, secure\club.key удаляется; агент места
         при первом старте сам спрячет ключ в свой club.key;
       - pcId, pcName и zone убираются из agent.json (prepare-image их оставляет);
-      - profile-dirty.marker молча не стирается (SHELL_CHANGES 50): есть — стоп;
+      - есть cache\profile-reset-reboot.txt (агент 1.0.20) — стоп: prepare-image его оставляет (SHELL_CHANGES 89), а
+        места унаследовали бы «перезагрузка ради долга сброса профиля уже была»;
       - USBSTOR Start — по политике кассы в кэше (policies.json, usb.allowStorage: false — 4, true — 3), а не 3, как у
         prepare-image: у клона окно до агента бывает только при первой загрузке (дальше 4 остаётся на диске), а у мест
         C: сбрасывается при каждой загрузке — со Start=3 USB-диск, вставленный до загрузки, подключался бы раньше
         агента на каждом сеансе (агент извлекает только съёмные тома, USB HDD/SSD — «несъёмные»). Запрет HID из
         политики снимается, как у prepare-image: клавиатура и мышь места ставятся при каждой загрузке.
-    Порядок: сначала проверки без изменений — имя USER, версия 1.0.18, player не вошёл, оболочка на мастере не
-    запускалась, мастер одобрен в кассе, ключ ПК на месте. Любой WARN здесь — стоп: ничего не изменено, ПК не
-    выключается. Потом очистка помощника (как раньше) и ClubShell и проверки эталона с шеллом: agent.json (поля
+    Порядок: сначала проверки без изменений — имя USER, версия 1.0.20, помощник 1.9.0 или новее, player не вошёл,
+    нет profile-dirty.marker и profile-reset-reboot.txt, оболочка на мастере не запускалась, мастер одобрен в кассе,
+    ключ ПК на месте. Любой WARN здесь — стоп: ничего не изменено, ПК не выключается. Потом очистка помощника (как
+    раньше) и ClubShell и проверки эталона с шеллом: agent.json (поля
     shell-install.ps1), admin-pin, ключ обновлений, политика кассы в кэше, учётка player и её профиль, оболочка в
     профиле player и в шаблоне Default, автовход в player без пароля в реестре, пароль администратора эталона и что он
     не учётка Microsoft, других включённых администраторов и учёток с пустым паролем нет (каждая включённая учётка —
@@ -96,11 +101,17 @@ $HelperBuilds = @{
     '26635a5f7aab4d77441d0b0138064b9c7f64bb1daf4b0bcaf09052439ddd0148' = '1.6.0'   # 1.6.0+13609a5
     '41da96a0b0721b22bb5f5e1898c927f08c4856968ee059a0c40b3d2b54a30e23' = '1.7.0'   # 1.7.0+f79e0d5
     '05a73a8f0cb1717040c7f64fe1c94104fbdf501b9b196f90659c56d0c33b31e1' = '1.8.0'   # 1.8.0+e77f0ad
+    '1af4465530dd2d17fa287f9d90f11f0250262940193d1dfc88931e66e4c9ac56' = '1.9.0'   # 1.9.0+184aabf
 }
+# Помощник эталона с ClubShell — не старше этой версии: шелл 1.0.20 узнаёт готовность ПК (диски игр) из ping помощника
+# 1.9.0 (SHELL_CHANGES 86); со старым — догадка по корням библиотек, а с 1.6.0 (канала нет) ещё и ожидание сохранений
+# по 60 с при каждом входе. Тот же минимум — у shell-preflight.ps1 и shell-upgrade.ps1.
+$HelperMinVersion = [version]'1.9.0'
 
 # ClubShell. Адрес сервера и поля agent.json — те же, что пишет shell-install.ps1 (менять вместе).
 $ShellService = 'ClubShellAgent'
-$ShellVersionPattern = '^1\.0\.18(\D|$)'
+$ShellVersion = '1.0.20'
+$ShellVersionPattern = '^1\.0\.20(\D|$)'
 $ShellData = "$env:ProgramData\ClubShell"
 $ShellAgentDir = "$env:ProgramFiles\ClubShell\Agent"
 # Ровно та строка, что агент и seal-default-profile.ps1 пишут в профиль (Shell).
@@ -112,7 +123,7 @@ $AgentJson = Join-Path $ShellData 'agent.json'
 $ClubKeyFile = Join-Path $ShellData 'secure\club.key'
 $KeyEntropy = 'ClubShell.Agent.tokens.v1'   # DPAPI LocalMachine агента (TokenStore), как в prepare-image.ps1
 $KeyPattern = '^[A-Za-z0-9._-]{8,128}$'
-# Списки prepare-image.ps1 v1.0.18 (строки 102-106, 119, 126), без secure\club.key. Новая версия ClubShell — сначала
+# Списки prepare-image.ps1 v1.0.20 (строки 110-114, 128, 135), без secure\club.key. Новая версия ClubShell — сначала
 # сверить с её prepare-image.ps1.
 $ShellStateFiles = @('agent-identity.json', 'secure\agent.tokens', 'secure\hwid.fallback', 'secure\shell.token', 'secure\kiosk.cred',
     'cache\offline.db', 'cache\offline.db-wal', 'cache\offline.db-shm', 'crash-history.json', 'cache\power-acks.json')
@@ -421,7 +432,30 @@ if ($shellSvc) {
     if ($serviceInfo) { $agentExe = ($serviceInfo.PathName -replace '^\s*"([^"]+)".*$', '$1').Trim() }
     if ($agentExe -and (Test-Path -LiteralPath $agentExe)) { $agentVersion = "$((Get-Item -LiteralPath $agentExe).VersionInfo.ProductVersion)" }
     if ($agentVersion -match $ShellVersionPattern) { Write-Pass "ClubShellAgent $agentVersion" }
-    else { Write-Warn "ClubShellAgent версии '$agentVersion' ($agentExe), а очистка ниже — по prepare-image.ps1 v1.0.18" 'сначала сверить списки этого скрипта с tools/scripts/prepare-image.ps1 новой версии (Claude)' }
+    elseif ($agentVersion -match '^(\d+\.\d+\.\d+)' -and [version]$Matches[1] -lt [version]$ShellVersion) {
+        Write-Warn "ClubShellAgent $agentVersion старше $ShellVersion ($agentExe)" ('обновить ClubShell в этом ' +
+            "сеансе мастера: команда get-shell-kit (предложит обновление до $ShellVersion), потом снова этот скрипт")
+    }
+    else { Write-Warn "ClubShellAgent версии '$agentVersion' ($agentExe), а очистка ниже — по prepare-image.ps1 v$ShellVersion" 'сначала сверить списки этого скрипта с tools/scripts/prepare-image.ps1 новой версии (Claude)' }
+
+    # Помощник — до остановки службы и удаления регистрации: старше 1.9.0 (или неизвестная сборка) — стоп, обновить его
+    # можно сразу, в этом же сеансе мастера.
+    if (Test-Path -LiteralPath $HelperExe) {
+        $gateHelperSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $HelperExe).Hash.ToLowerInvariant()
+        $gateHelperVersion = Get-HelperVersion $gateHelperSha
+        if ($gateHelperVersion -and [version]$gateHelperVersion -ge $HelperMinVersion) {
+            Write-Pass "помощник $gateHelperVersion (для ClubShell $ShellVersion нужен $HelperMinVersion или новее)"
+        } else {
+            $shownVersion = "неизвестной сборки (SHA256 $gateHelperSha)"
+            if ($gateHelperVersion) { $shownVersion = $gateHelperVersion }
+            $helperHint = ('обновить помощник до 1.9.0 в этом сеансе мастера: кнопкой в панели (карточка ' +
+                '«Обновление помощника», с 1.8.x) или ' +
+                'irm http://192.168.1.201:5080/pxe/v1/files/tools/update-helper-net.ps1 | iex; потом снова этот скрипт')
+            Write-Warn "помощник $shownVersion, а нужен $HelperMinVersion или новее (ClubShell $ShellVersion)" $helperHint
+        }
+    } else {
+        Write-Warn "нет $HelperExe — на местах помощника не будет" 'install-helper.ps1 (1.9.0), потом снова этот скрипт'
+    }
 
     # Вошедший player — его профиль и данные оболочки ушли бы в образ.
     $playerProcs = @(Get-Process -IncludeUserName -ErrorAction SilentlyContinue | Where-Object { "$($_.UserName)" -like "*\$KioskUser" })
@@ -430,10 +464,21 @@ if ($shellSvc) {
     elseif ($shellProcs.Count -gt 0) { Write-Warn 'запущена оболочка clubshell-shell.exe' 'выйти из сеанса, где она идёт, потом снова этот скрипт' }
     else { Write-Pass "$KioskUser не вошёл, оболочка не запущена" }
 
-    # profile-dirty.marker: профиль прошлого игрока ещё не сброшен. prepare-image стирает его молча (SHELL_CHANGES 50),
-    # а в образе он заставил бы каждое место сбрасывать профиль при каждой загрузке.
+    # profile-dirty.marker: профиль прошлого игрока ещё не сброшен. prepare-image v1.0.20 на нём тоже останавливается
+    # (SHELL_CHANGES 50; v1.0.18 стирал молча), а в образе он заставил бы каждое место сбрасывать профиль при каждой
+    # загрузке.
     if (Test-Path -LiteralPath (Join-Path $ShellData 'cache\profile-dirty.marker')) {
         Write-Warn 'есть cache\profile-dirty.marker: на мастере шёл сеанс игрока, профиль player ещё не сброшен' 'Start-Service ClubShellAgent; подождать, пока агент сбросит профиль player и файл исчезнет; снова этот скрипт'
+    }
+    # profile-reset-reboot.txt (агент 1.0.20): профиль player на мастере дважды подряд не удалился, и агент уже
+    # перезагружал ПК ради этого долга. prepare-image v1.0.20 файл оставляет (SHELL_CHANGES 89); в образе каждое место
+    # считало бы свою единственную перезагрузку ради долга уже потраченной. Агент удаляет файл сам, когда профиль
+    # удалится.
+    if (Test-Path -LiteralPath (Join-Path $ShellData 'cache\profile-reset-reboot.txt')) {
+        Write-Warn ('есть cache\profile-reset-reboot.txt: профиль player на мастере дважды подряд не удалился, ' +
+            'агент уже перезагружал ПК ради этого') ("разобраться со сбросом профиля player на мастере: журнал " +
+            "агента ($ShellData\logs, «not fully deleted»), что держит профиль; когда профиль удалится, агент удалит " +
+            'и файл; потом снова этот скрипт')
     }
     # Данные WebView2 оболочки (Tauri: %LOCALAPPDATA%\<identifier>) — признак, что в киоск на мастере входили.
     $playerDir = if ($playerProfile -and $playerProfile.LocalPath) { "$($playerProfile.LocalPath)" } else { "C:\Users\$KioskUser" }
@@ -565,7 +610,7 @@ foreach ($d in $StateDirs) {
 
 if ($shellSvc) {
     # ==================================================================================================================
-    # ClubShell: остановка и очистка (prepare-image.ps1 v1.0.18 без переноса ключа), потом проверки эталона с шеллом
+    # ClubShell: остановка и очистка (prepare-image.ps1 v1.0.20 без переноса ключа), потом проверки эталона с шеллом
     # ==================================================================================================================
     Write-Title 'ClubShell: остановка агента и удаление регистрации этого ПК'
     $shellSvc.Refresh()
@@ -592,10 +637,11 @@ if ($shellSvc) {
             $path = Join-Path $ShellData $rel
             if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue; $removed++ }
         }
-        # Кэши сервера (server-config.json, games.json, …) и метки сброса профиля. Не cache\dns-filter.state: в нём DNS
-        # адаптеров до политики, агент их возвращает (как в prepare-image.ps1).
+        # Кэши сервера (server-config.json, games.json, …) и метка последнего сброса профиля (profile-reset.marker).
+        # Не cache\dns-filter.state: в нём DNS адаптеров до политики, агент их возвращает; и не
+        # cache\profile-dirty.marker — долг сброса, проверен выше (как в prepare-image.ps1 v1.0.20).
         foreach ($item in @(Get-ChildItem -LiteralPath (Join-Path $ShellData 'cache') -File -Force -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -like '*.json' -or $_.Name -like 'profile-*.marker' })) {
+                Where-Object { $_.Name -like '*.json' -or $_.Name -eq 'profile-reset.marker' })) {
             Remove-Item -LiteralPath $item.FullName -Force -ErrorAction SilentlyContinue
             $removed++
         }
@@ -665,7 +711,7 @@ if ($shellSvc) {
     Write-Title 'ClubShell: проверка эталона'
     $left = @($ShellStateFiles | Where-Object { Test-Path -LiteralPath (Join-Path $ShellData $_) })
     $left += @(Get-ChildItem -LiteralPath (Join-Path $ShellData 'cache') -File -Force -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like '*.json' -or $_.Name -like 'profile-*.marker' } | ForEach-Object { "cache\$($_.Name)" })
+        Where-Object { $_.Name -like '*.json' -or $_.Name -eq 'profile-reset.marker' } | ForEach-Object { "cache\$($_.Name)" })
     $left += @($ShellEmptyDirs | Where-Object { @(Get-ChildItem -LiteralPath (Join-Path $ShellData $_) -Force -ErrorAction SilentlyContinue).Count -gt 0 } | ForEach-Object { "$_\*" })
     if ($left.Count -eq 0) { Write-Pass 'регистрации мастера нет: agent-identity.json, токены, kiosk.cred, офлайн-база, кэши сервера и журналы удалены' }
     else { foreach ($rel in $left) { Write-Warn "остался $ShellData\$rel" 'закрыть то, что его держит, потом снова этот скрипт' } }
@@ -711,7 +757,7 @@ if ($shellSvc) {
     if (Test-Path -LiteralPath (Join-Path $ShellData 'secure\admin-pin')) { Write-Pass 'PIN панели администратора киоска (secure\admin-pin) на месте — один на все места' }
     else { Write-Warn 'нет secure\admin-pin: панель администратора киоска на местах ответит «не настроено»' "powershell -NoProfile -ExecutionPolicy Bypass -File $KitDir\set-shell-pin.ps1, потом снова этот скрипт" }
     if (Test-Path -LiteralPath (Join-Path $ShellAgentDir 'update-public.pem')) { Write-Pass 'ключ обновлений Agent\update-public.pem на месте' }
-    else { Write-Warn "нет $ShellAgentDir\update-public.pem: места отвергнут любое обновление" 'переустановить ClubShell 1.0.18 (shell-uninstall, get-shell-kit)' }
+    else { Write-Warn "нет $ShellAgentDir\update-public.pem: места отвергнут любое обновление" "переустановить ClubShell $ShellVersion (shell-uninstall, потом get-shell-kit)" }
     $kioskRegistry = Get-RegValue 'HKLM:\SOFTWARE\ClubShell' 'KioskUser'
     if ("$kioskRegistry" -ieq $KioskUser) { Write-Pass "HKLM\SOFTWARE\ClubShell: KioskUser=$KioskUser (по нему работает удаление)" }
     else { Write-Warn "HKLM\SOFTWARE\ClubShell: KioskUser='$kioskRegistry', нужно $KioskUser" 'установщик ставился без KIOSKUSER=player: shell-uninstall и get-shell-kit заново' }
@@ -762,6 +808,14 @@ if ($shellSvc) {
     if ($null -ne (Get-RegValue $WinlogonKey 'DefaultPassword')) { Write-Warn 'в Winlogon есть DefaultPassword (пароль автовхода открытым текстом) — ушёл бы в образ' "Remove-ItemProperty '$WinlogonKey' DefaultPassword; потом снова этот скрипт" }
     if ($null -ne (Get-RegValue $WinlogonKey 'AutoLogonCount')) { Write-Warn 'в Winlogon есть AutoLogonCount: автовход кончится через несколько загрузок' "Remove-ItemProperty '$WinlogonKey' AutoLogonCount" }
     if ("$(Get-RegValue $WinlogonKey 'IgnoreShiftOverride')" -eq '1') { Write-Warn 'IgnoreShiftOverride=1: Shift при загрузке места не даст экрана входа администратора' "Remove-ItemProperty '$WinlogonKey' IgnoreShiftOverride" }
+    # ForceAutoLogon=1 агент 1.0.20 пишет вместе с автовходом и ставит снова при каждом применении политики шелла — не
+    # сбрасывать. После любого выхода из Windows сразу входит player (Shift при загрузке работает по-прежнему).
+    $forceAutoLogon = "$(Get-RegValue $WinlogonKey 'ForceAutoLogon')"
+    if ($forceAutoLogon -eq '1') {
+        Write-Line 'ForceAutoLogon=1 (агент 1.0.20): после выхода из любой учётки сразу входит player'
+    } else {
+        Write-Line "ForceAutoLogon='$forceAutoLogon': агент 1.0.20 поставит 1 сам, применив политику шелла"
+    }
 
     # Администратор эталона: Shift при загрузке любого места → он. Встроенный Administrator — выключен.
     $admin = Get-LocalUser -Name $AdminUser -ErrorAction SilentlyContinue
@@ -914,5 +968,6 @@ Write-Host 'Не включайте его до публикации: помощ
 if ($shellSvc) {
     Write-Host 'С ClubShell — и агент, а мастер войдёт в киоск player. Пришлось включить: Shift при загрузке, вход администратором' -ForegroundColor Green
     Write-Host 'эталона, команда get-shell-kit (вернёт набор; вопрос про киоск — n), потом этот скрипт снова.' -ForegroundColor Green
+    Write-Host 'Из учётки администратора не выходить: с ForceAutoLogon=1 сразу войдёт player.' -ForegroundColor Green
 }
 & shutdown.exe /s /t 15 /c 'Эталон готов к публикации'

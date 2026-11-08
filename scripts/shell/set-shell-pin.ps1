@@ -2,13 +2,16 @@
 .SYNOPSIS
     Задаёт (или убирает) PIN панели администратора киоска ClubShell на этом ПК: Ctrl+Alt+Shift+A на экране оболочки.
 .DESCRIPTION
-    В MSI 1.0.18 скрипта для PIN нет (SHELL_CHANGES 65), касса его тоже не задаёт; без PIN панель отвечает «не
-    настроено». Это повтор tools/scripts/set-admin-pin.ps1 из club-shell v1.0.18 (MIT) с ASCII-выводом, чтобы работать и
-    из набора, и через irm, без скачивания с GitHub. Формат файла — тот, что проверяет агент
-    (OfflineSessionStore.VerifyPassword): pbkdf2$<итерации>$<соль base64>$<хэш base64>, PBKDF2-SHA256, соль 16 байт,
+    В MSI 1.0.18 скрипта для PIN не было (SHELL_CHANGES 65); MSI 1.0.20 ставит его сам:
+    C:\Program Files\ClubShell\Agent\Install\set-admin-pin.ps1 (тот же формат и тот же файл, но вывод по-русски). Касса
+    PIN не задаёт; без PIN панель отвечает «не настроено». Это повтор tools/scripts/set-admin-pin.ps1 из club-shell
+    v1.0.18 (MIT) с ASCII-выводом, чтобы работать и из набора, и через irm, без скачивания с GitHub. Формат файла —
+    тот, что проверяет агент (OfflineSessionStore.VerifyPassword): pbkdf2$<итерации>$<соль base64>$<хэш base64>,
+    PBKDF2-SHA256, соль 16 байт,
     хэш 32 байта, 600 000 итераций (как у set-admin-pin.ps1), ASCII без BOM, в C:\ProgramData\ClubShell\secure\admin-pin.
     Папка secure — только SYSTEM и Administrators (права ей ставит MSI), файл их наследует: игрок хэш не прочитает.
-    Агент читает файл при каждой попытке — перезапуск не нужен. shell.json -> kiosk.adminPinHash агент 1.0.18 не читает.
+    Агент читает файл при каждой попытке — перезапуск не нужен. shell.json -> kiosk.adminPinHash агент не читает (1.0.18
+    молча, 1.0.20 — с предупреждением в журнале).
     PIN — 6-12 цифр, вводит владелец (ввод скрыт), нигде не печатается. На эталоне бездиска PIN задаётся один раз в
     режиме мастера: prepare-image.ps1 файл admin-pin не удаляет.
     -Remove удаляет PIN: панель на этом ПК больше не откроется.

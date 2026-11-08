@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Ставит ClubShell 1.0.18 (касса клуба Deagle) на один гибрид: WebView2, свой agent.json до установки, установщик без
+    Ставит ClubShell 1.0.20 (касса клуба Deagle) на один гибрид: WebView2, свой agent.json до установки, установщик без
     ключа в командной строке, проверки после установки, пароль Club и PIN администратора киоска, шаги в кассе, после
     одобрения — киоск (kiosk-on.ps1) и перезагрузка в него.
 .DESCRIPTION
@@ -11,14 +11,16 @@
     применяет политику, вшитую в MSI (касса ещё не одобрила ПК), — накопители USB выключаются на всей машине, вставленная
     флешка извлекается.
     Сам по сети (irm | iex) этот скрипт не запускается: ему нужны установщик и соседние скрипты набора.
+    Только для ПК без ClubShell: где он уже стоит, новую версию ставит shell-upgrade.ps1 (команда get-shell-kit
+    предлагает его сама), а здесь — стоп, ничего не изменено.
     Что делает, по порядку:
       1. shell-preflight.ps1: есть FAIL — стоп, ничего не изменено; есть WARN — спрашивает, продолжать ли;
-      2. находит ClubShellSetup-1.0.18.exe (C:\ClubShellKit, рядом со скриптом, «Загрузки»; нет — предлагает скачать из
-         релиза v1.0.18 на GitHub), сверяет размер и SHA256 из SHA256SUMS.txt релиза, снимает метку «из интернета»;
+      2. находит ClubShellSetup-1.0.20.exe (C:\ClubShellKit, рядом со скриптом, «Загрузки»; нет — предлагает скачать из
+         релиза v1.0.20 на GitHub), сверяет размер и SHA256 из SHA256SUMS.txt релиза, снимает метку «из интернета»;
       3. WebView2 Runtime не зарегистрирован — ставит его install-webview2.ps1 из набора (нужен интернет; не вышло —
-         стоп, ClubShell не ставится). Бандл 1.0.18 качает загрузчик WebView2 сам и сверяет его с хэшем, зашитым при
-         сборке; Microsoft файл обновила, и установка падала с 0x80091007 (PC-01, 2026-11-01). Если WebView2 уже стоит,
-         бандл этот шаг пропускает;
+         стоп, ClubShell не ставится). Бандл качает загрузчик WebView2 сам и сверяет его с хэшем, зашитым при сборке;
+         Microsoft файл обновила, и установка 1.0.18 падала с 0x80091007 (PC-01, 2026-11-01). В бандле 1.0.20 хэш
+         загрузчика тот же — на ПК без WebView2 он падает так же. Если WebView2 уже стоит, бандл этот шаг пропускает;
       4. запоминает DNS всех адаптеров, SHA256 и версию помощника — для сверки после установки;
          спрашивает ключ ПК (ввод скрыт) и пишет C:\ProgramData\ClubShell\agent.json ДО установки, с правами только
          SYSTEM и Administrators. MSI видит готовый файл и оставляет его как есть (свой agent.json он пишет только на
@@ -37,12 +39,14 @@
                                 владельца лежат прямо в H:\<Игра>; записи каталога с полным путём H:\<Игра>\<exe>
                                 находятся и без корней); Steam — G:\Steam\steam.exe (по умолчанию C:\Program Files (x86));
            storage.gamesShare — выкл: G: и H: подключает наш помощник (при нём агент и так ничего не монтирует);
-           updates            — выкл: автообновление 1.0.18 не работает (манифест релиза не подписан — агент его
-                                отвергнет, скачав 72 МБ); обновляем запуском нового установщика;
-      5. ставит ClubShellSetup-1.0.18.exe /quiet /norestart KIOSKUSER=player INSTALLSHELL=1. НЕ передаёт SERVERURL и
-         CLUBAPIKEY (переписали бы agent.json через powershell -Command, ключ — в командной строке процесса) и ничего из
-         INSTALLDISKLESS / DISKLESS* (в релизном MSI помощника нет; наш 1.6.0 не трогаем). KIOSKUSER нужен всё равно:
-         MSI запоминает его в HKLM\SOFTWARE\ClubShell\KioskUser, по нему работает удаление;
+           updates            — выкл: автообновление не работает (манифест релиза 1.0.20 по-прежнему не подписан —
+                                агент его отвергнет, скачав 72 МБ); обновляем запуском нового установщика
+                                (shell-upgrade.ps1 через get-shell-kit);
+      5. ставит ClubShellSetup-1.0.20.exe /quiet /norestart KIOSKUSER=player INSTALLSHELL=1. НЕ передаёт SERVERURL и
+         CLUBAPIKEY (SERVERURL переписал бы адреса в agent.json; ключ попал бы в командную строку процесса бандла, а
+         1.0.20 кладёт его ещё и в HKLM\SOFTWARE\ClubShell\Enrollment) и ничего из INSTALLDISKLESS / DISKLESS* (в
+         релизном MSI помощника нет; наш помощник не трогаем). KIOSKUSER нужен всё равно: MSI запоминает его в
+         HKLM\SOFTWARE\ClubShell\KioskUser, по нему работает удаление;
       6. проверяет: служба агента работает; ключ ушёл из agent.json в secure\club.key; киоск «player» создан и не в
          привилегированных группах; Club — по-прежнему администратор; папок ClubShell на G:/H: нет (перенаправления не
          было); помощник работает, версия не ниже, чем до установки (самообновление 1.8.0+ — не ошибка), G:/H: на
@@ -88,14 +92,16 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # прогресс-бар Invoke-WebRequest в 5.1 замедляет скачивание в разы
 
-# Релиз v1.0.18 (тег -> 04ff8f2, 2026-10-27): бандл Burn = WebView2 (если нет) + ClubShell-1.0.18.msi (агент + оболочка).
-# Размер и SHA256 — из ответа API релиза и SHA256SUMS.txt (совпадают). ClubShell-Shell-1.0.18.* — только оболочка, без
-# агента и в другую папку: не ставить.
-$Version = '1.0.18'
-$SetupName = 'ClubShellSetup-1.0.18.exe'
-$SetupSize = 75490102
-$SetupSha256 = '1D23DEE18E17BE03A19801CD2D7CD1F8C8FDE7B8D4E83A2B5BA6785EAF46A1CF'
-$SetupUrl = 'https://github.com/Nightcall7442/club-shell/releases/download/v1.0.18/ClubShellSetup-1.0.18.exe'
+# Релиз v1.0.20 (тег -> dbe2091, 2026-11-08): бандл Burn = WebView2 (если нет) + ClubShell-1.0.20.msi (агент, оболочка).
+# Размер и SHA256 — из SHA256SUMS.txt релиза (совпадает с загруженной копией). ClubShell-Shell-1.0.20.* — только
+# оболочка, без агента и в другую папку: не ставить. 1.0.19 не ставить никогда (события агента не доходили до экрана).
+# Те же значения — в shell-preflight.ps1 и shell-upgrade.ps1 (менять вместе).
+$Version = '1.0.20'
+$SetupName = 'ClubShellSetup-1.0.20.exe'
+$SetupSize = 75550872
+$SetupSha256 = '0AC2A30BB47EFE3E00D3E4FF3907520CB21B88E2711ECD3D90BB428D0C4C0B94'
+$SetupUrl = 'https://github.com/Nightcall7442/club-shell/releases/download/v1.0.20/ClubShellSetup-1.0.20.exe'
+$GetKitCmd = 'irm http://192.168.1.201:5080/pxe/v1/files/tools/get-shell-kit.ps1 | iex'
 # Версия помощника — по SHA256 exe (Get-HelperVersion): helper-build.json службы 1.8.0+ или таблица известных сборок
 # (SHA256 exe -> версия) — та же, что в shell-preflight.ps1 (менять вместе).
 $HelperBuildFile = Join-Path $env:ProgramData 'ClubDiskless\helper-build.json'
@@ -103,6 +109,7 @@ $HelperBuilds = @{
     '26635a5f7aab4d77441d0b0138064b9c7f64bb1daf4b0bcaf09052439ddd0148' = '1.6.0'   # 1.6.0+13609a5
     '41da96a0b0721b22bb5f5e1898c927f08c4856968ee059a0c40b3d2b54a30e23' = '1.7.0'   # 1.7.0+f79e0d5
     '05a73a8f0cb1717040c7f64fe1c94104fbdf501b9b196f90659c56d0c33b31e1' = '1.8.0'   # 1.8.0+e77f0ad
+    '1af4465530dd2d17fa287f9d90f11f0250262940193d1dfc88931e66e4c9ac56' = '1.9.0'   # 1.9.0+184aabf
 }
 # Корни библиотек и Steam (agent.json -> games). Массив из файла заменяет массив по умолчанию (D:\Games, G:\Games) целиком.
 $LibraryRoots = @('G:\Steam', 'H:\')
@@ -228,30 +235,57 @@ function Test-KeyMoved {
     [string]::IsNullOrEmpty([string]$config.server.clubApiKey)
 }
 
-# Состояние агента по его журналу (Serilog compact JSON: шаблон сообщения в "@mt", исключение в "@x"). Печатается только
-# вывод, не строки журнала.
+# Строка журнала разбирается JavaScriptSerializer, а не ConvertFrom-Json: после первой регистрации агент добавляет к
+# каждому событию "pcId", и строки с {PcId} в шаблоне несут оба ключа — ConvertFrom-Json в 5.1 такие отвергает (ключи
+# различаются только регистром). Словарь сериализатора различает регистр. Как в kiosk-on.ps1. В PowerShell 7 сборки
+# нет — там ConvertFrom-Json -AsHashtable (он такие строки принимает).
+$JsonReader = $null
+try {
+    Add-Type -AssemblyName System.Web.Extensions
+    $JsonReader = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+} catch { }
+# Грубый фильтр строк: только шаблоны, которые разбирает Get-AgentLogState.
+$AgentLogFilter = '"@mt"\s*:\s*"(Games library volume is managed by|Registered as PC|Stored agent tokens refreshed|' +
+    'Registration attempt)'
+
+# Состояние агента по его журналам (три последних agent-*.json, Serilog compact JSON: шаблон сообщения в "@mt",
+# исключение в "@x"); регистрацию решает последняя подходящая строка, как Get-Registration в kiosk-on.ps1: «Registered
+# as PC» — одобрен; «Stored agent tokens refreshed» — тоже (зарегистрированный агент при старте только обновляет
+# токены, «Registered» в новых журналах уже нет); «Registration attempt failed» — ждёт одобрения / ключ не принят /
+# ошибка; строк нет, но есть secure\agent.tokens — одобрен (токены выдаются только одобренному ПК). Сначала грубый
+# фильтр по тексту: разбор тысяч строк в 5.1 медленный. Печатается только вывод, не строки журнала.
 function Get-AgentLogState {
     $state = @{ Registration = 'none'; Detail = ''; HelperStandDown = $false; KioskRefused = $false }
-    $log = Get-ChildItem -LiteralPath (Join-Path $DataDir 'logs') -Filter 'agent-*.json' -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $log) { return $state }
-    foreach ($line in @(Get-Content -LiteralPath $log.FullName -Tail 3000 -ErrorAction SilentlyContinue)) {
-        if ($line -notmatch '"@mt"') { continue }
-        if ($line -match 'KioskAccountRefused|privilegedAccount') { $state.KioskRefused = $true }
-        try { $entry = $line | ConvertFrom-Json } catch { continue }
-        $template = [string]$entry.'@mt'
-        if ($template -like 'Games library volume is managed by*') { $state.HelperStandDown = $true }
-        elseif ($template -like 'Registered as PC*') { $state.Registration = 'registered'; $state.Detail = "name $($entry.PcName), zone $($entry.Zone)" }
-        elseif ($template -like 'Registration attempt*failed*') {
-            $exception = [string]$entry.'@x'
-            if ($exception -match 'waiting for approval|pendingApproval') { $state.Registration = 'waiting'; $state.Detail = '' }
-            elseif ($exception -match 'X-Club-Key') { $state.Registration = 'badKey'; $state.Detail = '' }
-            else {
-                $first = (($exception -split "`n")[0]).Trim()
-                if ($first.Length -gt 160) { $first = $first.Substring(0, 160) }
-                $state.Registration = 'failing'; $state.Detail = $first
+    $logs = @(Get-ChildItem -LiteralPath (Join-Path $DataDir 'logs') -Filter 'agent-*.json' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime | Select-Object -Last 3)
+    foreach ($log in $logs) {
+        foreach ($line in @(Get-Content -LiteralPath $log.FullName -Tail 3000 -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+            if ($line -notmatch '"@mt"') { continue }
+            if ($line -match 'KioskAccountRefused|privilegedAccount') { $state.KioskRefused = $true }
+            if ($line -notmatch $AgentLogFilter) { continue }
+            try {
+                if ($JsonReader) { $entry = $JsonReader.DeserializeObject($line) }
+                else { $entry = $line | ConvertFrom-Json -AsHashtable }
+            } catch { continue }
+            if ($entry -isnot [System.Collections.IDictionary]) { continue }
+            $template = [string]$entry['@mt']
+            if ($template -like 'Games library volume is managed by*') { $state.HelperStandDown = $true }
+            elseif ($template -like 'Registered as PC*') { $state.Registration = 'registered'; $state.Detail = "name $($entry['PcName']), zone $($entry['Zone'])" }
+            elseif ($template -like 'Stored agent tokens refreshed*') { $state.Registration = 'registered'; $state.Detail = 'agent tokens refreshed' }
+            elseif ($template -like 'Registration attempt*failed*') {
+                $exception = [string]$entry['@x']
+                if ($exception -match 'waiting for approval|pendingApproval') { $state.Registration = 'waiting'; $state.Detail = '' }
+                elseif ($exception -match 'X-Club-Key') { $state.Registration = 'badKey'; $state.Detail = '' }
+                else {
+                    $first = (($exception -split "`n")[0]).Trim()
+                    if ($first.Length -gt 160) { $first = $first.Substring(0, 160) }
+                    $state.Registration = 'failing'; $state.Detail = $first
+                }
             }
         }
+    }
+    if ($state.Registration -eq 'none' -and (Test-Path -LiteralPath (Join-Path $DataDir 'secure\agent.tokens'))) {
+        $state.Registration = 'registered'; $state.Detail = 'agent tokens present'
     }
     $state
 }
@@ -346,8 +380,8 @@ try {
     Write-Pass "installer verified: $setupLength bytes, SHA256 $SetupSha256 (release v$Version, unsigned)"
 
     # --- 3. WebView2 Runtime ------------------------------------------------------------------------------------------
-    # Та же проверка, что в install-webview2.ps1. Свой загрузчик WebView2 у бандла 1.0.18 устарел (0x80091007): ставим
-    # заранее, тогда бандл этот шаг пропускает.
+    # Та же проверка, что в install-webview2.ps1. Свой загрузчик WebView2 у бандла устарел (0x80091007; хэш в 1.0.20 тот
+    # же, что в 1.0.18): ставим заранее, тогда бандл этот шаг пропускает.
     Write-Title 'Step 3: WebView2 Runtime'
     $webView = Get-RegValue $WebView2Key 'pv'
     if ($webView -and $webView -ne '0.0.0.0') {
@@ -373,7 +407,13 @@ try {
         Set-Content -LiteralPath (Join-Path $LogDir "dns-before-$stamp.txt") -Encoding UTF8
 
     Write-Title 'Step 4: agent.json (before the installer runs)'
-    if (Test-Path -LiteralPath $AgentJson) { throw "$AgentJson already exists (earlier install?): run shell-uninstall first. Nothing was changed." }
+    # ClubShell уже стоит — новая версия ставится обновлением (shell-upgrade.ps1 из get-shell-kit), а не установкой.
+    if (Test-Path -LiteralPath $AgentJson) {
+        if (Get-Service -Name ClubShellAgent -ErrorAction SilentlyContinue) {
+            throw "ClubShell is already installed ($AgentJson exists): to update it run the get-shell-kit command ($GetKitCmd), it offers the upgrade. Nothing was changed."
+        }
+        throw "$AgentJson is left over from an earlier install: run shell-uninstall first. Nothing was changed."
+    }
     # Ключ клуба Deagle, а не Club__EnrollmentKey с Railway: тот принадлежит первому клубу «ClubShell», и PC-01 с ним
     # зарегистрировался там (в кассе Deagle ПК не было видно).
     Write-Info 'The PC key of club Deagle: ClubShell superadmin -> "Novyi klyuch dlya PK" (New PC key).'
@@ -458,7 +498,12 @@ try {
     }
     elseif ($exitCode -eq 3010) { Write-Pass 'setup finished (exit code 3010: Windows wants a reboot)' }
     else {
-        $hint = switch ($exitCode) { 1602 { 'cancelled' } 1618 { 'another install is running: wait or reboot' } 1638 { 'another version is installed: run shell-uninstall' } default { 'see the setup log' } }
+        $hint = switch ($exitCode) {
+            1602 { 'cancelled' }
+            1618 { 'another install is running: wait or reboot' }
+            1638 { "another version of ClubShell is already installed: the get-shell-kit command ($GetKitCmd) offers the upgrade of an older one" }
+            default { 'see the setup log' }
+        }
         throw "Setup failed with exit code $exitCode ($hint). Logs: $setupLog and the *_ClubShellMsi*.log next to it."
     }
     $installed = $true

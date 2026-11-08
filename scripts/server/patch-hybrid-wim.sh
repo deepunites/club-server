@@ -14,7 +14,7 @@
 # unattend-hybrid.xml, SetupComplete.cmd и nvcp/ — из scripts/golden (с git 532d026, образа h1c, не менялись).
 # Пример (h1c, 2026-10-25): sh patch-hybrid-wim.sh h1b-club-admin h1c-club-admin-2026-10-25 /tmp/h1c-stage
 # h1e = h1d + помощник 1.6.0 (диск H:): sh patch-hybrid-wim.sh <метка h1d> h1e-helper-1.6.0-<дата> /tmp/h1e-stage
-# h1f = h1e + помощник 1.8.0 (сохранения, самообновление): sh patch-hybrid-wim.sh <метка h1e> h1f-helper-1.8.0-<дата> /tmp/h1f-stage
+# h1f (когда соберут) = h1e + помощник 1.9.0: sh patch-hybrid-wim.sh <метка h1e> h1f-helper-1.9.0-<дата> /tmp/h1f-stage
 # Шаги для exe (путь с пробелом: extract образа-источника и строка add в кавычках) на машине разработки не запускались —
 # там нет wimlib. Первый запуск h1e — на сервере заранее, не в день перезаливки: результат сверяется по SHA256 каждого
 # файла и wimlib-imagex verify, при любой ошибке ничего не остаётся. Без записи проверить извлечение exe из h1d:

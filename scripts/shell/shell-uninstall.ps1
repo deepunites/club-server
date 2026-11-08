@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
-    Откат ClubShell с гибрида: удаляет агента и оболочку (бандл 1.0.18, MSI-сборки пилота, установщик одной оболочки),
-    то, что удаление ClubShell оставляет, по желанию — киоск «player» с профилем и данные ClubShell, и возвращает
-    автовход Club. Помощник бездиска (ClubDisklessHelper) не трогает и проверяет, что он цел.
+    Откат ClubShell с гибрида: удаляет агента и оболочку (бандл 1.0.18 или 1.0.20, MSI-сборки пилота, установщик одной
+    оболочки), то, что удаление ClubShell оставляет, по желанию — киоск «player» с профилем и данные ClubShell, и
+    возвращает автовход Club. Помощник бездиска (ClubDisklessHelper) не трогает и проверяет, что он цел.
 .DESCRIPTION
     Запускать на гибриде под «Club» (Shift при загрузке -> Club -> пароль), от администратора:
     C:\ClubShellKit\shell-uninstall-run-as-admin.cmd (флешки при установленном ClubShell не работают — набор уже на C:).
@@ -14,12 +14,16 @@
          помощник в ту же папку и удалить его вместе с собой (SHELL_CHANGES 58) — тогда exe возвращается на место;
       3. выключает и останавливает агента (иначе удаление ждёт службу, которая перезапускается), закрывает оболочку и
          сеансы киоска;
-      4. запускает удаление: бандл — его QuietUninstallString (копия в Package Cache, иначе ClubShellSetup-1.0.18.exe из
-         набора с /uninstall), потом оставшиеся MSI — msiexec /x {код продукта} (uninstall-clubshell.ps1 из club-shell
-         MSI-установки не удаляет, SHELL_CHANGES 63), прочие — их QuietUninstallString;
+      4. запускает удаление: бандл — его QuietUninstallString (копия в Package Cache, иначе установщик той же версии из
+         набора с /uninstall: запись 1.0.18 — ClubShellSetup-1.0.18.exe, 1.0.20 — ClubShellSetup-1.0.20.exe; после
+         обновления в C:\ClubShellKit лежат оба), потом оставшиеся MSI — msiexec /x {код продукта}
+         (uninstall-clubshell.ps1 из club-shell MSI-установки не удаляет, SHELL_CHANGES 63), прочие — их
+         QuietUninstallString;
       5. убирает то, что удаление ClubShell оставляет или может оставить (SHELL_CHANGES 67, 28): USBSTOR Start=3, запрет
          установки HID (если его ставила политика), LSA-секрет DefaultPassword (пароль киоска для автовхода), автовход в
-         киоск, задачи \ClubShell\ (старый пилот), правила брандмауэра ClubShell-*, блок ClubShell в hosts; шелл в
+         киоск вместе с ForceAutoLogon (его пишет агент 1.0.20; удаление MSI 1.0.20 снимает его само, но не если оно
+         упало или ClubShell удалён раньше), задачи \ClubShell\ (старый пилот), правила брандмауэра ClubShell-*, блок
+         ClubShell в hosts; шелл в
          шаблоне профиля C:\Users\Default (seal-default-profile.ps1 -Undo из набора) — при каждом запуске, который дошёл
          до остатков: и если удаление MSI упало, и если ClubShell уже удалён раньше (через «Программы» или прошлым
          запуском); не вышло — WARN с командой по сети. Автозапуск остаётся выключенным (disable-autoplay.ps1 из
@@ -30,11 +34,15 @@
          HKLM\SOFTWARE\ClubShell;
       7. по желанию возвращает автовход Club, как было до шелла: удаление ClubShell ставит AutoAdminLogon=0, и гибрид
          останавливается на экране входа. Пароль Club вводит владелец (Enter — если пароль пустой); он проверяется
-         входом (LogonUser) и хранится, как его хранит Windows, — в LSA-секрете DefaultPassword, не в реестре;
+         входом (LogonUser) и хранится, как его хранит Windows, — в LSA-секрете DefaultPassword, не в реестре.
+         ForceAutoLogon снимается и здесь: оставшийся от агента 1.0.20, он после каждого выхода сразу снова входил бы в
+         Club;
       8. проверяет: ClubShell нет, помощник работает (exe пропал — возвращает копию, когда процесс помощника вышел;
          exe сменился на неизвестную сборку — FAIL; на известную — самообновление 1.8.0+, не ошибка), G:/H: на месте,
          USB включён; печатает, что сделать в кассе.
     Альтернатива откату — перезаливка гибрида из панели club-server (образ h1e): шелла после неё нет.
+    Старую версию шелла поверх новой установщик не ставит (MSI 1.0.20 — MajorUpgrade, понижение версии он отвергает):
+    откат версии — этот скрипт, потом чистая установка набором старой версии.
     Журнал — C:\ClubShellKit\logs\uninstall-<ПК>-<время>.txt и журналы удаления рядом.
     По сети одной строкой — если файл выложен на сервер клуба (/srv/club/pxe/tools; пока не выложен):
       irm http://192.168.1.201:5080/pxe/v1/files/tools/shell-uninstall.ps1 | iex
@@ -47,7 +55,10 @@ param(
     [switch]$RestoreAdminAutologon
 )
 $ErrorActionPreference = 'Continue'
-$SetupName = 'ClubShellSetup-1.0.18.exe'
+$SetupName = 'ClubShellSetup-1.0.20.exe'
+# Установщик бандла из набора — по версии записи в «Программах» (тот же релиз удаляет себя сам), когда копии бандла в
+# Package Cache нет. После обновления в C:\ClubShellKit лежат оба: старый установщик никто не удаляет.
+$SetupByVersion = [ordered]@{ '1.0.18' = 'ClubShellSetup-1.0.18.exe'; '1.0.20' = $SetupName }
 # Версия помощника — по SHA256 exe (Get-HelperVersion): helper-build.json службы 1.8.0+ или таблица известных сборок
 # (SHA256 exe -> версия) — та же, что в shell-preflight.ps1 (менять вместе).
 $HelperBuildFile = Join-Path $env:ProgramData 'ClubDiskless\helper-build.json'
@@ -55,6 +66,7 @@ $HelperBuilds = @{
     '26635a5f7aab4d77441d0b0138064b9c7f64bb1daf4b0bcaf09052439ddd0148' = '1.6.0'   # 1.6.0+13609a5
     '41da96a0b0721b22bb5f5e1898c927f08c4856968ee059a0c40b3d2b54a30e23' = '1.7.0'   # 1.7.0+f79e0d5
     '05a73a8f0cb1717040c7f64fe1c94104fbdf501b9b196f90659c56d0c33b31e1' = '1.8.0'   # 1.8.0+e77f0ad
+    '1af4465530dd2d17fa287f9d90f11f0250262940193d1dfc88931e66e4c9ac56' = '1.9.0'   # 1.9.0+184aabf
 }
 $UpdateHelperCmd = 'irm http://192.168.1.201:5080/pxe/v1/files/tools/update-helper-net.ps1 | iex'
 $SealUndoCmd = '& ([scriptblock]::Create((irm http://192.168.1.201:5080/pxe/v1/files/tools/seal-default-profile.ps1))) -Undo'
@@ -348,13 +360,20 @@ try {
                 $exe = $Matches['exe']
                 $arguments = $Matches['args']
                 if ($isBundle) { $arguments = "$arguments /norestart /log `"$(Join-Path $LogDir "uninstall-bundle-$stamp.log")`"" }
-                if (-not (Test-Path -LiteralPath $exe) -and $isBundle -and $entry.DisplayVersion -like '1.0.18*' -and (Test-Path -LiteralPath (Join-Path $KitDir $SetupName))) {
+                # Установщик набора той же версии, что запись (1.0.18* — 1.0.18, 1.0.20* — 1.0.20); другой версии — нет.
+                $kitSetupName = $null
+                foreach ($setupVersion in $SetupByVersion.Keys) {
+                    if ("$($entry.DisplayVersion)" -like "$setupVersion*") { $kitSetupName = $SetupByVersion[$setupVersion] }
+                }
+                $kitSetup = if ($kitSetupName) { Join-Path $KitDir $kitSetupName } else { $null }
+                if (-not (Test-Path -LiteralPath $exe) -and $isBundle -and $kitSetup -and (Test-Path -LiteralPath $kitSetup)) {
                     # Копии бандла в Package Cache нет — тот же релиз из набора удаляет себя сам.
-                    $exe = Join-Path $KitDir $SetupName
+                    $exe = $kitSetup
                     $arguments = "/uninstall /quiet /norestart /log `"$(Join-Path $LogDir "uninstall-bundle-$stamp.log")`""
                 }
+                $setupFix = if ($kitSetupName) { "put $kitSetupName into $KitDir and run again" } else { "put the ClubShellSetup exe of release $($entry.DisplayVersion) into $KitDir and run again" }
                 if (Test-Path -LiteralPath $exe) { Invoke-Uninstaller $exe $arguments "$($entry.DisplayName) $($entry.DisplayVersion) uninstall" }
-                else { Write-Fail "uninstaller of $($entry.DisplayName) $($entry.DisplayVersion) not found: $exe" "put $SetupName into $KitDir and run again" }
+                else { Write-Fail "uninstaller of $($entry.DisplayName) $($entry.DisplayVersion) not found: $exe" $setupFix }
             }
         }
         # Оставшиеся MSI (MSI из бандла уходит вместе с ним; MSI пилотных сборок ставились без бандла).
@@ -401,6 +420,9 @@ try {
         if ((Get-RegValue $WinlogonKey 'DefaultUserName') -ieq $kioskUser -or $winlogonUserBefore -ieq $kioskUser) {
             Set-ItemProperty -LiteralPath $WinlogonKey -Name AutoAdminLogon -Value '0' -ErrorAction SilentlyContinue
             Remove-ItemProperty -LiteralPath $WinlogonKey -Name DefaultUserName -ErrorAction SilentlyContinue
+            # Агент 1.0.20 пишет вместе с автовходом ForceAutoLogon=1 (удаление MSI 1.0.20 снимает его само, но не если
+            # оно упало): оставшийся, он заставил бы Windows снова входить сразу после любого выхода.
+            Remove-ItemProperty -LiteralPath $WinlogonKey -Name ForceAutoLogon -ErrorAction SilentlyContinue
         }
     }
     # Шелл ClubShell в шаблоне профиля (seal-default-profile.ps1, шаг kiosk-on): без -Undo каждая новая учётная запись
@@ -470,6 +492,9 @@ try {
             $empty = $password.Length -eq 0
             $password.Dispose()
             if ($lsa -ne 0) { Write-Fail "auto-logon password not stored (Win32 error $lsa)"; break }
+            # Оставшийся от агента 1.0.20 ForceAutoLogon=1 (удаление упало или ClubShell удалён раньше) вместе с
+            # автовходом Club входил бы в Club снова сразу после каждого выхода; до шелла его не было.
+            Remove-ItemProperty -LiteralPath $WinlogonKey -Name ForceAutoLogon -ErrorAction SilentlyContinue
             Set-ItemProperty -LiteralPath $WinlogonKey -Name AutoAdminLogon -Value '1'
             Set-ItemProperty -LiteralPath $WinlogonKey -Name DefaultUserName -Value $AdminUser
             Set-ItemProperty -LiteralPath $WinlogonKey -Name DefaultDomainName -Value $env:COMPUTERNAME
@@ -536,7 +561,8 @@ try {
         else { Write-Warn "${letter}: is not mounted" 'reboot; the helper mounts it within a minute' }
     }
     if ((Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR' 'Start') -eq 3) { Write-Pass 'USB storage allowed again (USBSTOR Start=3; a stick plugged in now works, an ejected one: re-plug)' }
-    Write-Info ("auto-logon now: AutoAdminLogon={0}, DefaultUserName={1}" -f (Get-RegValue $WinlogonKey 'AutoAdminLogon'), (Get-RegValue $WinlogonKey 'DefaultUserName'))
+    Write-Info ("auto-logon now: AutoAdminLogon={0}, DefaultUserName={1}, ForceAutoLogon={2}" -f (Get-RegValue $WinlogonKey 'AutoAdminLogon'),
+        (Get-RegValue $WinlogonKey 'DefaultUserName'), (Get-RegValue $WinlogonKey 'ForceAutoLogon'))
 
     Write-Title 'In the kassa (owner)'
     Write-Host "  Reinstalling soon: keep $env:COMPUTERNAME in 'Zal i ustroystva' (same hardware = same seat, number and zone)."

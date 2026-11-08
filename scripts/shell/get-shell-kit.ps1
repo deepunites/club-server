@@ -12,7 +12,7 @@
          Другой номер — переименование в PC-NN и сразу перезагрузка; после неё та же команда ещё раз. ClubShell берёт
          номер из имени Windows один раз, при первой регистрации. Переименование, которое ждёт перезагрузки, — сначала
          перезагрузка. ClubShell уже стоит — номер не спрашивается;
-      2. Smart App Control включён или в режиме оценки — как его выключить (сборка 1.0.18 не подписана, он её
+      2. Smart App Control включён или в режиме оценки — как его выключить (сборка ClubShell не подписана, он её
          заблокирует) и вопрос, выключен ли (по умолчанию нет: preflight всё равно дал бы WARN/FAIL). До шага 3:
          install-max-refresh.ps1 компилирует и сразу запускает неподписанный ClubMaxRefresh.exe — SAC его тоже не даст;
       3. брандмауэр для LAN-игр (install-lan-firewall.ps1) и задача ClubMaxRefresh (install-max-refresh.ps1) — только
@@ -23,20 +23,32 @@
          место. Файл с верным SHA256 не качается снова (установщик 72 МБ — один раз). Несовпадение — стоп. SHA256 —
          только от ошибок передачи и недокачки, не от подмены: список и файлы приходят по HTTP с того же сервера, что и
          сама команда irm | iex (та же практика, что у install-*.ps1 и update-helper-net.ps1);
-      5. запускает C:\ClubShellKit\shell-install.ps1 в этом же окне: ключ ПК, пароль Club, PIN, ожидание одобрения,
-         киоск, вопрос о перезагрузке. ClubShell уже стоит — вместо установки предлагает kiosk-on.ps1. После установки
-         смотрит автовход: не в player (ПК не одобрен за время ожидания) — жёлтым, что киоск ещё не включён.
+      5. ClubShell ещё нет — запускает C:\ClubShellKit\shell-install.ps1 в этом же окне: ключ ПК, пароль Club, PIN,
+         ожидание одобрения, киоск, вопрос о перезагрузке. ClubShell уже стоит — сравнивает его версию
+         (HKLM\SOFTWARE\ClubShell\Version, пишет MSI) с версией установщика в наборе (имя ClubShellSetup-<версия>.exe в
+         SHA256SUMS: своих версий у этой команды нет, их знает набор): старше — вопрос «обновить?» (по умолчанию да) и
+         C:\ClubShellKit\shell-upgrade.ps1 в этом же окне (помощник до 1.9.0, если он старше; установщик поверх старой
+         версии; проверки; вопрос о перезагрузке; agent.json, регистрация, ключ ПК, PIN и запись в кассе остаются — ни
+         ключа, ни пароля, ни одобрения); набор без shell-upgrade.ps1 — стоп ещё до скачивания (шаг 4). Та же версия —
+         «актуальна» и, как раньше, kiosk-on.ps1 по желанию; новее, чем в наборе, — строка для сведения и kiosk-on по
+         желанию. После установки и обновления смотрит автовход: не в player (ПК не одобрен за время ожидания) —
+         жёлтым, что киоск ещё не включён.
     Повторный запуск безопасен: имя не меняется без «да», брандмауэр и ClubMaxRefresh второй раз не ставятся, набор
-    докачивается и обновляется по SHA256SUMS, вторую установку не даст shell-preflight (служба уже есть — FAIL).
+    докачивается и обновляется по SHA256SUMS, вторую установку не даст shell-preflight (служба уже есть — FAIL), версия
+    как в наборе второй раз не ставится.
     Бездиск (системный диск по iSCSI) — режим определяется сам, флаг через irm | iex не передать:
       - сеанс мастера эталона (таргет …:diskless-master) — РЕЖИМ ЭТАЛОНА: шелл ставится в эталон один раз, места
         получают его с публикацией. Шаг 1 — без номера и без переименования: имя должно остаться USER (с ним грузится
         каждое место), переименование, которое ждёт перезагрузки, — стоп. Администратор — тот, кто запустил команду
-        (у эталона это не Club). Шаги 2-4 те же; шаг 5 — shell-install.ps1 -Golden -AdminUser <он> (стоит — kiosk-on
-        -Golden). В конце — НЕ перезагружать (следующая загрузка мастера — уже киоск player), дальше seal-golden.ps1
-        из набора и «Опубликовать» (docs/shell-install.md, «Бездиск») — только если киоск включён и код выхода 0;
-        код 3 (установщик ответил 3010) — жёлтым «одна перезагрузка до киоска, потом та же команда»; другой код —
-        красным «seal-golden и публикацию не запускать»;
+        (у эталона это не Club). Шаги 2-4 те же; шаг 5 — shell-install.ps1 -Golden -AdminUser <он> (стоит: старше
+        набора — shell-upgrade.ps1 -Golden -AdminUser <он>, та же версия — kiosk-on -Golden). В конце — НЕ
+        перезагружать и не выходить из сеанса (следующий вход мастера — уже киоск player: с ForceAutoLogon и после
+        выхода), дальше seal-golden.ps1 из набора и «Опубликовать» (docs/shell-install.md, «Бездиск») — только если
+        киоск включён и код выхода 0; код 3 (установщик ответил 3010) — жёлтым «одна перезагрузка до киоска (при
+        обновлении — до seal-golden: киоск уже включён, Shift при загрузке), потом та же команда»; код 4 у
+        обновления (стоп, а эталон не менялся) — красным «ничего не изменено: исправить FAIL и снова та же команда»,
+        без отката; другой код — красным «seal-golden и публикацию не запускать» и откат; от обновления отказались —
+        жёлтым, что эталон не закончен;
       - обычное место (…:seat-NN) — стоп до любых изменений: C: сбрасывается при каждой загрузке, а переименование
         в PC-NN зациклило бы перезагрузки;
       - iSCSI без таких таргетов — стоп (непонятно, что это за ПК).
@@ -209,7 +221,8 @@ Write-Title 'Step 2: Smart App Control'
 $sac = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' 'VerifiedAndReputablePolicyState'
 if ($sac -eq 1 -or $sac -eq 2) {
     $mode = if ($sac -eq 1) { 'ON' } else { 'in evaluation mode' }
-    Write-Host "Smart App Control is ${mode}: it blocks the unsigned ClubShell 1.0.18 (and ClubMaxRefresh)." -ForegroundColor Yellow
+    $sacText = "Smart App Control is ${mode}: it blocks the unsigned ClubShell build (and ClubMaxRefresh)."
+    Write-Host $sacText -ForegroundColor Yellow
     Write-Host '  Turn it off: Windows Security -> App & browser control -> Smart App Control -> Off.' -ForegroundColor Yellow
     if (-not (Read-YesNo 'Is Smart App Control off now (continue)?' $false)) {
         throw "Stopped before the install. Turn Smart App Control off, then run the same command again: $GetKitCmd"
@@ -262,6 +275,28 @@ try {
 if (-not ($entries | Where-Object { $_.Name -eq 'shell-install.ps1' })) { throw 'SHA256SUMS on the server lists no shell-install.ps1: the kit there is incomplete. Nothing was downloaded.' }
 # Эталон закрывает seal-golden.ps1 из набора: после установки USB на мастере выключен, флешка с ним не прочитается.
 if ($golden -and -not ($entries | Where-Object { $_.Name -eq 'seal-golden.ps1' })) { throw 'SHA256SUMS on the server lists no seal-golden.ps1: the kit there is older than the golden mode, publish it again. Nothing was downloaded.' }
+# ClubShell уже стоит: его версия — HKLM\SOFTWARE\ClubShell\Version (пишет MSI; первые три числа), версия набора — из
+# имени установщика в SHA256SUMS (ClubShellSetup-<версия>.exe; несколько — старшая). Своих версий у этой команды нет:
+# она выложена отдельно от набора (tools/), их знает набор. Старше набора — обновление (шаг 5): shell-upgrade.ps1
+# должен быть в списке.
+$installedVersion = $null
+$targetVersion = $null
+if ($shellInstalled) {
+    if ("$(Get-RegValue 'HKLM:\SOFTWARE\ClubShell' 'Version')" -match '^(\d+\.\d+\.\d+)') {
+        $installedVersion = [version]$Matches[1]
+    }
+    foreach ($entry in $entries) {
+        if ($entry.Name -match '^ClubShellSetup-(\d+\.\d+\.\d+)\.exe$') {
+            $kitVersion = [version]$Matches[1]
+            if (-not $targetVersion -or $kitVersion -gt $targetVersion) { $targetVersion = $kitVersion }
+        }
+    }
+}
+$upgradeDue = [bool]($installedVersion -and $targetVersion -and $installedVersion -lt $targetVersion)
+if ($upgradeDue -and -not ($entries | Where-Object { $_.Name -eq 'shell-upgrade.ps1' })) {
+    throw ("SHA256SUMS on the server lists no shell-upgrade.ps1: the kit there cannot upgrade ClubShell " +
+        "$installedVersion -> $targetVersion, publish it again. Nothing was downloaded.")
+}
 
 $fetched = 0
 foreach ($entry in $entries) {
@@ -284,15 +319,48 @@ foreach ($entry in $entries) {
 }
 Write-Pass ("kit in {0}: {1} files, SHA256 checked ({2} downloaded, {3} already up to date)" -f $KitDir, $entries.Count, $fetched, ($entries.Count - $fetched))
 
-# --- 5. Установка -------------------------------------------------------------------------------------------------------
+# --- 5. Установка или обновление --------------------------------------------------------------------------------------
 Write-Title 'Step 5: install'
 # irm | iex — область консоли: код прошлого запуска в этом окне не должен решать за этот.
 $installCode = 0
-# Эталон: -Golden и администратор эталона в оба скрипта; kiosk-on в режиме эталона не перезагружает никогда.
+# Чей код выхода в $installCode: shell-install, shell-upgrade или ничей (kiosk-on, отказ от обновления).
+$ranScript = $null
+$upgradeDeclined = $false
+# Эталон: -Golden и администратор эталона во все скрипты; kiosk-on в режиме эталона не перезагружает никогда.
 $modeArgs = @()
 if ($golden) { $modeArgs = @('-Golden', '-AdminUser', $adminUser) }
-if ($shellInstalled) {
-    Write-Host 'ClubShell is already installed on this PC: no second install.'
+if ($shellInstalled -and $upgradeDue) {
+    # Старше набора — обновление поверх (MSI MajorUpgrade): agent.json, регистрация, ключ ПК, PIN и запись в кассе
+    # остаются; ни ключа, ни пароля, ни одобрения.
+    Write-Host "ClubShell $installedVersion is installed, the kit has $($targetVersion): upgrade." -ForegroundColor Cyan
+    Write-Info 'shell-upgrade keeps agent.json, the registration, the PC key, the PIN and the kassa record'
+    if ($golden) { Write-Info 'golden: the helper must be 1.9.0 already; no reboot at the end, then seal-golden' }
+    else { Write-Info 'it updates the helper to 1.9.0 first if it is older; at the end it asks to reboot' }
+    if (Read-YesNo "Upgrade ClubShell $installedVersion -> $targetVersion now?" $true) {
+        $upgradeScript = Join-Path $KitDir 'shell-upgrade.ps1'
+        Write-Info "starting $upgradeScript in this window"
+        $upgradeArgs = @('-KitDir', $KitDir, '-KioskUser', $KioskUser) + $modeArgs
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $upgradeScript @upgradeArgs
+        $installCode = $LASTEXITCODE
+        $ranScript = 'shell-upgrade'
+    } else {
+        $upgradeDeclined = $true
+        $declinedText = "Not upgraded: ClubShell $installedVersion stays. To upgrade later run the same command again."
+        Write-Host $declinedText -ForegroundColor Yellow
+    }
+} elseif ($shellInstalled) {
+    if (-not $installedVersion) {
+        $versionText = 'ClubShell is installed, but HKLM\SOFTWARE\ClubShell\Version is unreadable: no upgrade offered.'
+        Write-Host $versionText -ForegroundColor Yellow
+        Write-Info "check it: $KitDir\shell-agent-diag-run-as-admin.cmd"
+    } elseif (-not $targetVersion) {
+        $versionText = "ClubShell $installedVersion is installed; the kit has no ClubShellSetup-x.y.z.exe: no upgrade."
+        Write-Host $versionText -ForegroundColor Yellow
+    } elseif ($installedVersion -gt $targetVersion) {
+        Write-Info "ClubShell $installedVersion is newer than the kit ($targetVersion): nothing to upgrade"
+    } else {
+        Write-Host "ClubShell $installedVersion is current (the kit has the same version): no second install."
+    }
     Write-Info "rollback: $KitDir\shell-uninstall-run-as-admin.cmd"
     $kioskAlreadyOn = (Get-RegValue $WinlogonKey 'AutoAdminLogon') -eq '1' -and (Get-RegValue $WinlogonKey 'DefaultUserName') -eq $KioskUser
     if ($kioskAlreadyOn) { Write-Info "auto-logon already goes to '$KioskUser' (kiosk on); running kiosk-on again is harmless" }
@@ -306,16 +374,40 @@ if ($shellInstalled) {
     else { Write-Info "starting $installScript in this window (PC key, Club password, PIN, approval wait, kiosk, reboot)" }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installScript -KitDir $KitDir -KioskUser $KioskUser @modeArgs
     $installCode = $LASTEXITCODE
-    # Код 0 бывает и без киоска: не одобрен за время ожидания — только WARN. Решает автовход, а не код выхода.
+    $ranScript = 'shell-install'
+}
+# Отчёт после shell-install и shell-upgrade. Код 0 бывает и без киоска: не одобрен за время ожидания (установка) —
+# только WARN. Решает автовход, а не код выхода.
+if ($ranScript) {
     $kioskOn = (Get-RegValue $WinlogonKey 'AutoAdminLogon') -eq '1' -and (Get-RegValue $WinlogonKey 'DefaultUserName') -eq $KioskUser
     Write-Host ''
-    if ($installCode -eq 0 -and $kioskOn) { Write-Host 'shell-install finished without FAIL lines; the kiosk is on.' -ForegroundColor Green }
-    elseif ($installCode -eq 0) { Write-Host 'shell-install finished without FAIL lines.' -ForegroundColor Green }
-    elseif ($installCode -eq 3) { Write-Host 'shell-install finished without FAIL lines, but the installer needs ONE reboot before the kiosk (exit code 3010).' -ForegroundColor Yellow }
-    else { Write-Host "shell-install ended with exit code $installCode (FAIL lines or stopped, see above). Logs: $KitDir\logs" -ForegroundColor Red }
+    # Код 3 — только у эталона: shell-install — перезагрузка до киоска, shell-upgrade — до seal-golden (киоск уже есть).
+    $rebootWhy = if ($ranScript -eq 'shell-upgrade') { 'before seal-golden' } else { 'before the kiosk' }
+    $resultColor = 'Red'
+    $resultText = "$ranScript ended with exit code $installCode (FAIL lines or stopped, see above). Logs: $KitDir\logs"
+    if ($installCode -eq 0) {
+        $resultColor = 'Green'
+        $resultText = "$ranScript finished without FAIL lines."
+        if ($kioskOn) { $resultText = "$ranScript finished without FAIL lines; the kiosk is on." }
+    } elseif ($installCode -eq 3) {
+        $resultColor = 'Yellow'
+        $resultText = ("{0} finished without FAIL lines, but the installer needs ONE reboot {1} (exit code 3010)." -f
+            $ranScript, $rebootWhy)
+    } elseif ($installCode -eq 4 -and $ranScript -eq 'shell-upgrade') {
+        # Код 4 — FAIL или стоп, но ПК не менялся (обычно проверка шага 1): исправить и снова, откатывать нечего.
+        $resultText = ("shell-upgrade stopped, nothing was changed (exit code 4): fix the FAIL lines above, then " +
+            "run the same command again. Logs: $KitDir\logs")
+    }
+    Write-Host $resultText -ForegroundColor $resultColor
     if (-not $golden -and -not $kioskOn -and (Get-Service -Name ClubShellAgent -ErrorAction SilentlyContinue)) {
         Write-Host 'ClubShell is installed, but the kiosk is NOT on yet: this PC is not finished.' -ForegroundColor Yellow
-        Write-Host "  After the approval in the kassa run the same command again (it offers kiosk-on) or $KitDir\kiosk-on-run-as-admin.cmd" -ForegroundColor Yellow
+        $kioskHint = "  After the approval in the kassa run the same command again (it offers kiosk-on) or " +
+            "$KitDir\kiosk-on-run-as-admin.cmd"
+        # Обновление: ПК уже одобрен; та же команда теперь видит «та же версия» и предлагает kiosk-on.
+        if ($ranScript -eq 'shell-upgrade') {
+            $kioskHint = "  Run $KitDir\kiosk-on-run-as-admin.cmd or the same command again."
+        }
+        Write-Host $kioskHint -ForegroundColor Yellow
     }
 }
 # Эталон: что дальше — последним на экране. Перезагрузка мастера после kiosk-on — вход в киоск player в самом эталоне.
@@ -323,18 +415,44 @@ if ($golden -and (Get-Service -Name ClubShellAgent -ErrorAction SilentlyContinue
     $kioskOn = (Get-RegValue $WinlogonKey 'AutoAdminLogon') -eq '1' -and (Get-RegValue $WinlogonKey 'DefaultUserName') -eq $KioskUser
     Write-Host ''
     # Seal и публикация — только с киоском и кодом 0: FAIL шага 6 seal-golden почти не перепроверяет.
-    if ($kioskOn -and $installCode -eq 0) {
+    if ($upgradeDeclined) {
+        # seal-golden набора сверяет версию ClubShell с версией набора: со старой он остановится.
+        $lines = @("GOLDEN: ClubShell $installedVersion was not upgraded to $($targetVersion): do NOT seal or publish.",
+            '  The golden is not finished: run the same command again and answer y to the upgrade.')
+        foreach ($line in $lines) { Write-Host $line -ForegroundColor Yellow }
+    } elseif ($kioskOn -and $installCode -eq 0) {
         Write-Host 'GOLDEN: ClubShell and the kiosk are in the master. Do NOT reboot it (the next boot logs on to the player kiosk).' -ForegroundColor Yellow
+        # ForceAutoLogon=1 (агент 1.0.20+): после выхода из сеанса Windows сразу входит в киоск player — и на мастере.
+        if ((Get-RegValue $WinlogonKey 'ForceAutoLogon') -eq '1') {
+            $signOutText = '  Do not sign out of it either: with ForceAutoLogon=1 a sign-out logs the player on.'
+            Write-Host $signOutText -ForegroundColor Yellow
+        }
         Write-Host '  Next, in this admin window (current folder anything but C:\ClubShellKit):' -ForegroundColor Yellow
         Write-Host "    powershell -NoProfile -ExecutionPolicy Bypass -File $KitDir\seal-golden.ps1" -ForegroundColor Yellow
         Write-Host "  It cleans ClubShell and the helper, checks the golden, deletes $KitDir and shuts the PC down;" -ForegroundColor Yellow
         Write-Host "  then panel 'Diskless' -> Publish. Any WARN there: fix it and run seal-golden again, no reboot in between." -ForegroundColor Yellow
+    } elseif ($installCode -eq 3 -and $ranScript -eq 'shell-upgrade') {
+        # Обновление: киоск уже включён — после перезагрузки мастер входит в player; администратору — Shift при
+        # загрузке.
+        $lines = @('GOLDEN: the installer needs ONE reboot before seal-golden (exit code 3010): no seal/publish yet.',
+            "  Reboot the master now; the kiosk is on: hold Shift at boot and sign in as $adminUser,",
+            '  run the same command again (ClubShell is current then), then seal-golden as it says.')
+        foreach ($line in $lines) { Write-Host $line -ForegroundColor Yellow }
+    } elseif ($installCode -eq 4 -and $ranScript -eq 'shell-upgrade') {
+        # Стоп обновления до изменений: эталон такой же, как до команды — ни отката, ни «не перезагружать».
+        $lines = @('GOLDEN: shell-upgrade stopped, nothing was changed (exit code 4): do NOT seal or publish yet.',
+            '  Fix the FAIL lines above (as they say), then run the same command again.')
+        foreach ($line in $lines) { Write-Host $line -ForegroundColor Red }
     } elseif ($installCode -eq 3) {
         Write-Host 'GOLDEN: the installer needs ONE reboot before the kiosk (exit code 3010): the golden is not finished, do NOT seal or publish.' -ForegroundColor Yellow
         Write-Host "  Reboot the master now (the kiosk is not on yet), sign in as $adminUser, run the same command again: it offers kiosk-on." -ForegroundColor Yellow
     } elseif ($installCode -ne 0) {
         Write-Host "GOLDEN: exit code $installCode (FAIL lines or stopped, see above): do NOT run seal-golden or publish." -ForegroundColor Red
         Write-Host '  Fix them, or roll back first (shell-uninstall in this master session, or Claude rolls the zvol back to the pre-shell snapshot).' -ForegroundColor Red
+        if ($ranScript -eq 'shell-upgrade') {
+            $backText = '  Upgrade: no downgrade by the installer; the way back: the zvol snapshot before this session.'
+            Write-Host $backText -ForegroundColor Red
+        }
         if ($kioskOn) { Write-Host '  The kiosk is on: do NOT reboot the master (the next boot logs on to the player kiosk).' -ForegroundColor Red }
     } else {
         Write-Host 'GOLDEN: ClubShell is installed, but the kiosk is NOT on: the golden is not finished, do NOT publish.' -ForegroundColor Yellow

@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-    Состояние агента ClubShell на этом ПК: служба, адрес сервера, ответ сервера, последние строки журнала агента.
+    Состояние агента ClubShell на этом ПК: служба, версия ClubShell и автовход (Winlogon), адрес сервера, ответ сервера,
+    последние строки журнала агента.
 .DESCRIPTION
     Только читает, ничего не меняет, ключ ПК не показывает. Результат — на экран и в
     C:\ClubShellKit\logs\agent-diag-<ПК>-<время>.txt (флешки после установки шелла на ПК не читаются).
@@ -13,6 +14,13 @@ New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null
     "== $env:COMPUTERNAME $(Get-Date -Format s)"
     '== service'
     Get-Service ClubShellAgent -ErrorAction SilentlyContinue | Format-Table Name, Status, StartType -AutoSize | Out-String
+    # Версию пишет MSI; автовход в киоск пишет агент (1.0.20 — с ForceAutoLogon=1: после выхода сразу снова вход).
+    '== ClubShell version, auto-logon (never the password)'
+    $cs = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\ClubShell' -ErrorAction SilentlyContinue
+    'HKLM\SOFTWARE\ClubShell Version: ' + $cs.Version + ', KioskUser: ' + $cs.KioskUser
+    $wl = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -ErrorAction SilentlyContinue
+    'Winlogon AutoAdminLogon: ' + $wl.AutoAdminLogon + ', ForceAutoLogon: ' + $wl.ForceAutoLogon
+    'Winlogon DefaultUserName: ' + $wl.DefaultUserName
     '== agent.json (server part, never the key)'
     $j = $null
     try { $j = Get-Content -LiteralPath 'C:\ProgramData\ClubShell\agent.json' -Raw -ErrorAction Stop | ConvertFrom-Json } catch { 'agent.json: ' + $_.Exception.Message }

@@ -25,12 +25,21 @@
 #>
 [CmdletBinding()]
 param(
-    [string] $KioskUser = 'club',
+    [string] $KioskUser = '',
     [int] $WaitSeconds = 180,
     [string] $LogDir = (Join-Path $env:ProgramData 'ClubShell\logs'),
     [string] $AgentConfig = (Join-Path $env:ProgramData 'ClubShell\agent.json'),
     [switch] $NoReboot
 )
+
+# The kiosk this PC already has (SHELL_CHANGES 64): the name the installer stored, then agent.json; 'player' on a new PC.
+if (-not $KioskUser) {
+    try { $KioskUser = [string](Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\ClubShell' -Name KioskUser -ErrorAction Stop).KioskUser } catch { }
+}
+if (-not $KioskUser) {
+    try { $KioskUser = [string](Get-Content -LiteralPath $AgentConfig -Raw -ErrorAction Stop | ConvertFrom-Json).shell.kioskUser.name } catch { }
+}
+if (-not $KioskUser) { $KioskUser = 'player' }
 
 $ErrorActionPreference = 'Stop'
 $serviceName = 'ClubShellAgent'
@@ -64,6 +73,7 @@ function Disable-KioskAutoLogon {
     $winlogon = Get-ItemProperty -LiteralPath $winlogonKey
     if ($winlogon.AutoAdminLogon -eq '1' -and $winlogon.DefaultUserName -eq $KioskUser) {
         Set-RegistryValue $winlogonKey 'AutoAdminLogon' '0' 'String'
+        Remove-ItemProperty -LiteralPath $winlogonKey -Name 'ForceAutoLogon' -ErrorAction SilentlyContinue
         Write-Host 'Автовход выключен, чтобы клиент не попал на обычный рабочий стол Windows.' -ForegroundColor Red
     }
 }

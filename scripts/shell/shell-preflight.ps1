@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Проверка гибрида перед установкой ClubShell 1.0.18 (касса клуба Deagle). Только читает: ничего не меняет.
+    Проверка гибрида перед установкой ClubShell 1.0.20 (касса клуба Deagle). Только читает: ничего не меняет.
 .DESCRIPTION
     Запускать на гибриде (Windows на локальном SSD, имя PC-NN) под «Club», PowerShell от администратора:
     shell-preflight-run-as-admin.cmd — с флешки или из C:\ClubShellKit. shell-install.ps1 запускает эту проверку сам и
@@ -8,9 +8,11 @@
     Что проверяет:
       1. ПК: имя PC-NN и переименование не ждёт перезагрузки; системный диск локальный (бездисковый ПК — отказ: там
          шелл ставится в эталон в режиме мастера, отдельно); место на C:; ожидание перезагрузки; Smart App Control
-         (сборка 1.0.18 не подписана — он её заблокирует);
-      2. помощник бездиска: служба ClubDisklessHelper, exe в %ProgramFiles%\ClubDiskless, версия не ниже 1.6.0 (по
-         SHA256 exe: helper-build.json службы 1.8.0+ или таблица известных сборок); G: «Online Games» и H: «Offline
+         (сборка 1.0.20 не подписана — он её заблокирует);
+      2. помощник бездиска: служба ClubDisklessHelper, exe в %ProgramFiles%\ClubDiskless, версия не ниже 1.9.0 (по
+         SHA256 exe: helper-build.json службы 1.8.0+ или таблица известных сборок; старее — сначала update-helper-net:
+         с шеллом 1.0.20 старый помощник даёт готовность ПК только по догадке о корнях библиотек, а 1.6.0, у которого
+         канала нет, — ещё и ожидание сохранений по 60 с на каждый вход); G: «Online Games» и H: «Offline
          Games» по iSCSI; номер личных дисков (таргеты games-seat-NN, solo-seat-NN) = номер в имени Windows (ClubShell
          берёт номер ПК из имени Windows при первой регистрации); G:\Steam\steam.exe; право записи группы Users в папки
          игр (игрок в киоске — обычный пользователь, не администратор);
@@ -22,10 +24,12 @@
          сохранённым паролем Club (смена пароля их сломает);
       4. ClubShell ещё не стоит: нет службы ClubShellAgent, записей «ClubShell*» в «Программах» (бандл, MSI, в том
          числе старые пилотные сборки CI), HKLM\SOFTWARE\ClubShell, C:\ProgramData\ClubShell (остатки прошлой установки —
-         сначала shell-uninstall: заготовленный agent.json и старая регистрация мешают);
+         сначала shell-uninstall: заготовленный agent.json и старая регистрация мешают). Проверка — только для новой
+         установки: стоит служба — FAIL с подсказкой «обновление — команда get-shell-kit» (она предложит
+         shell-upgrade.ps1; agent.json, регистрация и ключ остаются), а не shell-uninstall;
       5. сеть и прочее: сервер ClubShell отвечает (GET /health), часы не расходятся с сервером, WebView2, DNS адаптеров
          (для сверки после установки), USBSTOR, брандмауэр для игр по локалке (install-lan-firewall.ps1), ClubMaxRefresh,
-         установщик ClubShellSetup-1.0.18.exe рядом (размер и SHA256).
+         установщик ClubShellSetup-1.0.20.exe рядом (размер и SHA256).
     Пустой ли пароль, проверяется входом с пустым паролем (LogonUser, сетевой вход): «пустые пароли запрещены» —
     пароль пустой, «неверный пароль» — пароль есть. Неверная попытка идёт в счётчик блокировки Windows (порог — 10 за
     10 минут): проверку не гонять десятки раз подряд.
@@ -55,25 +59,31 @@ $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 
 # Сверяемые значения — те же, что в shell-install.ps1 (менять вместе).
-# Помощник: exe службы ClubDisklessHelper и его версия не ниже 1.6.0. Версия — по SHA256 exe (Get-HelperVersion):
-# helper-build.json службы 1.8.0+ или таблица известных сборок ниже (SHA256 exe -> версия).
+# Помощник: exe службы ClubDisklessHelper и его версия не ниже 1.9.0. Версия — по SHA256 exe (Get-HelperVersion):
+# helper-build.json службы 1.8.0+ или таблица известных сборок ниже (SHA256 exe -> версия). 1.9.0 — для новой
+# установки 1.0.20: только его ping несёт диски и готовность (SHELL_CHANGES 86); со старым помощником шелл судит о
+# готовности ПК по корням библиотек вне C:, а у 1.6.0 (канала нет) первая игра после каждого входа ещё и ждёт
+# сохранения около 60 с (сброс после сеанса — до 160 с).
 $HelperExePath = Join-Path $env:ProgramFiles 'ClubDiskless\ClubDisklessHelper.exe'
 $HelperBuildFile = Join-Path $env:ProgramData 'ClubDiskless\helper-build.json'
-$HelperMinVersion = [version]'1.6.0'
+$HelperMinVersion = [version]'1.9.0'
 $HelperBuilds = @{
     '26635a5f7aab4d77441d0b0138064b9c7f64bb1daf4b0bcaf09052439ddd0148' = '1.6.0'   # 1.6.0+13609a5
     '41da96a0b0721b22bb5f5e1898c927f08c4856968ee059a0c40b3d2b54a30e23' = '1.7.0'   # 1.7.0+f79e0d5
     '05a73a8f0cb1717040c7f64fe1c94104fbdf501b9b196f90659c56d0c33b31e1' = '1.8.0'   # 1.8.0+e77f0ad
+    '1af4465530dd2d17fa287f9d90f11f0250262940193d1dfc88931e66e4c9ac56' = '1.9.0'   # 1.9.0+184aabf
 }
-$SetupName = 'ClubShellSetup-1.0.18.exe'
-$SetupSize = 75490102
-$SetupSha256 = '1D23DEE18E17BE03A19801CD2D7CD1F8C8FDE7B8D4E83A2B5BA6785EAF46A1CF'   # SHA256SUMS.txt релиза v1.0.18
+$SetupName = 'ClubShellSetup-1.0.20.exe'
+$SetupSize = 75550872
+$SetupSha256 = '0AC2A30BB47EFE3E00D3E4FF3907520CB21B88E2711ECD3D90BB428D0C4C0B94'   # SHA256SUMS.txt релиза v1.0.20
 $UpdateHelperCmd = 'irm http://192.168.1.201:5080/pxe/v1/files/tools/update-helper-net.ps1 | iex'
+$GetKitCmd = 'irm http://192.168.1.201:5080/pxe/v1/files/tools/get-shell-kit.ps1 | iex'
 $LanFirewallCmd = 'irm http://192.168.1.201:5080/pxe/v1/files/tools/install-lan-firewall.ps1 | iex'
 $LocalBusTypes = @('NVMe', 'SATA', 'SAS', 'RAID', 'ATA', 'SCSI')
 # BusType бывает числом (MSFT_Disk): 1 SCSI, 3 ATA, 7 USB, 8 RAID, 9 iSCSI, 10 SAS, 11 SATA, 14 Virtual, 17 NVMe.
 $BusTypeNames = @{ '1' = 'SCSI'; '3' = 'ATA'; '7' = 'USB'; '8' = 'RAID'; '9' = 'iSCSI'; '10' = 'SAS'; '11' = 'SATA'; '14' = 'Virtual'; '17' = 'NVMe' }
-# Группы, членов которых агент не берёт в киоск (LocalUserManager.PrivilegedGroupSids в 1.0.18): Administrators, Account,
+# Группы, членов которых агент не берёт в киоск (LocalUserManager.PrivilegedGroupSids; в 1.0.20 тот же список, что в
+# 1.0.18): Administrators, Account,
 # Server, Print, Backup Operators, Power Users, Network Configuration Operators, Hyper-V Administrators.
 $PrivilegedGroupSids = @('S-1-5-32-544', 'S-1-5-32-548', 'S-1-5-32-549', 'S-1-5-32-550', 'S-1-5-32-551', 'S-1-5-32-547', 'S-1-5-32-556', 'S-1-5-32-578')
 $WinlogonKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
@@ -283,7 +293,7 @@ if (Get-Process -Name msiexec -ErrorAction SilentlyContinue | Where-Object { $_.
 
 # Smart App Control: 1 — включён (не даст запустить неподписанные ClubShellAgent.exe и clubshell-shell.exe), 2 — оценка.
 $sac = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' 'VerifiedAndReputablePolicyState'
-if ($sac -eq 1) { Write-Fail 'Smart App Control is ON: the unsigned ClubShell 1.0.18 would be blocked' 'Windows Security -> App & browser control -> Smart App Control -> Off' }
+if ($sac -eq 1) { Write-Fail 'Smart App Control is ON: the unsigned ClubShell 1.0.20 would be blocked' 'Windows Security -> App & browser control -> Smart App Control -> Off' }
 elseif ($sac -eq 2) { Write-Warn 'Smart App Control is in evaluation mode: it may switch on and block the unsigned ClubShell' 'Windows Security -> App & browser control -> Smart App Control -> Off' }
 else { Write-Pass 'Smart App Control is off' }
 
@@ -326,7 +336,9 @@ if (-not $helper) {
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $helperExe).Hash
         $helperVersion = Get-HelperVersion $hash
         if (-not $helperVersion) { Write-Fail "unknown helper build: SHA256 $hash ($helperExe)" $UpdateHelperCmd }
-        elseif ([version]$helperVersion -lt $HelperMinVersion) { Write-Fail "helper $helperVersion is older than $HelperMinVersion ($helperExe)" $UpdateHelperCmd }
+        elseif ([version]$helperVersion -lt $HelperMinVersion) {
+            Write-Fail "helper $helperVersion is older than $HelperMinVersion ($helperExe): ClubShell 1.0.20 asks the helper whether G:/H: are ready before sign-in" "update the helper first: $UpdateHelperCmd, then run this check again"
+        }
         else { Write-Pass "helper exe is $helperVersion ($helperExe)" }
     } else {
         Write-Fail "helper exe not found: $helperExe" $UpdateHelperCmd
@@ -481,31 +493,40 @@ Write-Info "auto-logon now: AutoAdminLogon=$autoLogon, DefaultUserName=$defaultU
 # ======================================================================================================================
 Write-Title 'ClubShell must not be installed yet'
 $found = $false
-if (Get-Service -Name ClubShellAgent -ErrorAction SilentlyContinue) {
+# Проверка — только для новой установки. ClubShell стоит (есть служба) — новая версия ставится обновлением: команда
+# get-shell-kit предлагает shell-upgrade.ps1 (agent.json, регистрация, ключ и запись в кассе остаются), а не
+# shell-uninstall. Без службы — остатки прошлой установки: сначала shell-uninstall.
+$installedNow = [bool](Get-Service -Name ClubShellAgent -ErrorAction SilentlyContinue)
+$UpgradeFix = "ClubShell is installed: to update it run the get-shell-kit command ($GetKitCmd), it offers the upgrade"
+function Get-LeftoverFix([string]$UninstallFix) {
+    if ($installedNow) { return 'part of the installed ClubShell: update it with get-shell-kit (above), not shell-install' }
+    $UninstallFix
+}
+if ($installedNow) {
     $found = $true
-    Write-Fail 'service ClubShellAgent exists' 'run shell-uninstall-run-as-admin.cmd first'
+    Write-Fail 'service ClubShellAgent exists' $UpgradeFix
 }
 foreach ($entry in Get-ClubShellEntries) {
     $found = $true
     $kind = if ($entry.QuietUninstallString -or $entry.BundleUpgradeCode) { 'bundle' } elseif ($entry.WindowsInstaller -eq 1) { "MSI $($entry.PSChildName)" } else { 'other' }
-    Write-Fail ("installed: {0} {1} ({2}, {3})" -f $entry.DisplayName, $entry.DisplayVersion, $kind, $entry.Publisher) 'run shell-uninstall-run-as-admin.cmd first (it also removes MSI-only pilot builds)'
+    Write-Fail ("installed: {0} {1} ({2}, {3})" -f $entry.DisplayName, $entry.DisplayVersion, $kind, $entry.Publisher) (Get-LeftoverFix 'run shell-uninstall-run-as-admin.cmd first (it also removes MSI-only pilot builds)')
 }
 if (Test-Path -LiteralPath 'HKLM:\SOFTWARE\ClubShell') {
     $found = $true
-    Write-Fail ("HKLM\SOFTWARE\ClubShell exists (version {0}, kiosk {1})" -f (Get-RegValue 'HKLM:\SOFTWARE\ClubShell' 'Version'), (Get-RegValue 'HKLM:\SOFTWARE\ClubShell' 'KioskUser')) 'run shell-uninstall-run-as-admin.cmd first'
+    Write-Fail ("HKLM\SOFTWARE\ClubShell exists (version {0}, kiosk {1})" -f (Get-RegValue 'HKLM:\SOFTWARE\ClubShell' 'Version'), (Get-RegValue 'HKLM:\SOFTWARE\ClubShell' 'KioskUser')) (Get-LeftoverFix 'run shell-uninstall-run-as-admin.cmd first')
 }
 $dataDir = Join-Path $env:ProgramData 'ClubShell'
 if (Test-Path -LiteralPath $dataDir) {
     $found = $true
     if (@(Get-ChildItem -LiteralPath $dataDir -Force -ErrorAction SilentlyContinue).Count -gt 0) {
-        Write-Fail "$dataDir has files of an earlier install (settings, registration)" 'shell-uninstall-run-as-admin.cmd and answer "y" to removing ClubShell data'
+        Write-Fail "$dataDir has files of an earlier install (settings, registration)" (Get-LeftoverFix 'shell-uninstall-run-as-admin.cmd and answer "y" to removing ClubShell data')
     } else {
         Write-Warn "$dataDir exists (empty)" "Remove-Item '$dataDir'"
     }
 }
 if (Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'ClubShell')) {
     $found = $true
-    Write-Warn "$env:ProgramFiles\ClubShell exists (leftovers)" 'shell-uninstall-run-as-admin.cmd'
+    Write-Warn "$env:ProgramFiles\ClubShell exists (leftovers)" (Get-LeftoverFix 'shell-uninstall-run-as-admin.cmd')
 }
 if (Get-ScheduledTask -TaskPath '\ClubShell\' -ErrorAction SilentlyContinue) {
     $found = $true
@@ -533,12 +554,12 @@ try {
 }
 
 $webView = Get-RegValue 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' 'pv'
-# Свой загрузчик WebView2 у бандла 1.0.18 падает (0x80091007): shell-install ставит WebView2 заранее install-webview2.ps1
-# из набора — тогда это не WARN.
+# Свой загрузчик WebView2 у бандла падает (0x80091007; хэш загрузчика в 1.0.20 тот же, что в 1.0.18): shell-install
+# ставит WebView2 заранее install-webview2.ps1 из набора — тогда это не WARN.
 $webViewScripts = @($KitDir, $here) | Where-Object { $_ } | ForEach-Object { Join-Path $_ 'install-webview2.ps1' } | Where-Object { Test-Path -LiteralPath $_ }
 if ($webView -and $webView -ne '0.0.0.0') { Write-Pass "WebView2 runtime $webView" }
 elseif ($webViewScripts) { Write-Info 'WebView2 runtime not registered: shell-install installs it first (install-webview2.ps1, needs internet)' }
-else { Write-Warn 'WebView2 runtime not registered and install-webview2.ps1 is not in the kit: the 1.0.18 setup fails with 0x80091007' 'put the whole kit into C:\ClubShellKit (get-shell-kit), shell-install installs WebView2 first' }
+else { Write-Warn 'WebView2 runtime not registered and install-webview2.ps1 is not in the kit: the 1.0.20 setup fails with 0x80091007' 'put the whole kit into C:\ClubShellKit (get-shell-kit), shell-install installs WebView2 first' }
 
 # DNS: политика кассы с пустым dnsServers адаптеры не трогает; shell-install сверит этот список после установки.
 Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.ServerAddresses } | ForEach-Object {
@@ -569,16 +590,17 @@ foreach ($dir in @($KitDir, $here, (Join-Path $env:USERPROFILE 'Downloads'))) {
 if (-not $setupFound) {
     Write-Warn "$SetupName not found in $KitDir, next to this script or in Downloads" 'put it into the kit folder (shell-install can also download it from GitHub)'
 } elseif ((Get-Item -LiteralPath $setupFound).Length -eq $SetupSize -and (Get-FileHash -Algorithm SHA256 -LiteralPath $setupFound).Hash -eq $SetupSha256) {
-    Write-Pass "installer ${setupFound}: size and SHA256 of release v1.0.18"
+    Write-Pass "installer ${setupFound}: size and SHA256 of release v1.0.20"
 } else {
-    Write-Fail "installer $setupFound is not the official v1.0.18 file (size or SHA256 differ)" 'download ClubShellSetup-1.0.18.exe again from the v1.0.18 release'
+    Write-Fail "installer $setupFound is not the official v1.0.20 file (size or SHA256 differ)" 'download ClubShellSetup-1.0.20.exe again from the v1.0.20 release'
 }
 
 # ======================================================================================================================
 Write-Host ''
 $color = if ($Count.Fail -gt 0) { 'Red' } elseif ($Count.Warn -gt 0) { 'Yellow' } else { 'Green' }
 Write-Host ("Result for {0}: {1} FAIL, {2} WARN" -f $env:COMPUTERNAME, $Count.Fail, $Count.Warn) -ForegroundColor $color
-if ($Count.Fail -gt 0) { Write-Host 'Fix every FAIL before installing ClubShell (docs/shell-install.md).' -ForegroundColor Red }
+if ($installedNow) { Write-Host "ClubShell is already installed: this check is for a new install. To update it: $GetKitCmd (it offers the upgrade)." -ForegroundColor Red }
+elseif ($Count.Fail -gt 0) { Write-Host 'Fix every FAIL before installing ClubShell (docs/shell-install.md).' -ForegroundColor Red }
 $code = if ($Count.Fail -gt 0) { 2 } elseif ($Count.Warn -gt 0) { 1 } else { 0 }
 # exit только при запуске файлом: в irm | iex он закрыл бы окно PowerShell.
 if ($PSCommandPath) { exit $code }

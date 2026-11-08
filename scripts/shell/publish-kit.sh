@@ -2,16 +2,18 @@
 # Выкладывает набор шелла ClubShell на сервер клуба (VM 192.168.1.201), откуда его берёт get-shell-kit.ps1:
 #   http://192.168.1.201:5080/pxe/v1/files/tools/shell-kit/<имя>  = /srv/club/pxe/tools/shell-kit/<имя>
 #     все scripts/shell/*.ps1 и *.cmd, кроме get-shell-kit.ps1, + scripts/golden/seal-golden.ps1 (последний шаг мастера
-#     эталона с шеллом: USB там уже выключен, флешка не прочитается) + ClubShellSetup-1.0.18.exe + SHA256SUMS (формат
+#     эталона с шеллом: USB там уже выключен, флешка не прочитается) + ClubShellSetup-1.0.20.exe + SHA256SUMS (формат
 #     sha256sum, только имена файлов — get-shell-kit их так и проверяет);
 #   http://192.168.1.201:5080/pxe/v1/files/tools/<имя>             = /srv/club/pxe/tools/<имя>
 #     get-shell-kit.ps1 (сама команда irm | iex), seal-default-profile.ps1 и disable-autoplay.ps1 (их -Undo и запуск
 #     по сети — в шапках и в shell-uninstall).
 # Запуск на машине разработки (не на VM): scripts/shell/publish-kit.sh. Повторный запуск безопасен — файлы заменяются.
+# Старые файлы на VM не удаляются: прежний ClubShellSetup-1.0.18.exe остаётся в shell-kit, но не в SHA256SUMS, и
+# get-shell-kit его не скачивает.
 # .ps1 и .cmd в выкладке — с CRLF (в репозитории концы строк разные; cmd.exe с LF ломается на метках). Копия в
 # репозитории не меняется; enable-kiosk-autologon.ps1 (BOM, CRLF) выходит байт в байт как у разработчика шелла,
 # seal-golden.ps1 (BOM, CRLF) — байт в байт как в scripts/golden.
-# Установщик сверяется с SHA256 релиза v1.0.18 до загрузки. Загрузка — во временную папку на VM, установка — sudo -n
+# Установщик сверяется с SHA256 релиза v1.0.20 до загрузки. Загрузка — во временную папку на VM, установка — sudo -n
 # (root:root, файлы 0644, папка 0755: сервер клуба читает их от своего пользователя), SHA256SUMS — последним, чтобы
 # get-shell-kit не увидел список раньше файлов. В конце sha256sum установленных файлов на VM сверяется с локальным
 # списком, а SHA256SUMS — ещё и по HTTP; любое расхождение — ошибка.
@@ -19,8 +21,8 @@ set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 GOLDEN=$(cd "$HERE/../golden" && pwd)
-SETUP_EXE=${SETUP_EXE:-/home/deep/club-dl/clubshell-1.0.18/ClubShellSetup-1.0.18.exe}
-SETUP_SHA256=1d23dee18e17be03a19801cd2d7cd1f8c8fde7b8d4e83a2b5ba6785eaf46a1cf
+SETUP_EXE=${SETUP_EXE:-/home/deep/club-dl/clubshell-1.0.20/ClubShellSetup-1.0.20.exe}
+SETUP_SHA256=0ac2a30bb47efe3e00d3e4ff3907520cb21b88e2711ecd3d90bb428d0c4c0b94
 VM=clubadmin@192.168.1.201
 SSH_OPTS=(-i "$HOME/.ssh/club_stand" -o BatchMode=yes -o "UserKnownHostsFile=$HOME/.ssh/known_hosts_club")
 REMOTE_TOOLS=/srv/club/pxe/tools
@@ -38,7 +40,7 @@ mkdir "$stage/kit" "$stage/tools"
 # --- установщик --------------------------------------------------------------------------------------------------------
 [ -f "$SETUP_EXE" ] || die "нет $SETUP_EXE"
 got=$(sha256sum "$SETUP_EXE" | cut -d' ' -f1)
-[ "$got" = "$SETUP_SHA256" ] || die "$SETUP_EXE: SHA256 $got, у релиза v1.0.18 — $SETUP_SHA256"
+[ "$got" = "$SETUP_SHA256" ] || die "$SETUP_EXE: SHA256 $got, у релиза v1.0.20 — $SETUP_SHA256"
 cp "$SETUP_EXE" "$stage/kit/"
 
 # --- скрипты набора ----------------------------------------------------------------------------------------------------
@@ -57,7 +59,8 @@ for name in "${TOOLS_FILES[@]}"; do
   [ -f "$HERE/$name" ] || die "нет $HERE/$name"
   cp "$HERE/$name" "$stage/tools/$name"
 done
-for name in shell-install.ps1 shell-preflight.ps1 kiosk-on.ps1 enable-kiosk-autologon.ps1 seal-default-profile.ps1 disable-autoplay.ps1 install-webview2.ps1 seal-golden.ps1; do
+for name in shell-install.ps1 shell-preflight.ps1 shell-upgrade.ps1 shell-upgrade-run-as-admin.cmd kiosk-on.ps1 \
+  enable-kiosk-autologon.ps1 seal-default-profile.ps1 disable-autoplay.ps1 install-webview2.ps1 seal-golden.ps1; do
   [ -f "$stage/kit/$name" ] || die "в наборе нет $name"
 done
 

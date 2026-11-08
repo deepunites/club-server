@@ -27,11 +27,12 @@
       4. seal-default-profile.ps1 — шелл ClubShell в шаблоне C:\Users\Default. ДО создания профиля player: и первый
          профиль киоска, и каждый пересозданный после сброса сразу стартуют с шеллом, а не с explorer;
       5. enable-kiosk-autologon.ps1 -KioskUser player -NoReboot — скрипт разработчика шелла (club-shell
-         tools/scripts, копия без правок, вывод по-русски; по умолчанию у него киоск «club» = наш Club, поэтому
-         -KioskUser всегда передаётся): создаёт профиль player (CreateProfile), убирает то, что мешает автовходу,
-         перезапускает агента и ждёт в его журнале «Policy section shellReplacement applied» — шелл в профиль и автовход
-         пишет сам агент (без профиля он падал: PC-01);
-      6. проверяет Winlogon: AutoAdminLogon=1, DefaultUserName=player;
+         tools/scripts v1.0.20, копия без правок, вывод по-русски; -KioskUser передаётся всегда: у копии 1.0.18 по
+         умолчанию был киоск «club» = наш Club, 1.0.20 берёт его из HKLM\SOFTWARE\ClubShell\KioskUser): создаёт профиль
+         player (CreateProfile), убирает то, что мешает автовходу, перезапускает агента и ждёт в его журнале «Policy
+         section shellReplacement applied» — шелл в профиль и автовход пишет сам агент (без профиля он падал: PC-01);
+      6. проверяет Winlogon: AutoAdminLogon=1, DefaultUserName=player; ForceAutoLogon=1 (агент 1.0.20 пишет его вместе с
+         автовходом: после выхода игрока Windows сразу снова входит в киоск; нет при агенте 1.0.20+ — WARN);
       7. без -NoReboot спрашивает, перезагрузить ли ПК в киоск (по умолчанию да).
     Шаги 3-5 — отдельные powershell -File; ошибка шага — стоп с подсказкой, следующие шаги не выполняются. Повторный
     запуск безопасен: все три скрипта повторяемы (enable-kiosk-autologon после включённого киоска только перезапускает
@@ -340,6 +341,18 @@ try {
         Write-Pass "auto-logon goes to '$KioskUser' (AutoAdminLogon=1): the kiosk starts at the next boot"
     } else {
         throw "Auto-logon is AutoAdminLogon=$autoLogon, DefaultUserName=${defaultUser}: not '$KioskUser'. Take a photo of this window, run $DiagCmd and send both photos."
+    }
+    # Агент 1.0.20+ пишет вместе с автовходом ForceAutoLogon=1: после любого выхода (конец сеанса) Windows сразу снова
+    # входит в киоск. Без него ПК после выхода игрока стоит на экране входа. Агент старше 1.0.20 его не пишет.
+    $forceAutoLogon = Get-RegValue $WinlogonKey 'ForceAutoLogon'
+    $agentVersionText = "$(Get-RegValue 'HKLM:\SOFTWARE\ClubShell' 'Version')"
+    $agentVersion = if ($agentVersionText -match '^(\d+\.\d+\.\d+)') { [version]$Matches[1] } else { $null }
+    if ("$forceAutoLogon" -eq '1') { Write-Pass 'ForceAutoLogon=1: after a sign-out Windows logs on to the kiosk again at once' }
+    elseif ($agentVersion -and $agentVersion -ge [version]'1.0.20') {
+        Write-Note "ForceAutoLogon is not 1 (now '$forceAutoLogon', ClubShell $agentVersionText): the kiosk will not log on again after a sign-out"
+        Write-Info "fix: Restart-Service ClubShellAgent (it writes the value with the auto-logon), wait a minute, run $SelfCmd again; still missing: run $DiagCmd and send a photo"
+    } else {
+        Write-Info "ForceAutoLogon=$forceAutoLogon (ClubShell '$agentVersionText' does not write it; 1.0.20 does)"
     }
     Write-Info "Admin desktop later: hold Shift while Windows starts, until the sign-in screen -> $AdminUser -> password."
     $kioskOn = $true
