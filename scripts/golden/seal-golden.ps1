@@ -38,15 +38,16 @@
         key»): ключ — в agent.json, но с правами только SYSTEM и Administrators, secure\club.key удаляется; агент места
         при первом старте сам спрячет ключ в свой club.key;
       - pcId, pcName и zone убираются из agent.json (prepare-image их оставляет);
-      - есть cache\profile-reset-reboot.txt (агент 1.0.20) — стоп: prepare-image его оставляет (SHELL_CHANGES 89), а
-        места унаследовали бы «перезагрузка ради долга сброса профиля уже была»;
+      - cache\profile-reset-reboot.txt и cache\kiosk-logon-reboot.txt (агент 1.0.20, метки перезагрузок этого ПК)
+        удаляются, как у prepare-image с 1.0.21 (16948da, SHELL_CHANGES 89): иначе места унаследовали бы «перезагрузка
+        ради долга сброса профиля уже была» и 15 минут после перезагрузки мастера при потерянном автовходе;
       - USBSTOR Start — по политике кассы в кэше (policies.json, usb.allowStorage: false — 4, true — 3), а не 3, как у
         prepare-image: у клона окно до агента бывает только при первой загрузке (дальше 4 остаётся на диске), а у мест
         C: сбрасывается при каждой загрузке — со Start=3 USB-диск, вставленный до загрузки, подключался бы раньше
         агента на каждом сеансе (агент извлекает только съёмные тома, USB HDD/SSD — «несъёмные»). Запрет HID из
         политики снимается, как у prepare-image: клавиатура и мышь места ставятся при каждой загрузке.
     Порядок: сначала проверки без изменений — имя USER, версия 1.0.20, помощник 1.9.0 или новее, player не вошёл,
-    нет profile-dirty.marker и profile-reset-reboot.txt, оболочка на мастере не запускалась, мастер одобрен в кассе,
+    нет profile-dirty.marker, оболочка на мастере не запускалась, мастер одобрен в кассе,
     ключ ПК на месте. Любой WARN здесь — стоп: ничего не изменено, ПК не выключается. Потом очистка помощника (как
     раньше) и ClubShell и проверки эталона с шеллом: agent.json (поля
     shell-install.ps1), admin-pin, ключ обновлений, политика кассы в кэше, учётка player и её профиль, оболочка в
@@ -123,10 +124,12 @@ $AgentJson = Join-Path $ShellData 'agent.json'
 $ClubKeyFile = Join-Path $ShellData 'secure\club.key'
 $KeyEntropy = 'ClubShell.Agent.tokens.v1'   # DPAPI LocalMachine агента (TokenStore), как в prepare-image.ps1
 $KeyPattern = '^[A-Za-z0-9._-]{8,128}$'
-# Списки prepare-image.ps1 v1.0.20 (строки 110-114, 128, 135), без secure\club.key. Новая версия ClubShell — сначала
-# сверить с её prepare-image.ps1.
+# Списки prepare-image.ps1 v1.0.20 (строки 110-114, 128, 135), без secure\club.key, плюс метки перезагрузок агента
+# 1.0.20 (profile-reset-reboot.txt, kiosk-logon-reboot.txt), как в prepare-image с 1.0.21 (16948da, SHELL_CHANGES 89).
+# Новая версия ClubShell — сначала сверить с её prepare-image.ps1.
 $ShellStateFiles = @('agent-identity.json', 'secure\agent.tokens', 'secure\hwid.fallback', 'secure\shell.token', 'secure\kiosk.cred',
-    'cache\offline.db', 'cache\offline.db-wal', 'cache\offline.db-shm', 'crash-history.json', 'cache\power-acks.json')
+    'cache\offline.db', 'cache\offline.db-wal', 'cache\offline.db-shm', 'crash-history.json', 'cache\power-acks.json',
+    'cache\profile-reset-reboot.txt', 'cache\kiosk-logon-reboot.txt')
 $ShellEmptyDirs = @('pending-update', 'cache\updates', 'cache\saves', 'cache\player-settings', 'cache\profile-keep', 'logs')
 $ShellHiveKeys = [ordered]@{ Winlogon = 'Software\Microsoft\Windows NT\CurrentVersion\Winlogon'; Policies = 'Software\Microsoft\Windows\CurrentVersion\Policies\System' }
 $WinlogonKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
@@ -471,14 +474,12 @@ if ($shellSvc) {
         Write-Warn 'есть cache\profile-dirty.marker: на мастере шёл сеанс игрока, профиль player ещё не сброшен' 'Start-Service ClubShellAgent; подождать, пока агент сбросит профиль player и файл исчезнет; снова этот скрипт'
     }
     # profile-reset-reboot.txt (агент 1.0.20): профиль player на мастере дважды подряд не удалился, и агент уже
-    # перезагружал ПК ради этого долга. prepare-image v1.0.20 файл оставляет (SHELL_CHANGES 89); в образе каждое место
-    # считало бы свою единственную перезагрузку ради долга уже потраченной. Агент удаляет файл сам, когда профиль
-    # удалится.
+    # перезагружал ПК ради этого долга. Не стоп: файл удаляется при очистке ($ShellStateFiles), как у prepare-image с
+    # 1.0.21 (16948da, SHELL_CHANGES 89). Журналы агента эта же очистка удалит: строка говорит, как их сохранить.
     if (Test-Path -LiteralPath (Join-Path $ShellData 'cache\profile-reset-reboot.txt')) {
-        Write-Warn ('есть cache\profile-reset-reboot.txt: профиль player на мастере дважды подряд не удалился, ' +
-            'агент уже перезагружал ПК ради этого') ("разобраться со сбросом профиля player на мастере: журнал " +
-            "агента ($ShellData\logs, «not fully deleted»), что держит профиль; когда профиль удалится, агент удалит " +
-            'и файл; потом снова этот скрипт')
+        Write-Line ('есть cache\profile-reset-reboot.txt: профиль player на мастере дважды подряд не удалился; файл ' +
+            "удаляется при очистке. Причина — в журнале агента ($ShellData\logs, «not fully deleted»), но эта очистка " +
+            'удалит и журналы: чтобы разобраться, сейчас Ctrl+C и скопировать папку logs, потом снова этот скрипт')
     }
     # Данные WebView2 оболочки (Tauri: %LOCALAPPDATA%\<identifier>) — признак, что в киоск на мастере входили.
     $playerDir = if ($playerProfile -and $playerProfile.LocalPath) { "$($playerProfile.LocalPath)" } else { "C:\Users\$KioskUser" }

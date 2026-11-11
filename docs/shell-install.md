@@ -416,7 +416,7 @@ irm http://192.168.1.201:5080/pxe/v1/files/tools/get-shell-kit.ps1 | iex
 
 Что делает `seal-golden.ps1` с ClubShell (подробно — в его шапке): сначала проверки без изменений (имя `USER`, версия
 1.0.20 (старше — обновить через `get-shell-kit`), помощник 1.9.0 или новее, `player` не входил и оболочка на мастере не
-запускалась, нет `profile-dirty.marker` и `profile-reset-reboot.txt`, мастер одобрен, ключ ПК в `secure\club.key`
+запускалась, нет `profile-dirty.marker`, мастер одобрен, ключ ПК в `secure\club.key`
 расшифровывается) — любой WARN: ничего не изменено, служба помощника не остановлена. Потом очистка как у
 `prepare-image.ps1` из club-shell v1.0.20 (сам `prepare-image.ps1` не нужен; из `cache` — `*.json` и
 `profile-reset.marker`), но ключ ПК **остаётся** в `secure\club.key` (эталон без sysprep — ключи DPAPI машины у мест те
@@ -508,8 +508,9 @@ SYSTEM и администраторов, `club.key` удаляется) и пу
 - HWID: при сбое WMI на загрузке в HWID попадает iSCSI-диск → лишний ожидающий ПК (п. 48).
 - `secure\club.key` из эталона на местах — по общему ключу DPAPI машины (нет sysprep), как `credentials.bin` помощника;
   на ClubShell не проверено до п. 8. Разработчику: перенос ключа в `agent.json` в `prepare-image.ps1` нам не нужен.
-- `prepare-image.ps1` оставляет `pcId` мастера в `agent.json`, а с 1.0.20 — и `cache\profile-reset-reboot.txt`,
-  `cache\kiosk-logon-reboot.txt` (п. 89; на первом `seal-golden` останавливается) — у нас `seal-golden.ps1` вместо него.
+- `prepare-image.ps1` оставляет `pcId` мастера в `agent.json` — у нас `seal-golden.ps1` вместо него. Метки перезагрузок
+  агента 1.0.20 `cache\profile-reset-reboot.txt` и `cache\kiosk-logon-reboot.txt` (п. 89) `prepare-image` удаляет с
+  1.0.21 (`16948da`); `seal-golden.ps1` удаляет их так же (2026-11-11).
   Стоп на `profile-dirty.marker` (п. 50) с 1.0.19 есть и у него.
 - Номер мест не из имени (`USER`): MachineFeed (п. 22) не сделан — номера вручную.
 - Сохранения офлайн-игр H: пропадают при перезагрузке (п. 75); каталог на ПК без H: (п. 74).
